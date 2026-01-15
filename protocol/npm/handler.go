@@ -265,7 +265,7 @@ func (h *Handler) abbreviateMetadata(meta map[string]interface{}) map[string]int
 			}
 
 			// Include only essential fields
-			for _, field := range []string{"dependencies", "devDependencies", "peerDependencies", "optionalDependencies", "engines", "dist", "_hasShrinkwrap"} {
+			for _, field := range []string{"bin", "dependencies", "devDependencies", "peerDependencies", "optionalDependencies", "engines", "dist", "_hasShrinkwrap"} {
 				if val, ok := version[field]; ok {
 					abbrevVer[field] = val
 				}

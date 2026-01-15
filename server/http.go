@@ -12,6 +12,7 @@ import (
 	"github.com/wolfeidau/content-cache/expiry"
 	"github.com/wolfeidau/content-cache/protocol/goproxy"
 	"github.com/wolfeidau/content-cache/protocol/npm"
+	"github.com/wolfeidau/content-cache/protocol/oci"
 	"github.com/wolfeidau/content-cache/store"
 )
 
@@ -28,6 +29,19 @@ type Config struct {
 
 	// UpstreamNPMRegistry is the upstream NPM registry URL
 	UpstreamNPMRegistry string
+
+	// UpstreamOCIRegistry is the upstream OCI registry URL
+	UpstreamOCIRegistry string
+
+	// OCIUsername for registry authentication (optional)
+	OCIUsername string
+
+	// OCIPassword for registry authentication (optional)
+	OCIPassword string
+
+	// OCITagTTL is how long to cache tag->digest mappings.
+	// Default: 5 minutes (tags can change, unlike digests)
+	OCITagTTL time.Duration
 
 	// CacheTTL is the time-to-live for cached content.
 	// Content not accessed within this duration is expired.
@@ -60,6 +74,8 @@ type Server struct {
 	goproxy      *goproxy.Handler
 	npmIndex     *npm.Index
 	npm          *npm.Handler
+	ociIndex     *oci.Index
+	oci          *oci.Handler
 	metadata     *expiry.MetadataStore
 	expiryMgr    *expiry.Manager
 }
@@ -130,6 +146,25 @@ func New(cfg Config) (*Server, error) {
 		npm.WithLogger(cfg.Logger.With("component", "npm")),
 	)
 
+	// Initialize OCI components
+	ociIndex := oci.NewIndex(fsBackend)
+	ociUpstreamOpts := []oci.UpstreamOption{}
+	if cfg.UpstreamOCIRegistry != "" {
+		ociUpstreamOpts = append(ociUpstreamOpts, oci.WithRegistryURL(cfg.UpstreamOCIRegistry))
+	}
+	if cfg.OCIUsername != "" && cfg.OCIPassword != "" {
+		ociUpstreamOpts = append(ociUpstreamOpts, oci.WithBasicAuth(cfg.OCIUsername, cfg.OCIPassword))
+	}
+	ociUpstream := oci.NewUpstream(ociUpstreamOpts...)
+	ociHandlerOpts := []oci.HandlerOption{
+		oci.WithUpstream(ociUpstream),
+		oci.WithLogger(cfg.Logger.With("component", "oci")),
+	}
+	if cfg.OCITagTTL > 0 {
+		ociHandlerOpts = append(ociHandlerOpts, oci.WithTagTTL(cfg.OCITagTTL))
+	}
+	ociHandler := oci.NewHandler(ociIndex, cafsStore, ociHandlerOpts...)
+
 	s := &Server{
 		config:    cfg,
 		logger:    cfg.Logger,
@@ -139,6 +174,8 @@ func New(cfg Config) (*Server, error) {
 		goproxy:   goHandler,
 		npmIndex:  npmIndex,
 		npm:       npmHandler,
+		ociIndex:  ociIndex,
+		oci:       ociHandler,
 		metadata:  metadataStore,
 		expiryMgr: expiryMgr,
 	}
@@ -170,6 +207,11 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// The npm handler handles all paths under /npm/
 	mux.Handle("GET /npm/", http.StripPrefix("/npm", s.npm))
 	mux.Handle("HEAD /npm/", http.StripPrefix("/npm", s.npm))
+
+	// OCI registry endpoints
+	// The OCI handler handles all paths under /v2/
+	mux.Handle("GET /v2/", s.oci)
+	mux.Handle("HEAD /v2/", s.oci)
 
 	// GOPROXY endpoints
 	// The goproxy handler handles all paths under /goproxy/

@@ -28,6 +28,10 @@ func run() error {
 		storage       = flag.String("storage", "./cache", "Storage directory path")
 		goUpstream    = flag.String("go-upstream", "", "Upstream Go module proxy URL (default: proxy.golang.org)")
 		npmUpstream   = flag.String("npm-upstream", "", "Upstream NPM registry URL (default: registry.npmjs.org)")
+		ociUpstream   = flag.String("oci-upstream", "", "Upstream OCI registry URL (default: registry-1.docker.io)")
+		ociUsername   = flag.String("oci-username", "", "OCI registry username for authentication")
+		ociPassword   = flag.String("oci-password", "", "OCI registry password for authentication")
+		ociTagTTL     = flag.Duration("oci-tag-ttl", 5*time.Minute, "TTL for OCI tag->digest cache mappings")
 		cacheTTL      = flag.Duration("cache-ttl", 7*24*time.Hour, "Cache TTL (e.g., 168h for 7 days, 0 to disable)")
 		cacheMaxSize  = flag.Int64("cache-max-size", 10*1024*1024*1024, "Maximum cache size in bytes (default: 10GB, 0 to disable)")
 		expiryCheck   = flag.Duration("expiry-check-interval", time.Hour, "How often to check for expired content")
@@ -69,6 +73,10 @@ func run() error {
 		StoragePath:         *storage,
 		UpstreamGoProxy:     *goUpstream,
 		UpstreamNPMRegistry: *npmUpstream,
+		UpstreamOCIRegistry: *ociUpstream,
+		OCIUsername:         *ociUsername,
+		OCIPassword:         *ociPassword,
+		OCITagTTL:           *ociTagTTL,
 		CacheTTL:            *cacheTTL,
 		CacheMaxSize:        *cacheMaxSize,
 		ExpiryCheckInterval: *expiryCheck,
@@ -106,6 +114,7 @@ func run() error {
 		"address", srv.Address(),
 		"goproxy_url", fmt.Sprintf("http://localhost%s/goproxy", srv.Address()),
 		"npm_url", fmt.Sprintf("http://localhost%s/npm", srv.Address()),
+		"oci_url", fmt.Sprintf("http://localhost%s/v2", srv.Address()),
 	)
 	fmt.Println()
 	fmt.Println("To use as a Go module proxy:")
@@ -113,6 +122,9 @@ func run() error {
 	fmt.Println()
 	fmt.Println("To use as an NPM registry:")
 	fmt.Printf("  npm config set registry http://localhost%s/npm/\n", srv.Address())
+	fmt.Println()
+	fmt.Println("To use as an OCI registry mirror:")
+	fmt.Printf("  docker pull localhost%s/library/alpine:latest\n", srv.Address())
 	fmt.Println()
 
 	// Wait for shutdown or error
