@@ -122,7 +122,7 @@ func NewHashingReader(r io.Reader) *HashingReader {
 func (hr *HashingReader) Read(p []byte) (int, error) {
 	n, err := hr.r.Read(p)
 	if n > 0 {
-		hr.h.Write(p[:n])
+		_, _ = hr.h.Write(p[:n]) // blake3 Write never returns an error
 		hr.n += int64(n)
 	}
 	return n, err
@@ -159,7 +159,7 @@ func NewHashingWriter(w io.Writer) *HashingWriter {
 func (hw *HashingWriter) Write(p []byte) (int, error) {
 	n, err := hw.w.Write(p)
 	if n > 0 {
-		hw.h.Write(p[:n])
+		_, _ = hw.h.Write(p[:n]) // blake3 Write never returns an error
 		hw.n += int64(n)
 	}
 	return n, err

@@ -143,7 +143,7 @@ func TestHasher(t *testing.T) {
 	// Write in chunks
 	chunks := []string{"hello", " ", "world"}
 	for _, chunk := range chunks {
-		hasher.Write([]byte(chunk))
+		_, _ = hasher.Write([]byte(chunk))
 	}
 
 	result := hasher.Sum()
@@ -155,7 +155,7 @@ func TestHasher(t *testing.T) {
 
 	// Test reset
 	hasher.Reset()
-	hasher.Write([]byte("new data"))
+	_, _ = hasher.Write([]byte("new data"))
 	newResult := hasher.Sum()
 	if newResult == result {
 		t.Error("Hasher should produce different hash after reset and new data")

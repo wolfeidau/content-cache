@@ -62,7 +62,7 @@ func (u *Upstream) FetchVersionList(ctx context.Context, modulePath string) ([]s
 	if err != nil {
 		return nil, fmt.Errorf("fetching version list: %w", err)
 	}
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 
 	data, err := io.ReadAll(body)
 	if err != nil {
@@ -92,7 +92,7 @@ func (u *Upstream) FetchInfo(ctx context.Context, modulePath, version string) (*
 	if err != nil {
 		return nil, fmt.Errorf("fetching info: %w", err)
 	}
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 
 	var info VersionInfo
 	if err := json.NewDecoder(body).Decode(&info); err != nil {
@@ -110,7 +110,7 @@ func (u *Upstream) FetchMod(ctx context.Context, modulePath, version string) ([]
 	if err != nil {
 		return nil, fmt.Errorf("fetching mod: %w", err)
 	}
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 
 	data, err := io.ReadAll(body)
 	if err != nil {
@@ -142,7 +142,7 @@ func (u *Upstream) FetchLatest(ctx context.Context, modulePath string) (*Version
 	if err != nil {
 		return nil, fmt.Errorf("fetching latest: %w", err)
 	}
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 
 	var info VersionInfo
 	if err := json.NewDecoder(body).Decode(&info); err != nil {
@@ -165,13 +165,13 @@ func (u *Upstream) fetch(ctx context.Context, url string) (io.ReadCloser, error)
 	}
 
 	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, ErrNotFound
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("upstream returned %d: %s", resp.StatusCode, string(body))
 	}
 

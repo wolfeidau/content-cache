@@ -24,11 +24,15 @@ func main() {
 func run() error {
 	// Parse flags
 	var (
-		address    = flag.String("address", ":8080", "Address to listen on")
-		storage    = flag.String("storage", "./cache", "Storage directory path")
-		upstream   = flag.String("upstream", "", "Upstream Go module proxy URL (default: proxy.golang.org)")
-		logLevel   = flag.String("log-level", "info", "Log level (debug, info, warn, error)")
-		logFormat  = flag.String("log-format", "text", "Log format (text, json)")
+		address       = flag.String("address", ":8080", "Address to listen on")
+		storage       = flag.String("storage", "./cache", "Storage directory path")
+		goUpstream    = flag.String("go-upstream", "", "Upstream Go module proxy URL (default: proxy.golang.org)")
+		npmUpstream   = flag.String("npm-upstream", "", "Upstream NPM registry URL (default: registry.npmjs.org)")
+		cacheTTL      = flag.Duration("cache-ttl", 7*24*time.Hour, "Cache TTL (e.g., 168h for 7 days, 0 to disable)")
+		cacheMaxSize  = flag.Int64("cache-max-size", 10*1024*1024*1024, "Maximum cache size in bytes (default: 10GB, 0 to disable)")
+		expiryCheck   = flag.Duration("expiry-check-interval", time.Hour, "How often to check for expired content")
+		logLevel      = flag.String("log-level", "info", "Log level (debug, info, warn, error)")
+		logFormat     = flag.String("log-format", "text", "Log format (text, json)")
 	)
 	flag.Parse()
 
@@ -61,10 +65,14 @@ func run() error {
 
 	// Create server
 	cfg := server.Config{
-		Address:         *address,
-		StoragePath:     *storage,
-		UpstreamGoProxy: *upstream,
-		Logger:          logger,
+		Address:             *address,
+		StoragePath:         *storage,
+		UpstreamGoProxy:     *goUpstream,
+		UpstreamNPMRegistry: *npmUpstream,
+		CacheTTL:            *cacheTTL,
+		CacheMaxSize:        *cacheMaxSize,
+		ExpiryCheckInterval: *expiryCheck,
+		Logger:              logger,
 	}
 
 	srv, err := server.New(cfg)
@@ -96,11 +104,15 @@ func run() error {
 	// Print usage info
 	logger.Info("server started",
 		"address", srv.Address(),
-		"goproxy_url", fmt.Sprintf("http://localhost%s", srv.Address()),
+		"goproxy_url", fmt.Sprintf("http://localhost%s/goproxy", srv.Address()),
+		"npm_url", fmt.Sprintf("http://localhost%s/npm", srv.Address()),
 	)
 	fmt.Println()
 	fmt.Println("To use as a Go module proxy:")
-	fmt.Printf("  export GOPROXY=http://localhost%s,direct\n", srv.Address())
+	fmt.Printf("  export GOPROXY=http://localhost%s/goproxy,direct\n", srv.Address())
+	fmt.Println()
+	fmt.Println("To use as an NPM registry:")
+	fmt.Printf("  npm config set registry http://localhost%s/npm/\n", srv.Address())
 	fmt.Println()
 
 	// Wait for shutdown or error

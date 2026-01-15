@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	contentcache "github.com/wolfeidau/content-cache"
@@ -17,15 +18,40 @@ const (
 	blobPrefix = "blobs"
 )
 
+// MetadataTracker tracks blob metadata for expiration.
+type MetadataTracker interface {
+	// Create records metadata for a new blob.
+	Create(ctx context.Context, hash contentcache.Hash, size int64) error
+	// Touch updates the last access time for a blob.
+	Touch(ctx context.Context, hash contentcache.Hash) error
+	// Delete removes metadata for a blob.
+	Delete(ctx context.Context, hash contentcache.Hash) error
+}
+
 // CAFS implements content-addressable file storage.
 // Content is stored in a sharded directory structure based on hash.
 type CAFS struct {
-	backend backend.Backend
+	backend  backend.Backend
+	metadata MetadataTracker
+}
+
+// CAFSOption configures a CAFS instance.
+type CAFSOption func(*CAFS)
+
+// WithMetadataTracker sets a metadata tracker for expiration support.
+func WithMetadataTracker(tracker MetadataTracker) CAFSOption {
+	return func(c *CAFS) {
+		c.metadata = tracker
+	}
 }
 
 // NewCAFS creates a new content-addressable file store.
-func NewCAFS(b backend.Backend) *CAFS {
-	return &CAFS{backend: b}
+func NewCAFS(b backend.Backend, opts ...CAFSOption) *CAFS {
+	c := &CAFS{backend: b}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // Put stores content and returns its hash.
@@ -38,12 +64,19 @@ func (c *CAFS) Put(ctx context.Context, r io.Reader) (contentcache.Hash, error) 
 }
 
 // PutWithResult stores content and returns detailed information.
+// Uses a temp file to avoid memory exhaustion for large content.
 func (c *CAFS) PutWithResult(ctx context.Context, r io.Reader) (*PutResult, error) {
-	// Read all content to compute hash
-	// For large files, we could use a temp file, but for now we buffer in memory
-	var buf bytes.Buffer
+	// Create temp file for streaming content to avoid memory exhaustion
+	tmpFile, err := os.CreateTemp("", "cafs-upload-*")
+	if err != nil {
+		return nil, fmt.Errorf("creating temp file: %w", err)
+	}
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
+	defer func() { _ = tmpFile.Close() }()
+
+	// Stream content to temp file while computing hash
 	hr := contentcache.NewHashingReader(r)
-	if _, err := io.Copy(&buf, hr); err != nil {
+	if _, err := io.Copy(tmpFile, hr); err != nil {
 		return nil, fmt.Errorf("reading content: %w", err)
 	}
 
@@ -58,6 +91,10 @@ func (c *CAFS) PutWithResult(ctx context.Context, r io.Reader) (*PutResult, erro
 	}
 
 	if exists {
+		// Update access time if tracking metadata (best effort, don't fail the operation)
+		if c.metadata != nil {
+			_ = c.metadata.Touch(ctx, hash)
+		}
 		return &PutResult{
 			Hash:   hash,
 			Size:   size,
@@ -65,9 +102,19 @@ func (c *CAFS) PutWithResult(ctx context.Context, r io.Reader) (*PutResult, erro
 		}, nil
 	}
 
+	// Seek to beginning of temp file for writing to backend
+	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("seeking temp file: %w", err)
+	}
+
 	// Write content to backend
-	if err := c.backend.Write(ctx, key, &buf); err != nil {
+	if err := c.backend.Write(ctx, key, tmpFile); err != nil {
 		return nil, fmt.Errorf("writing content: %w", err)
+	}
+
+	// Track metadata for new blob (best effort, don't fail the operation)
+	if c.metadata != nil {
+		_ = c.metadata.Create(ctx, hash, size)
 	}
 
 	return &PutResult{
@@ -92,6 +139,12 @@ func (c *CAFS) Get(ctx context.Context, h contentcache.Hash) (io.ReadCloser, err
 		}
 		return nil, fmt.Errorf("reading content: %w", err)
 	}
+
+	// Update access time asynchronously (best effort)
+	if c.metadata != nil {
+		go func() { _ = c.metadata.Touch(context.Background(), h) }()
+	}
+
 	return rc, nil
 }
 
@@ -101,7 +154,7 @@ func (c *CAFS) GetBytes(ctx context.Context, h contentcache.Hash) ([]byte, error
 	if err != nil {
 		return nil, err
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	data, err := io.ReadAll(rc)
 	if err != nil {
@@ -119,7 +172,16 @@ func (c *CAFS) Has(ctx context.Context, h contentcache.Hash) (bool, error) {
 // Delete removes content by its hash.
 func (c *CAFS) Delete(ctx context.Context, h contentcache.Hash) error {
 	key := c.hashToKey(h)
-	return c.backend.Delete(ctx, key)
+	if err := c.backend.Delete(ctx, key); err != nil {
+		return err
+	}
+
+	// Clean up metadata (best effort)
+	if c.metadata != nil {
+		_ = c.metadata.Delete(ctx, h)
+	}
+
+	return nil
 }
 
 // Size returns the size of content with the given hash.
@@ -146,7 +208,7 @@ func (c *CAFS) Size(ctx context.Context, h contentcache.Hash) (int64, error) {
 		}
 		return 0, fmt.Errorf("reading content: %w", err)
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	size, err := io.Copy(io.Discard, rc)
 	if err != nil {

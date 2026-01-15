@@ -53,7 +53,7 @@ func TestFilesystemWriteRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	got, err := io.ReadAll(rc)
 	if err != nil {
@@ -257,7 +257,7 @@ func TestFilesystemWriter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	got, _ := io.ReadAll(rc)
 	if !bytes.Equal(got, data) {
@@ -284,18 +284,18 @@ func TestFilesystemAtomicWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Writer() error = %v", err)
 	}
-	w.Write([]byte("partial"))
+	_, _ = w.Write([]byte("partial"))
 
 	// Get atomicWriter to call Abort
 	aw := w.(*atomicWriter)
-	aw.Abort()
+	_ = aw.Abort()
 
 	// Original data should still be there
 	rc, err := fs.Read(ctx, key)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	got, _ := io.ReadAll(rc)
 	if !bytes.Equal(got, originalData) {
@@ -328,7 +328,7 @@ func TestFilesystemOverwrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	got, _ := io.ReadAll(rc)
 	if !bytes.Equal(got, newData) {

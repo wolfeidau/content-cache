@@ -56,7 +56,7 @@ func (idx *Index) ListVersions(ctx context.Context, modulePath string) ([]string
 		}
 		return nil, fmt.Errorf("reading version list: %w", err)
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	data, err := io.ReadAll(rc)
 	if err != nil {
@@ -91,7 +91,7 @@ func (idx *Index) GetModuleVersion(ctx context.Context, modulePath, version stri
 		}
 		return nil, fmt.Errorf("reading version info: %w", err)
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	var mv ModuleVersion
 	if err := json.NewDecoder(rc).Decode(&mv); err != nil {
@@ -112,7 +112,7 @@ func (idx *Index) GetMod(ctx context.Context, modulePath, version string) ([]byt
 		}
 		return nil, fmt.Errorf("reading go.mod: %w", err)
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	data, err := io.ReadAll(rc)
 	if err != nil {

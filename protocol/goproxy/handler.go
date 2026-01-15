@@ -9,9 +9,16 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	contentcache "github.com/wolfeidau/content-cache"
 	"github.com/wolfeidau/content-cache/store"
+)
+
+const (
+	// cacheTimeout is the maximum time allowed for background caching operations.
+	cacheTimeout = 5 * time.Minute
 )
 
 // Handler implements the GOPROXY protocol as an HTTP handler.
@@ -21,6 +28,11 @@ type Handler struct {
 	store    store.Store
 	upstream *Upstream
 	logger   *slog.Logger
+
+	// Lifecycle management for background goroutines
+	wg     sync.WaitGroup
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // HandlerOption configures a Handler.
@@ -42,16 +54,39 @@ func WithUpstream(upstream *Upstream) HandlerOption {
 
 // NewHandler creates a new GOPROXY handler.
 func NewHandler(index *Index, store store.Store, opts ...HandlerOption) *Handler {
+	ctx, cancel := context.WithCancel(context.Background())
 	h := &Handler{
 		index:    index,
 		store:    store,
 		upstream: NewUpstream(),
 		logger:   slog.Default(),
+		ctx:      ctx,
+		cancel:   cancel,
 	}
 	for _, opt := range opts {
 		opt(h)
 	}
 	return h
+}
+
+// Close shuts down the handler and waits for background operations to complete.
+func (h *Handler) Close() {
+	h.cancel()
+	h.wg.Wait()
+}
+
+// startBackgroundCache starts a background caching operation with proper lifecycle management.
+func (h *Handler) startBackgroundCache(modulePath, version string, logger *slog.Logger) {
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+
+		// Create a context with timeout, derived from handler's context
+		ctx, cancel := context.WithTimeout(h.ctx, cacheTimeout)
+		defer cancel()
+
+		h.cacheModuleVersion(ctx, modulePath, version, logger)
+	}()
 }
 
 // ServeHTTP implements http.Handler.
@@ -79,14 +114,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Find @v/ separator
-	atVIdx := strings.Index(path, "/@v/")
-	if atVIdx == -1 {
+	before, after, ok := strings.Cut(path, "/@v/")
+	if !ok {
 		http.Error(w, "invalid path", http.StatusBadRequest)
 		return
 	}
 
-	encodedModule := path[:atVIdx]
-	remainder := path[atVIdx+4:] // Skip "/@v/"
+	encodedModule := before
+	remainder := after // Skip "/@v/"
 
 	modulePath, err := decodePath(encodedModule)
 	if err != nil {
@@ -128,7 +163,10 @@ func (h *Handler) handleList(w http.ResponseWriter, r *http.Request, modulePath 
 		logger.Debug("cache hit", "versions", len(versions))
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		for _, v := range versions {
-			fmt.Fprintln(w, v)
+			if _, err := fmt.Fprintln(w, v); err != nil {
+				logger.Error("failed to write response", "error", err)
+				return
+			}
 		}
 		return
 	}
@@ -148,7 +186,10 @@ func (h *Handler) handleList(w http.ResponseWriter, r *http.Request, modulePath 
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	for _, v := range versions {
-		fmt.Fprintln(w, v)
+		if _, err := fmt.Fprintln(w, v); err != nil {
+			logger.Error("failed to write response", "error", err)
+			return
+		}
 	}
 }
 
@@ -161,7 +202,7 @@ func (h *Handler) handleInfo(w http.ResponseWriter, r *http.Request, modulePath,
 	info, err := h.index.GetVersionInfo(ctx, modulePath, version)
 	if err == nil {
 		logger.Debug("cache hit")
-		h.writeJSON(w, info)
+		h.writeJSON(w, info, logger)
 		return
 	}
 	if !errors.Is(err, ErrNotFound) {
@@ -182,9 +223,9 @@ func (h *Handler) handleInfo(w http.ResponseWriter, r *http.Request, modulePath,
 	}
 
 	// Cache the module version (we need all parts, so fetch them)
-	go h.cacheModuleVersion(context.Background(), modulePath, version, logger)
+	h.startBackgroundCache(modulePath, version, logger)
 
-	h.writeJSON(w, info)
+	h.writeJSON(w, info, logger)
 }
 
 // handleMod handles /{module}/@v/{version}.mod requests.
@@ -197,7 +238,9 @@ func (h *Handler) handleMod(w http.ResponseWriter, r *http.Request, modulePath, 
 	if err == nil {
 		logger.Debug("cache hit")
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Write(modFile)
+		if _, err := w.Write(modFile); err != nil {
+			logger.Error("failed to write response", "error", err)
+		}
 		return
 	}
 	if !errors.Is(err, ErrNotFound) {
@@ -218,10 +261,12 @@ func (h *Handler) handleMod(w http.ResponseWriter, r *http.Request, modulePath, 
 	}
 
 	// Cache the module version
-	go h.cacheModuleVersion(context.Background(), modulePath, version, logger)
+	h.startBackgroundCache(modulePath, version, logger)
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Write(modFile)
+	if _, err := w.Write(modFile); err != nil {
+		logger.Error("failed to write response", "error", err)
+	}
 }
 
 // handleZip handles /{module}/@v/{version}.zip requests.
@@ -236,9 +281,11 @@ func (h *Handler) handleZip(w http.ResponseWriter, r *http.Request, modulePath, 
 		rc, err := h.store.Get(ctx, mv.ZipHash)
 		if err == nil {
 			logger.Debug("cache hit")
-			defer rc.Close()
+			defer func() { _ = rc.Close() }()
 			w.Header().Set("Content-Type", "application/zip")
-			io.Copy(w, rc)
+			if _, err := io.Copy(w, rc); err != nil {
+				logger.Error("failed to stream zip", "error", err)
+			}
 			return
 		}
 		logger.Warn("zip hash in index but not in store", "hash", mv.ZipHash, "error", err)
@@ -261,7 +308,7 @@ func (h *Handler) handleZip(w http.ResponseWriter, r *http.Request, modulePath, 
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		return
 	}
-	defer zipReader.Close()
+	defer func() { _ = zipReader.Close() }()
 
 	// Use a HashingReader to compute hash while streaming
 	hr := contentcache.NewHashingReader(zipReader)
@@ -277,7 +324,7 @@ func (h *Handler) handleZip(w http.ResponseWriter, r *http.Request, modulePath, 
 	}
 
 	// Cache the module version asynchronously
-	go h.cacheModuleVersion(context.Background(), modulePath, version, logger)
+	h.startBackgroundCache(modulePath, version, logger)
 }
 
 // handleLatest handles /{module}/@latest requests.
@@ -298,7 +345,7 @@ func (h *Handler) handleLatest(w http.ResponseWriter, r *http.Request, modulePat
 		return
 	}
 
-	h.writeJSON(w, info)
+	h.writeJSON(w, info, logger)
 }
 
 // cacheModuleVersion fetches and caches a complete module version.
@@ -330,7 +377,7 @@ func (h *Handler) cacheModuleVersion(ctx context.Context, modulePath, version st
 		logger.Error("failed to fetch zip for caching", "error", err)
 		return
 	}
-	defer zipReader.Close()
+	defer func() { _ = zipReader.Close() }()
 
 	zipHash, err := h.store.Put(ctx, zipReader)
 	if err != nil {
@@ -352,7 +399,9 @@ func (h *Handler) cacheModuleVersion(ctx context.Context, modulePath, version st
 }
 
 // writeJSON writes a JSON response.
-func (h *Handler) writeJSON(w http.ResponseWriter, v any) {
+func (h *Handler) writeJSON(w http.ResponseWriter, v any, logger *slog.Logger) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		logger.Error("failed to encode JSON response", "error", err)
+	}
 }

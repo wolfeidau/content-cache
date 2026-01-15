@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/wolfeidau/content-cache/backend"
+	"github.com/wolfeidau/content-cache/expiry"
 	"github.com/wolfeidau/content-cache/protocol/goproxy"
+	"github.com/wolfeidau/content-cache/protocol/npm"
 	"github.com/wolfeidau/content-cache/store"
 )
 
@@ -24,6 +26,23 @@ type Config struct {
 	// UpstreamGoProxy is the upstream Go module proxy URL
 	UpstreamGoProxy string
 
+	// UpstreamNPMRegistry is the upstream NPM registry URL
+	UpstreamNPMRegistry string
+
+	// CacheTTL is the time-to-live for cached content.
+	// Content not accessed within this duration is expired.
+	// Zero disables TTL-based expiration.
+	CacheTTL time.Duration
+
+	// CacheMaxSize is the maximum size of the cache in bytes.
+	// When exceeded, least-recently-used content is evicted.
+	// Zero disables size-based eviction.
+	CacheMaxSize int64
+
+	// ExpiryCheckInterval is how often to check for expired content.
+	// Default is 1 hour.
+	ExpiryCheckInterval time.Duration
+
 	// Logger for the server
 	Logger *slog.Logger
 }
@@ -35,10 +54,14 @@ type Server struct {
 	logger     *slog.Logger
 
 	// Components
-	backend  backend.Backend
-	store    store.Store
-	index    *goproxy.Index
-	goproxy  *goproxy.Handler
+	backend      backend.Backend
+	store        store.Store
+	index        *goproxy.Index
+	goproxy      *goproxy.Handler
+	npmIndex     *npm.Index
+	npm          *npm.Handler
+	metadata     *expiry.MetadataStore
+	expiryMgr    *expiry.Manager
 }
 
 // New creates a new server with the given configuration.
@@ -62,8 +85,26 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("creating filesystem backend: %w", err)
 	}
 
-	// Initialize CAFS store
-	cafsStore := store.NewCAFS(fsBackend)
+	// Initialize metadata store for expiration tracking
+	metadataStore := expiry.NewMetadataStore(fsBackend)
+
+	// Initialize CAFS store with metadata tracking
+	cafsStore := store.NewCAFS(fsBackend, store.WithMetadataTracker(metadataStore))
+
+	// Initialize expiry manager if TTL or MaxSize is configured
+	var expiryMgr *expiry.Manager
+	if cfg.CacheTTL > 0 || cfg.CacheMaxSize > 0 {
+		expiryCfg := expiry.Config{
+			TTL:           cfg.CacheTTL,
+			MaxSize:       cfg.CacheMaxSize,
+			CheckInterval: cfg.ExpiryCheckInterval,
+			Logger:        cfg.Logger.With("component", "expiry"),
+		}
+		if expiryCfg.CheckInterval == 0 {
+			expiryCfg.CheckInterval = 1 * time.Hour
+		}
+		expiryMgr = expiry.NewManager(metadataStore, fsBackend, expiryCfg)
+	}
 
 	// Initialize goproxy components
 	goIndex := goproxy.NewIndex(fsBackend)
@@ -75,13 +116,31 @@ func New(cfg Config) (*Server, error) {
 		goproxy.WithLogger(cfg.Logger.With("component", "goproxy")),
 	)
 
+	// Initialize npm components
+	npmIndex := npm.NewIndex(fsBackend)
+	npmUpstreamOpts := []npm.UpstreamOption{}
+	if cfg.UpstreamNPMRegistry != "" {
+		npmUpstreamOpts = append(npmUpstreamOpts, npm.WithRegistryURL(cfg.UpstreamNPMRegistry))
+	}
+	npmUpstream := npm.NewUpstream(npmUpstreamOpts...)
+	npmHandler := npm.NewHandler(
+		npmIndex,
+		cafsStore,
+		npm.WithUpstream(npmUpstream),
+		npm.WithLogger(cfg.Logger.With("component", "npm")),
+	)
+
 	s := &Server{
-		config:  cfg,
-		logger:  cfg.Logger,
-		backend: fsBackend,
-		store:   cafsStore,
-		index:   goIndex,
-		goproxy: goHandler,
+		config:    cfg,
+		logger:    cfg.Logger,
+		backend:   fsBackend,
+		store:     cafsStore,
+		index:     goIndex,
+		goproxy:   goHandler,
+		npmIndex:  npmIndex,
+		npm:       npmHandler,
+		metadata:  metadataStore,
+		expiryMgr: expiryMgr,
 	}
 
 	// Build HTTP server
@@ -104,6 +163,14 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Health check
 	mux.HandleFunc("GET /health", s.handleHealth)
 
+	// Cache stats
+	mux.HandleFunc("GET /stats", s.handleStats)
+
+	// NPM registry endpoints
+	// The npm handler handles all paths under /npm/
+	mux.Handle("GET /npm/", http.StripPrefix("/npm", s.npm))
+	mux.Handle("HEAD /npm/", http.StripPrefix("/npm", s.npm))
+
 	// GOPROXY endpoints
 	// The goproxy handler handles all paths under /goproxy/
 	mux.Handle("GET /goproxy/", http.StripPrefix("/goproxy", s.goproxy))
@@ -116,7 +183,30 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 // handleHealth handles health check requests.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(`{"status":"ok"}`))
+	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
+
+// handleStats handles cache statistics requests.
+func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	if s.expiryMgr == nil {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"error":"expiry not enabled"}`))
+		return
+	}
+
+	stats, err := s.expiryMgr.GetStats(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = fmt.Fprintf(w, `{"total_blobs":%d,"total_size":%d,"oldest_access":"%s","newest_access":"%s"}`,
+		stats.TotalBlobs,
+		stats.TotalSize,
+		stats.OldestBlob.Format(time.RFC3339),
+		stats.NewestBlob.Format(time.RFC3339),
+	)
 }
 
 // loggingMiddleware logs HTTP requests.
@@ -141,6 +231,18 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 
 // Start starts the server.
 func (s *Server) Start() error {
+	// Start expiry manager if configured
+	if s.expiryMgr != nil {
+		s.logger.Info("starting expiry manager",
+			"ttl", s.config.CacheTTL,
+			"max_size", s.config.CacheMaxSize,
+			"check_interval", s.config.ExpiryCheckInterval,
+		)
+		if err := s.expiryMgr.Start(context.Background()); err != nil {
+			return fmt.Errorf("starting expiry manager: %w", err)
+		}
+	}
+
 	s.logger.Info("starting server", "address", s.config.Address)
 	return s.httpServer.ListenAndServe()
 }
@@ -148,6 +250,12 @@ func (s *Server) Start() error {
 // Shutdown gracefully shuts down the server.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.logger.Info("shutting down server")
+
+	// Stop expiry manager
+	if s.expiryMgr != nil {
+		s.expiryMgr.Stop()
+	}
+
 	return s.httpServer.Shutdown(ctx)
 }
 

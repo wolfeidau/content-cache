@@ -54,8 +54,8 @@ func (fs *Filesystem) Write(ctx context.Context, key string, r io.Reader) error 
 	success := false
 	defer func() {
 		if !success {
-			tmp.Close()
-			os.Remove(tmpPath)
+			_ = tmp.Close()
+			_ = os.Remove(tmpPath)
 		}
 	}()
 
@@ -229,20 +229,20 @@ func (w *atomicWriter) Close() error {
 
 	// Sync to disk
 	if err := w.f.Sync(); err != nil {
-		w.f.Close()
-		os.Remove(w.tmpPath)
+		_ = w.f.Close()
+		_ = os.Remove(w.tmpPath)
 		return fmt.Errorf("syncing file: %w", err)
 	}
 
 	// Close the file
 	if err := w.f.Close(); err != nil {
-		os.Remove(w.tmpPath)
+		_ = os.Remove(w.tmpPath)
 		return fmt.Errorf("closing temp file: %w", err)
 	}
 
 	// Atomic rename
 	if err := os.Rename(w.tmpPath, w.dstPath); err != nil {
-		os.Remove(w.tmpPath)
+		_ = os.Remove(w.tmpPath)
 		return fmt.Errorf("renaming temp file: %w", err)
 	}
 
@@ -255,7 +255,7 @@ func (w *atomicWriter) Abort() error {
 		return nil
 	}
 	w.closed = true
-	w.f.Close()
+	_ = w.f.Close()
 	return os.Remove(w.tmpPath)
 }
 

@@ -18,7 +18,7 @@ func TestHandlerList(t *testing.T) {
 	// Setup mock upstream
 	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/@v/list") {
-			w.Write([]byte("v1.0.0\nv1.1.0\nv1.2.0\n"))
+			_, _ = w.Write([]byte("v1.0.0\nv1.1.0\nv1.2.0\n"))
 			return
 		}
 		http.NotFound(w, r)
@@ -48,7 +48,7 @@ func TestHandlerInfo(t *testing.T) {
 
 	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/v1.0.0.info") {
-			json.NewEncoder(w).Encode(VersionInfo{
+			_ = json.NewEncoder(w).Encode(VersionInfo{
 				Version: "v1.0.0",
 				Time:    infoTime,
 			})
@@ -56,11 +56,11 @@ func TestHandlerInfo(t *testing.T) {
 		}
 		// Also handle mod and zip for background caching
 		if strings.HasSuffix(r.URL.Path, "/v1.0.0.mod") {
-			w.Write([]byte("module github.com/test/module\n"))
+			_, _ = w.Write([]byte("module github.com/test/module\n"))
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/v1.0.0.zip") {
-			w.Write([]byte("fake zip content"))
+			_, _ = w.Write([]byte("fake zip content"))
 			return
 		}
 		http.NotFound(w, r)
@@ -93,15 +93,15 @@ func TestHandlerMod(t *testing.T) {
 
 	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/v1.0.0.mod") {
-			w.Write([]byte(modContent))
+			_, _ = w.Write([]byte(modContent))
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/v1.0.0.info") {
-			json.NewEncoder(w).Encode(VersionInfo{Version: "v1.0.0"})
+			_ = json.NewEncoder(w).Encode(VersionInfo{Version: "v1.0.0"})
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/v1.0.0.zip") {
-			w.Write([]byte("fake zip"))
+			_, _ = w.Write([]byte("fake zip"))
 			return
 		}
 		http.NotFound(w, r)
@@ -130,15 +130,15 @@ func TestHandlerZip(t *testing.T) {
 	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/v1.0.0.zip") {
 			w.Header().Set("Content-Type", "application/zip")
-			w.Write([]byte(zipContent))
+			_, _ = w.Write([]byte(zipContent))
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/v1.0.0.info") {
-			json.NewEncoder(w).Encode(VersionInfo{Version: "v1.0.0"})
+			_ = json.NewEncoder(w).Encode(VersionInfo{Version: "v1.0.0"})
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/v1.0.0.mod") {
-			w.Write([]byte("module test\n"))
+			_, _ = w.Write([]byte("module test\n"))
 			return
 		}
 		http.NotFound(w, r)
@@ -189,15 +189,15 @@ func TestHandlerCacheHit(t *testing.T) {
 	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamCalls++
 		if strings.HasSuffix(r.URL.Path, "/v1.0.0.info") {
-			json.NewEncoder(w).Encode(VersionInfo{Version: "v1.0.0"})
+			_ = json.NewEncoder(w).Encode(VersionInfo{Version: "v1.0.0"})
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/v1.0.0.mod") {
-			w.Write([]byte("module test\n"))
+			_, _ = w.Write([]byte("module test\n"))
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/v1.0.0.zip") {
-			w.Write([]byte("zip content"))
+			_, _ = w.Write([]byte("zip content"))
 			return
 		}
 		http.NotFound(w, r)
@@ -214,7 +214,7 @@ func TestHandlerCacheHit(t *testing.T) {
 		Info:    VersionInfo{Version: "v1.0.0"},
 		ZipHash: zipHash,
 	}
-	index.PutModuleVersion(ctx, "github.com/cached/module", "v1.0.0", mv, []byte("module cached\n"))
+	_ = index.PutModuleVersion(ctx, "github.com/cached/module", "v1.0.0", mv, []byte("module cached\n"))
 
 	// Request cached module
 	req := httptest.NewRequest("GET", "/github.com/cached/module/@v/v1.0.0.info", nil)
@@ -252,7 +252,7 @@ func TestHandlerZipCacheHit(t *testing.T) {
 		Info:    VersionInfo{Version: "v1.0.0"},
 		ZipHash: zipHash,
 	}
-	index.PutModuleVersion(ctx, "github.com/cached/module", "v1.0.0", mv, []byte("module cached\n"))
+	_ = index.PutModuleVersion(ctx, "github.com/cached/module", "v1.0.0", mv, []byte("module cached\n"))
 
 	// Request cached zip
 	req := httptest.NewRequest("GET", "/github.com/cached/module/@v/v1.0.0.zip", nil)
@@ -280,7 +280,7 @@ func TestHandlerUppercaseModule(t *testing.T) {
 	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Verify the path is correctly encoded
 		if strings.Contains(r.URL.Path, "!azure") {
-			json.NewEncoder(w).Encode(VersionInfo{Version: "v1.0.0"})
+			_ = json.NewEncoder(w).Encode(VersionInfo{Version: "v1.0.0"})
 			return
 		}
 		t.Errorf("unexpected path: %s", r.URL.Path)
