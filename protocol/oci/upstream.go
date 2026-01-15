@@ -80,6 +80,10 @@ func (u *Upstream) CheckVersion(ctx context.Context) error {
 
 	resp, err := u.doWithAuth(ctx, req, "")
 	if err != nil {
+		// ErrUnauthorized is acceptable - it means the registry exists but requires auth
+		if err == ErrUnauthorized {
+			return nil
+		}
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
