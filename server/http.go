@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/wolfeidau/content-cache/backend"
 	"github.com/wolfeidau/content-cache/expiry"
 	"github.com/wolfeidau/content-cache/protocol/goproxy"
@@ -68,16 +69,16 @@ type Server struct {
 	logger     *slog.Logger
 
 	// Components
-	backend      backend.Backend
-	store        store.Store
-	index        *goproxy.Index
-	goproxy      *goproxy.Handler
-	npmIndex     *npm.Index
-	npm          *npm.Handler
-	ociIndex     *oci.Index
-	oci          *oci.Handler
-	metadata     *expiry.MetadataStore
-	expiryMgr    *expiry.Manager
+	backend   backend.Backend
+	store     store.Store
+	index     *goproxy.Index
+	goproxy   *goproxy.Handler
+	npmIndex  *npm.Index
+	npm       *npm.Handler
+	ociIndex  *oci.Index
+	oci       *oci.Handler
+	metadata  *expiry.MetadataStore
+	expiryMgr *expiry.Manager
 }
 
 // New creates a new server with the given configuration.
@@ -256,6 +257,13 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
+		requestID := r.Header.Get("X-Request-ID")
+		if requestID == "" {
+			requestID = uuid.NewString()
+		}
+
+		networkProtocolVersion := fmt.Sprintf("%d.%d", r.ProtoMajor, r.ProtoMinor)
+
 		// Wrap response writer to capture status
 		wrapped := &responseWriter{ResponseWriter: w, status: http.StatusOK}
 
@@ -267,6 +275,9 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 			"status", wrapped.status,
 			"duration", time.Since(start).String(),
 			"remote", r.RemoteAddr,
+			"request_id", requestID,
+			"user_agent", r.UserAgent(),
+			"network_protocol_version", networkProtocolVersion,
 		)
 	})
 }

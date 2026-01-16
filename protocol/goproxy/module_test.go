@@ -41,8 +41,8 @@ func TestDecodePath(t *testing.T) {
 		{"github.com/pkg/errors", "github.com/pkg/errors", false},
 		{"github.com/!azure/azure-sdk", "github.com/Azure/azure-sdk", false},
 		{"github.com/!burnt!sushi/toml", "github.com/BurntSushi/toml", false},
-		{"invalid!", "", true},      // Trailing escape
-		{"invalid!1", "", true},     // Invalid escape sequence
+		{"invalid!", "", true},  // Trailing escape
+		{"invalid!1", "", true}, // Invalid escape sequence
 	}
 
 	for _, tt := range tests {
@@ -210,7 +210,7 @@ func TestIndexDeleteModuleVersion(t *testing.T) {
 
 	// Store version
 	mv := &ModuleVersion{
-		Info: VersionInfo{Version: version},
+		Info:    VersionInfo{Version: version},
 		ZipHash: contentcache.HashBytes([]byte("zip")),
 	}
 	if err := idx.PutModuleVersion(ctx, modulePath, version, mv, []byte("mod")); err != nil {
@@ -252,7 +252,7 @@ func TestIndexCaseInsensitiveModule(t *testing.T) {
 	version := "v1.0.0"
 
 	mv := &ModuleVersion{
-		Info: VersionInfo{Version: version},
+		Info:    VersionInfo{Version: version},
 		ZipHash: contentcache.HashBytes([]byte("zip")),
 	}
 	if err := idx.PutModuleVersion(ctx, modulePath, version, mv, []byte("mod")); err != nil {

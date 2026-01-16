@@ -34,7 +34,7 @@ type Config struct {
 // DefaultConfig returns a default configuration.
 func DefaultConfig() Config {
 	return Config{
-		TTL:           7 * 24 * time.Hour, // 7 days
+		TTL:           7 * 24 * time.Hour,      // 7 days
 		MaxSize:       10 * 1024 * 1024 * 1024, // 10 GB
 		CheckInterval: 1 * time.Hour,
 		Logger:        slog.Default(),
@@ -136,11 +136,11 @@ func (m *Manager) RunOnce(ctx context.Context) *ExpireResult {
 
 // ExpireResult contains the results of an expiration run.
 type ExpireResult struct {
-	TTLExpired   int
-	LRUEvicted   int
-	BytesFreed   int64
-	Errors       int
-	Duration     time.Duration
+	TTLExpired int
+	LRUEvicted int
+	BytesFreed int64
+	Errors     int
+	Duration   time.Duration
 }
 
 func (m *Manager) runOnce(ctx context.Context) *ExpireResult {

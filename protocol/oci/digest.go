@@ -13,9 +13,9 @@ import (
 
 // Common errors for digest operations.
 var (
-	ErrInvalidDigest    = errors.New("invalid digest format")
-	ErrDigestMismatch   = errors.New("digest mismatch")
-	ErrUnsupportedAlgo  = errors.New("unsupported digest algorithm")
+	ErrInvalidDigest   = errors.New("invalid digest format")
+	ErrDigestMismatch  = errors.New("digest mismatch")
+	ErrUnsupportedAlgo = errors.New("unsupported digest algorithm")
 )
 
 // Digest represents an OCI content digest (algorithm:hex).

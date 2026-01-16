@@ -254,16 +254,17 @@ func decodePath(encoded string) (string, error) {
 	var b strings.Builder
 	escape := false
 	for _, r := range encoded {
-		if escape {
+		switch {
+		case r == '!':
+			escape = true
+		case escape:
 			if r >= 'a' && r <= 'z' {
 				b.WriteRune(r - ('a' - 'A'))
 			} else {
 				return "", fmt.Errorf("invalid escape sequence: !%c", r)
 			}
 			escape = false
-		} else if r == '!' {
-			escape = true
-		} else {
+		default:
 			b.WriteRune(r)
 		}
 	}

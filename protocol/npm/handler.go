@@ -167,7 +167,7 @@ func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request, name st
 // writeMetadataResponse writes the metadata response, optionally rewriting tarball URLs.
 func (h *Handler) writeMetadataResponse(w http.ResponseWriter, r *http.Request, name string, metadata []byte, abbreviated bool, logger *slog.Logger) {
 	// Parse metadata to rewrite tarball URLs
-	var meta map[string]interface{}
+	var meta map[string]any
 	if err := json.Unmarshal(metadata, &meta); err != nil {
 		// If we can't parse, just return as-is
 		w.Header().Set("Content-Type", "application/json")
@@ -192,8 +192,8 @@ func (h *Handler) writeMetadataResponse(w http.ResponseWriter, r *http.Request, 
 }
 
 // rewriteTarballURLs rewrites tarball URLs in metadata to point to our proxy.
-func (h *Handler) rewriteTarballURLs(r *http.Request, meta map[string]interface{}) {
-	versions, ok := meta["versions"].(map[string]interface{})
+func (h *Handler) rewriteTarballURLs(r *http.Request, meta map[string]any) {
+	versions, ok := meta["versions"].(map[string]any)
 	if !ok {
 		return
 	}
@@ -206,12 +206,12 @@ func (h *Handler) rewriteTarballURLs(r *http.Request, meta map[string]interface{
 	baseURL := fmt.Sprintf("%s://%s", scheme, r.Host)
 
 	for _, v := range versions {
-		version, ok := v.(map[string]interface{})
+		version, ok := v.(map[string]any)
 		if !ok {
 			continue
 		}
 
-		dist, ok := version["dist"].(map[string]interface{})
+		dist, ok := version["dist"].(map[string]any)
 		if !ok {
 			continue
 		}
@@ -233,8 +233,8 @@ func (h *Handler) rewriteTarballURLs(r *http.Request, meta map[string]interface{
 }
 
 // abbreviateMetadata creates an abbreviated version of package metadata.
-func (h *Handler) abbreviateMetadata(meta map[string]interface{}) map[string]interface{} {
-	abbreviated := map[string]interface{}{
+func (h *Handler) abbreviateMetadata(meta map[string]any) map[string]any {
+	abbreviated := map[string]any{
 		"name": meta["name"],
 	}
 
@@ -243,7 +243,7 @@ func (h *Handler) abbreviateMetadata(meta map[string]interface{}) map[string]int
 	}
 
 	if time, ok := meta["time"]; ok {
-		if timeMap, ok := time.(map[string]interface{}); ok {
+		if timeMap, ok := time.(map[string]any); ok {
 			if modified, ok := timeMap["modified"]; ok {
 				abbreviated["modified"] = modified
 			}
@@ -251,15 +251,15 @@ func (h *Handler) abbreviateMetadata(meta map[string]interface{}) map[string]int
 	}
 
 	// Slim down versions
-	if versions, ok := meta["versions"].(map[string]interface{}); ok {
-		abbrevVersions := make(map[string]interface{})
+	if versions, ok := meta["versions"].(map[string]any); ok {
+		abbrevVersions := make(map[string]any)
 		for ver, v := range versions {
-			version, ok := v.(map[string]interface{})
+			version, ok := v.(map[string]any)
 			if !ok {
 				continue
 			}
 
-			abbrevVer := map[string]interface{}{
+			abbrevVer := map[string]any{
 				"name":    version["name"],
 				"version": version["version"],
 			}
