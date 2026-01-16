@@ -1,0 +1,43 @@
+image: "${BUILDKITE_HOSTED_REGISTRY_URL}/content_cache_base:latest"
+
+steps:
+  - if: build.branch == "main"
+    if_changed: ".buildkite/Dockerfile.build"
+    key: base_image
+    image: "buildkite/hosted-agent-base-images:ubuntu-jammy"
+    label: ":docker: Create base image"
+    command: |
+      docker build \
+        --no-cache \
+        --file .buildkite/Dockerfile.build \
+        --tag "${BUILDKITE_HOSTED_REGISTRY_URL}/content_cache_base:latest" \
+        --progress plain \
+        --push .
+
+  - if: build.branch != "main"
+    if_changed: ".buildkite/Dockerfile.build"
+    key: base_image_check
+    image: "buildkite/hosted-agent-base-images:ubuntu-jammy"
+    label: ":docker: Check base image"
+    command: |
+      docker build \
+        --no-cache \
+        --file .buildkite/Dockerfile.build \
+        --tag "${BUILDKITE_HOSTED_REGISTRY_URL}/content_cache_base:dev" \
+        --progress plain .
+
+  - group: ":mag: QA"
+    key: quality_checks
+    depends_on: [base_image]
+    steps:
+      - label: ":golangci-lint: lint"
+        command: golangci-lint run --verbose --timeout 3m
+
+      - label: ":go: test"
+        artifact_paths:
+          - cover-tree.svg
+          - coverage.out
+        commands:
+          - go test -coverprofile coverage.out -coverpkg=./... ./...
+          - go run github.com/nikolaydubina/go-cover-treemap -coverprofile coverage.out > cover-tree.svg
+          - echo '<details><summary>Coverage tree map</summary><img src="artifact://cover-tree.svg" alt="Test coverage tree map" width="70%"></details>' | buildkite-agent annotate --style "info"

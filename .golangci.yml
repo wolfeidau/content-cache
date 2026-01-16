@@ -20,6 +20,11 @@ linters:
       - third_party$
       - builtin$
       - examples$
+  settings:
+    gosec:
+      excludes:
+        - G401  # Use of weak cryptographic primitive
+        - G505  # Blocklisted import crypto/sha1      
 formatters:
   enable:
     - gci
