@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestAuthCache(t *testing.T) {
@@ -14,42 +16,32 @@ func TestAuthCache(t *testing.T) {
 
 	t.Run("get empty", func(t *testing.T) {
 		token := ac.GetToken("repository:test:pull")
-		if token != "" {
-			t.Errorf("GetToken() = %q, want empty", token)
-		}
+		require.Empty(t, token)
 	})
 
 	t.Run("set and get", func(t *testing.T) {
 		ac.SetToken("repository:test:pull", "test-token", 300)
 		token := ac.GetToken("repository:test:pull")
-		if token != "test-token" {
-			t.Errorf("GetToken() = %q, want %q", token, "test-token")
-		}
+		require.Equal(t, "test-token", token)
 	})
 
 	t.Run("different scope", func(t *testing.T) {
 		token := ac.GetToken("repository:other:pull")
-		if token != "" {
-			t.Errorf("GetToken() = %q, want empty for different scope", token)
-		}
+		require.Empty(t, token)
 	})
 
 	t.Run("expired token", func(t *testing.T) {
 		ac.SetToken("repository:expired:pull", "expired-token", 0)
 		// Token with 0 expiry is immediately expired (with 30s buffer)
 		token := ac.GetToken("repository:expired:pull")
-		if token != "" {
-			t.Errorf("GetToken() = %q, want empty for expired token", token)
-		}
+		require.Empty(t, token)
 	})
 
 	t.Run("clear", func(t *testing.T) {
 		ac.SetToken("repository:clear:pull", "clear-token", 300)
 		ac.Clear()
 		token := ac.GetToken("repository:clear:pull")
-		if token != "" {
-			t.Errorf("GetToken() = %q, want empty after clear", token)
-		}
+		require.Empty(t, token)
 	})
 }
 
@@ -98,22 +90,14 @@ func TestParseWWWAuthenticate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			challenge, err := ParseWWWAuthenticate(tt.header)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("ParseWWWAuthenticate() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
 			if tt.wantErr {
+				require.Error(t, err)
 				return
 			}
-			if challenge.Realm != tt.wantRealm {
-				t.Errorf("Realm = %q, want %q", challenge.Realm, tt.wantRealm)
-			}
-			if challenge.Service != tt.wantService {
-				t.Errorf("Service = %q, want %q", challenge.Service, tt.wantService)
-			}
-			if challenge.Scope != tt.wantScope {
-				t.Errorf("Scope = %q, want %q", challenge.Scope, tt.wantScope)
-			}
+			require.NoError(t, err)
+			require.Equal(t, tt.wantRealm, challenge.Realm)
+			require.Equal(t, tt.wantService, challenge.Service)
+			require.Equal(t, tt.wantScope, challenge.Scope)
 		})
 	}
 }
@@ -122,10 +106,10 @@ func TestFetchToken(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Query().Get("service") != "registry.docker.io" {
-				t.Errorf("service = %q", r.URL.Query().Get("service"))
+				t.Errorf("service = %q, want registry.docker.io", r.URL.Query().Get("service"))
 			}
 			if r.URL.Query().Get("scope") != "repository:library/alpine:pull" {
-				t.Errorf("scope = %q", r.URL.Query().Get("scope"))
+				t.Errorf("scope = %q, want repository:library/alpine:pull", r.URL.Query().Get("scope"))
 			}
 
 			w.Header().Set("Content-Type", "application/json")
@@ -143,15 +127,9 @@ func TestFetchToken(t *testing.T) {
 		}
 
 		resp, err := FetchToken(context.Background(), http.DefaultClient, challenge, "", "")
-		if err != nil {
-			t.Fatalf("FetchToken() error = %v", err)
-		}
-		if resp.Token != "test-token-123" {
-			t.Errorf("Token = %q, want %q", resp.Token, "test-token-123")
-		}
-		if resp.ExpiresIn != 300 {
-			t.Errorf("ExpiresIn = %d, want %d", resp.ExpiresIn, 300)
-		}
+		require.NoError(t, err)
+		require.Equal(t, "test-token-123", resp.Token)
+		require.Equal(t, 300, resp.ExpiresIn)
 	})
 
 	t.Run("access_token field", func(t *testing.T) {
@@ -167,12 +145,8 @@ func TestFetchToken(t *testing.T) {
 
 		challenge := &AuthChallenge{Realm: server.URL}
 		resp, err := FetchToken(context.Background(), http.DefaultClient, challenge, "", "")
-		if err != nil {
-			t.Fatalf("FetchToken() error = %v", err)
-		}
-		if resp.Token != "access-token-456" {
-			t.Errorf("Token = %q, want %q", resp.Token, "access-token-456")
-		}
+		require.NoError(t, err)
+		require.Equal(t, "access-token-456", resp.Token)
 	})
 
 	t.Run("with basic auth", func(t *testing.T) {
@@ -189,12 +163,8 @@ func TestFetchToken(t *testing.T) {
 
 		challenge := &AuthChallenge{Realm: server.URL}
 		resp, err := FetchToken(context.Background(), http.DefaultClient, challenge, "testuser", "testpass")
-		if err != nil {
-			t.Fatalf("FetchToken() error = %v", err)
-		}
-		if resp.Token != "authed-token" {
-			t.Errorf("Token = %q, want %q", resp.Token, "authed-token")
-		}
+		require.NoError(t, err)
+		require.Equal(t, "authed-token", resp.Token)
 	})
 
 	t.Run("default expiry", func(t *testing.T) {
@@ -206,12 +176,8 @@ func TestFetchToken(t *testing.T) {
 
 		challenge := &AuthChallenge{Realm: server.URL}
 		resp, err := FetchToken(context.Background(), http.DefaultClient, challenge, "", "")
-		if err != nil {
-			t.Fatalf("FetchToken() error = %v", err)
-		}
-		if resp.ExpiresIn != 300 {
-			t.Errorf("ExpiresIn = %d, want 300 (default)", resp.ExpiresIn)
-		}
+		require.NoError(t, err)
+		require.Equal(t, 300, resp.ExpiresIn)
 	})
 
 	t.Run("error response", func(t *testing.T) {
@@ -223,9 +189,7 @@ func TestFetchToken(t *testing.T) {
 
 		challenge := &AuthChallenge{Realm: server.URL}
 		_, err := FetchToken(context.Background(), http.DefaultClient, challenge, "", "")
-		if err == nil {
-			t.Error("FetchToken() expected error")
-		}
+		require.Error(t, err)
 	})
 }
 
@@ -252,9 +216,8 @@ func TestBuildScope(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := BuildScope(tt.image, tt.action); got != tt.want {
-				t.Errorf("BuildScope() = %q, want %q", got, tt.want)
-			}
+			got := BuildScope(tt.image, tt.action)
+			require.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -284,7 +247,7 @@ func TestAuthCacheConcurrency(t *testing.T) {
 		select {
 		case <-done:
 		case <-time.After(time.Second):
-			t.Fatal("timeout waiting for goroutines")
+			require.Fail(t, "timeout waiting for goroutines")
 		}
 	}
 }

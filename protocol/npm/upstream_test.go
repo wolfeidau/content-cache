@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestUpstreamTarballURL(t *testing.T) {
@@ -33,9 +35,7 @@ func TestUpstreamTarballURL(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := u.TarballURL(tt.pkg, tt.version)
-			if got != tt.want {
-				t.Errorf("TarballURL() = %q, want %q", got, tt.want)
-			}
+			require.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -66,9 +66,7 @@ func TestEncodePackageName(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := encodePackageName(tt.input)
-			if got != tt.want {
-				t.Errorf("encodePackageName() = %q, want %q", got, tt.want)
-			}
+			require.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -100,13 +98,12 @@ func TestDecodePackageName(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := decodePackageName(tt.input)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("decodePackageName() error = %v, wantErr %v", err, tt.wantErr)
+			if tt.wantErr {
+				require.Error(t, err)
 				return
 			}
-			if got != tt.want {
-				t.Errorf("decodePackageName() = %q, want %q", got, tt.want)
-			}
+			require.NoError(t, err)
+			require.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -131,19 +128,13 @@ func TestUpstreamFetchPackageMetadataRaw(t *testing.T) {
 
 	t.Run("success", func(t *testing.T) {
 		data, err := u.FetchPackageMetadataRaw(context.Background(), "lodash")
-		if err != nil {
-			t.Fatalf("FetchPackageMetadataRaw() error = %v", err)
-		}
-		if string(data) != `{"name":"lodash","versions":{}}` {
-			t.Errorf("FetchPackageMetadataRaw() = %q", data)
-		}
+		require.NoError(t, err)
+		require.JSONEq(t, `{"name":"lodash","versions":{}}`, string(data))
 	})
 
 	t.Run("not found", func(t *testing.T) {
 		_, err := u.FetchPackageMetadataRaw(context.Background(), "not-found")
-		if err != ErrNotFound {
-			t.Errorf("FetchPackageMetadataRaw() error = %v, want ErrNotFound", err)
-		}
+		require.ErrorIs(t, err, ErrNotFound)
 	})
 }
 
@@ -164,17 +155,13 @@ func TestUpstreamFetchTarball(t *testing.T) {
 
 	t.Run("success", func(t *testing.T) {
 		rc, err := u.FetchTarball(context.Background(), server.URL+"/test/-/test-1.0.0.tgz")
-		if err != nil {
-			t.Fatalf("FetchTarball() error = %v", err)
-		}
+		require.NoError(t, err)
 		defer func() { _ = rc.Close() }()
 	})
 
 	t.Run("not found", func(t *testing.T) {
 		_, err := u.FetchTarball(context.Background(), server.URL+"/nonexistent/-/nonexistent-1.0.0.tgz")
-		if err != ErrNotFound {
-			t.Errorf("FetchTarball() error = %v, want ErrNotFound", err)
-		}
+		require.ErrorIs(t, err, ErrNotFound)
 	})
 }
 
@@ -183,7 +170,5 @@ func TestWithRegistryURL(t *testing.T) {
 
 	// Should trim trailing slash
 	url := u.TarballURL("test", "1.0.0")
-	if url != "https://custom.registry.com/test/-/test-1.0.0.tgz" {
-		t.Errorf("TarballURL() = %q", url)
-	}
+	require.Equal(t, "https://custom.registry.com/test/-/test-1.0.0.tgz", url)
 }

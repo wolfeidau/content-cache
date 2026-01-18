@@ -3,10 +3,10 @@ package store
 import (
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	contentcache "github.com/wolfeidau/content-cache"
 	"github.com/wolfeidau/content-cache/backend"
 )
@@ -20,35 +20,21 @@ func TestCAFSPutGet(t *testing.T) {
 
 	// Put
 	hash, err := cafs.Put(ctx, bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("Put() error = %v", err)
-	}
-
-	if hash.IsZero() {
-		t.Error("Put() returned zero hash")
-	}
+	require.NoError(t, err)
+	require.False(t, hash.IsZero())
 
 	// Verify hash is correct
 	expectedHash := contentcache.HashBytes(data)
-	if hash != expectedHash {
-		t.Errorf("Put() hash = %v, want %v", hash, expectedHash)
-	}
+	require.Equal(t, expectedHash, hash)
 
 	// Get
 	rc, err := cafs.Get(ctx, hash)
-	if err != nil {
-		t.Fatalf("Get() error = %v", err)
-	}
+	require.NoError(t, err)
 	defer func() { _ = rc.Close() }()
 
 	got, err := io.ReadAll(rc)
-	if err != nil {
-		t.Fatalf("io.ReadAll() error = %v", err)
-	}
-
-	if !bytes.Equal(got, data) {
-		t.Errorf("Get() = %q, want %q", got, data)
-	}
+	require.NoError(t, err)
+	require.Equal(t, data, got)
 }
 
 func TestCAFSPutWithResult(t *testing.T) {
@@ -60,29 +46,15 @@ func TestCAFSPutWithResult(t *testing.T) {
 
 	// First put
 	result1, err := cafs.PutWithResult(ctx, bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("PutWithResult() error = %v", err)
-	}
-
-	if result1.Exists {
-		t.Error("first put should report Exists = false")
-	}
-	if result1.Size != int64(len(data)) {
-		t.Errorf("Size = %d, want %d", result1.Size, len(data))
-	}
+	require.NoError(t, err)
+	require.False(t, result1.Exists)
+	require.Equal(t, int64(len(data)), result1.Size)
 
 	// Second put of same content
 	result2, err := cafs.PutWithResult(ctx, bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("PutWithResult() second call error = %v", err)
-	}
-
-	if !result2.Exists {
-		t.Error("second put should report Exists = true")
-	}
-	if result2.Hash != result1.Hash {
-		t.Error("hash should be same for same content")
-	}
+	require.NoError(t, err)
+	require.True(t, result2.Exists)
+	require.Equal(t, result1.Hash, result2.Hash)
 }
 
 func TestCAFSPutBytes(t *testing.T) {
@@ -93,19 +65,12 @@ func TestCAFSPutBytes(t *testing.T) {
 	data := []byte("bytes convenience method")
 
 	hash, err := cafs.PutBytes(ctx, data)
-	if err != nil {
-		t.Fatalf("PutBytes() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	// Verify via GetBytes
 	got, err := cafs.GetBytes(ctx, hash)
-	if err != nil {
-		t.Fatalf("GetBytes() error = %v", err)
-	}
-
-	if !bytes.Equal(got, data) {
-		t.Errorf("GetBytes() = %q, want %q", got, data)
-	}
+	require.NoError(t, err)
+	require.Equal(t, data, got)
 }
 
 func TestCAFSGetNotFound(t *testing.T) {
@@ -118,9 +83,7 @@ func TestCAFSGetNotFound(t *testing.T) {
 	fakeHash := contentcache.HashBytes([]byte("does not exist"))
 
 	_, err := cafs.Get(ctx, fakeHash)
-	if !errors.Is(err, backend.ErrNotFound) {
-		t.Errorf("Get() error = %v, want ErrNotFound", err)
-	}
+	require.ErrorIs(t, err, backend.ErrNotFound)
 }
 
 func TestCAFSHas(t *testing.T) {
@@ -134,27 +97,17 @@ func TestCAFSHas(t *testing.T) {
 
 	// Before put
 	exists, err := cafs.Has(ctx, hash)
-	if err != nil {
-		t.Fatalf("Has() error = %v", err)
-	}
-	if exists {
-		t.Error("Has() = true before put, want false")
-	}
+	require.NoError(t, err)
+	require.False(t, exists)
 
 	// Put
 	_, err = cafs.Put(ctx, bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("Put() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	// After put
 	exists, err = cafs.Has(ctx, hash)
-	if err != nil {
-		t.Fatalf("Has() error = %v", err)
-	}
-	if !exists {
-		t.Error("Has() = false after put, want true")
-	}
+	require.NoError(t, err)
+	require.True(t, exists)
 }
 
 func TestCAFSDelete(t *testing.T) {
@@ -166,27 +119,19 @@ func TestCAFSDelete(t *testing.T) {
 
 	// Put
 	hash, err := cafs.Put(ctx, bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("Put() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	// Delete
 	err = cafs.Delete(ctx, hash)
-	if err != nil {
-		t.Fatalf("Delete() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	// Verify deleted
 	exists, _ := cafs.Has(ctx, hash)
-	if exists {
-		t.Error("content still exists after Delete")
-	}
+	require.False(t, exists)
 
 	// Delete again should not error
 	err = cafs.Delete(ctx, hash)
-	if err != nil {
-		t.Errorf("Delete() of non-existent hash error = %v, want nil", err)
-	}
+	require.NoError(t, err)
 }
 
 func TestCAFSSize(t *testing.T) {
@@ -197,18 +142,11 @@ func TestCAFSSize(t *testing.T) {
 	data := []byte("size check content")
 
 	hash, err := cafs.Put(ctx, bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("Put() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	size, err := cafs.Size(ctx, hash)
-	if err != nil {
-		t.Fatalf("Size() error = %v", err)
-	}
-
-	if size != int64(len(data)) {
-		t.Errorf("Size() = %d, want %d", size, len(data))
-	}
+	require.NoError(t, err)
+	require.Equal(t, int64(len(data)), size)
 }
 
 func TestCAFSSizeNotFound(t *testing.T) {
@@ -219,9 +157,7 @@ func TestCAFSSizeNotFound(t *testing.T) {
 	fakeHash := contentcache.HashBytes([]byte("not stored"))
 
 	_, err := cafs.Size(ctx, fakeHash)
-	if !errors.Is(err, backend.ErrNotFound) {
-		t.Errorf("Size() error = %v, want ErrNotFound", err)
-	}
+	require.ErrorIs(t, err, backend.ErrNotFound)
 }
 
 func TestCAFSList(t *testing.T) {
@@ -240,26 +176,17 @@ func TestCAFSList(t *testing.T) {
 	expectedHashes := make(map[contentcache.Hash]bool)
 	for _, d := range data {
 		hash, err := cafs.Put(ctx, bytes.NewReader(d))
-		if err != nil {
-			t.Fatalf("Put() error = %v", err)
-		}
+		require.NoError(t, err)
 		expectedHashes[hash] = true
 	}
 
 	// List
 	hashes, err := cafs.List(ctx)
-	if err != nil {
-		t.Fatalf("List() error = %v", err)
-	}
-
-	if len(hashes) != len(data) {
-		t.Errorf("List() returned %d hashes, want %d", len(hashes), len(data))
-	}
+	require.NoError(t, err)
+	require.Len(t, hashes, len(data))
 
 	for _, h := range hashes {
-		if !expectedHashes[h] {
-			t.Errorf("unexpected hash in List(): %v", h)
-		}
+		require.True(t, expectedHashes[h])
 	}
 }
 
@@ -276,18 +203,13 @@ func TestCAFSDeduplication(t *testing.T) {
 	hash3, _ := cafs.Put(ctx, bytes.NewReader(data))
 
 	// All hashes should be the same
-	if hash1 != hash2 || hash2 != hash3 {
-		t.Error("same content should produce same hash")
-	}
+	require.Equal(t, hash1, hash2)
+	require.Equal(t, hash2, hash3)
 
 	// List should show only one item
 	hashes, err := cafs.List(ctx)
-	if err != nil {
-		t.Fatalf("List() error = %v", err)
-	}
-	if len(hashes) != 1 {
-		t.Errorf("List() returned %d items, want 1 (deduplication failed)", len(hashes))
-	}
+	require.NoError(t, err)
+	require.Len(t, hashes, 1)
 }
 
 func TestCAFSEmptyContent(t *testing.T) {
@@ -298,18 +220,11 @@ func TestCAFSEmptyContent(t *testing.T) {
 	data := []byte{}
 
 	hash, err := cafs.Put(ctx, bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("Put() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	got, err := cafs.GetBytes(ctx, hash)
-	if err != nil {
-		t.Fatalf("GetBytes() error = %v", err)
-	}
-
-	if len(got) != 0 {
-		t.Errorf("GetBytes() returned %d bytes, want 0", len(got))
-	}
+	require.NoError(t, err)
+	require.Empty(t, got)
 }
 
 func TestCAFSLargeContent(t *testing.T) {
@@ -325,18 +240,11 @@ func TestCAFSLargeContent(t *testing.T) {
 	}
 
 	hash, err := cafs.Put(ctx, bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("Put() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	got, err := cafs.GetBytes(ctx, hash)
-	if err != nil {
-		t.Fatalf("GetBytes() error = %v", err)
-	}
-
-	if !bytes.Equal(got, data) {
-		t.Error("large content not stored/retrieved correctly")
-	}
+	require.NoError(t, err)
+	require.Equal(t, data, got)
 }
 
 // Helper functions
@@ -345,8 +253,6 @@ func newTestCAFS(t *testing.T) (*CAFS, func()) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	b, err := backend.NewFilesystem(tmpDir)
-	if err != nil {
-		t.Fatalf("NewFilesystem() error = %v", err)
-	}
+	require.NoError(t, err)
 	return NewCAFS(b), func() {}
 }

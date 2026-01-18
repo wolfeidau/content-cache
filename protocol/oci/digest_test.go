@@ -1,8 +1,9 @@
 package oci
 
 import (
-	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseDigest(t *testing.T) {
@@ -61,31 +62,23 @@ func TestParseDigest(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := ParseDigest(tt.input)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("ParseDigest() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
 			if tt.wantErr {
-				if tt.errString != "" && !strings.Contains(err.Error(), tt.errString) {
-					t.Errorf("ParseDigest() error = %v, want error containing %q", err, tt.errString)
+				require.Error(t, err)
+				if tt.errString != "" {
+					require.Contains(t, err.Error(), tt.errString)
 				}
 				return
 			}
-			if got.Algorithm != tt.wantAlgo {
-				t.Errorf("ParseDigest() Algorithm = %v, want %v", got.Algorithm, tt.wantAlgo)
-			}
-			if got.Hex != tt.wantHex {
-				t.Errorf("ParseDigest() Hex = %v, want %v", got.Hex, tt.wantHex)
-			}
+			require.NoError(t, err)
+			require.Equal(t, tt.wantAlgo, got.Algorithm)
+			require.Equal(t, tt.wantHex, got.Hex)
 		})
 	}
 }
 
 func TestDigestString(t *testing.T) {
 	d := Digest{Algorithm: "sha256", Hex: "abc123"}
-	if got := d.String(); got != "sha256:abc123" {
-		t.Errorf("String() = %q, want %q", got, "sha256:abc123")
-	}
+	require.Equal(t, "sha256:abc123", d.String())
 }
 
 func TestDigestIsZero(t *testing.T) {
@@ -108,9 +101,7 @@ func TestDigestIsZero(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.digest.IsZero(); got != tt.want {
-				t.Errorf("IsZero() = %v, want %v", got, tt.want)
-			}
+			require.Equal(t, tt.want, tt.digest.IsZero())
 		})
 	}
 }
@@ -151,8 +142,10 @@ func TestDigestVerify(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := tt.digest.Verify(tt.content)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Verify() error = %v, wantErr %v", err, tt.wantErr)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
 			}
 		})
 	}
@@ -178,9 +171,7 @@ func TestComputeSHA256(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := ComputeSHA256(tt.content); got != tt.want {
-				t.Errorf("ComputeSHA256() = %v, want %v", got, tt.want)
-			}
+			require.Equal(t, tt.want, ComputeSHA256(tt.content))
 		})
 	}
 }
@@ -215,9 +206,7 @@ func TestIsDigestReference(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := IsDigestReference(tt.reference); got != tt.want {
-				t.Errorf("IsDigestReference() = %v, want %v", got, tt.want)
-			}
+			require.Equal(t, tt.want, IsDigestReference(tt.reference))
 		})
 	}
 }

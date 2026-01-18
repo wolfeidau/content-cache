@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"github.com/wolfeidau/content-cache/backend"
 	"github.com/wolfeidau/content-cache/store"
 )
@@ -15,13 +16,9 @@ func newTestHandler(t *testing.T, upstreamServer *httptest.Server) (*Handler, fu
 	t.Helper()
 	// Use a manual temp dir instead of t.TempDir() to avoid race with async goroutines
 	tmpDir, err := os.MkdirTemp("", "npm-test-*")
-	if err != nil {
-		t.Fatalf("MkdirTemp() error = %v", err)
-	}
+	require.NoError(t, err)
 	b, err := backend.NewFilesystem(tmpDir)
-	if err != nil {
-		t.Fatalf("NewFilesystem() error = %v", err)
-	}
+	require.NoError(t, err)
 	cafs := store.NewCAFS(b)
 	idx := NewIndex(b)
 
@@ -73,12 +70,8 @@ func TestHandlerMetadata(t *testing.T) {
 
 		h.ServeHTTP(w, req)
 
-		if w.Code != http.StatusOK {
-			t.Errorf("Status = %d, want %d", w.Code, http.StatusOK)
-		}
-		if !strings.Contains(w.Body.String(), `"name":"lodash"`) {
-			t.Error("Response should contain package name")
-		}
+		require.Equal(t, http.StatusOK, w.Code)
+		require.Contains(t, w.Body.String(), `"name":"lodash"`)
 	})
 
 	t.Run("not found", func(t *testing.T) {
@@ -87,9 +80,7 @@ func TestHandlerMetadata(t *testing.T) {
 
 		h.ServeHTTP(w, req)
 
-		if w.Code != http.StatusNotFound {
-			t.Errorf("Status = %d, want %d", w.Code, http.StatusNotFound)
-		}
+		require.Equal(t, http.StatusNotFound, w.Code)
 	})
 
 	t.Run("abbreviated metadata", func(t *testing.T) {
@@ -99,14 +90,10 @@ func TestHandlerMetadata(t *testing.T) {
 
 		h.ServeHTTP(w, req)
 
-		if w.Code != http.StatusOK {
-			t.Errorf("Status = %d, want %d", w.Code, http.StatusOK)
-		}
+		require.Equal(t, http.StatusOK, w.Code)
 		// Abbreviated response should have limited fields
 		body := w.Body.String()
-		if !strings.Contains(body, `"name"`) {
-			t.Error("Abbreviated response should contain name")
-		}
+		require.Contains(t, body, `"name"`)
 	})
 }
 
@@ -149,12 +136,8 @@ func TestHandlerTarball(t *testing.T) {
 
 		h.ServeHTTP(w, req)
 
-		if w.Code != http.StatusOK {
-			t.Errorf("Status = %d, want %d", w.Code, http.StatusOK)
-		}
-		if w.Body.String() != string(tarballContent) {
-			t.Errorf("Body = %q, want %q", w.Body.String(), tarballContent)
-		}
+		require.Equal(t, http.StatusOK, w.Code)
+		require.Equal(t, string(tarballContent), w.Body.String())
 	})
 
 	t.Run("tarball not found", func(t *testing.T) {
@@ -163,9 +146,7 @@ func TestHandlerTarball(t *testing.T) {
 
 		h.ServeHTTP(w, req)
 
-		if w.Code != http.StatusNotFound {
-			t.Errorf("Status = %d, want %d", w.Code, http.StatusNotFound)
-		}
+		require.Equal(t, http.StatusNotFound, w.Code)
 	})
 }
 
@@ -208,9 +189,7 @@ func TestHandlerScopedPackage(t *testing.T) {
 
 		h.ServeHTTP(w, req)
 
-		if w.Code != http.StatusOK {
-			t.Errorf("Status = %d, want %d, body: %s", w.Code, http.StatusOK, w.Body.String())
-		}
+		require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 	})
 
 	t.Run("scoped tarball", func(t *testing.T) {
@@ -219,9 +198,7 @@ func TestHandlerScopedPackage(t *testing.T) {
 
 		h.ServeHTTP(w, req)
 
-		if w.Code != http.StatusOK {
-			t.Errorf("Status = %d, want %d", w.Code, http.StatusOK)
-		}
+		require.Equal(t, http.StatusOK, w.Code)
 	})
 }
 
@@ -238,9 +215,7 @@ func TestHandlerMethodNotAllowed(t *testing.T) {
 
 			h.ServeHTTP(w, req)
 
-			if w.Code != http.StatusMethodNotAllowed {
-				t.Errorf("Status = %d, want %d", w.Code, http.StatusMethodNotAllowed)
-			}
+			require.Equal(t, http.StatusMethodNotAllowed, w.Code)
 		})
 	}
 }
@@ -274,12 +249,8 @@ func TestHandlerTarballURLRewrite(t *testing.T) {
 
 	body := w.Body.String()
 	// URL should be rewritten to point to our proxy
-	if !strings.Contains(body, "http://localhost:8080/npm/test-pkg/-/test-pkg-1.0.0.tgz") {
-		t.Errorf("Tarball URL not rewritten correctly: %s", body)
-	}
-	if strings.Contains(body, "registry.npmjs.org") {
-		t.Errorf("Original registry URL should be replaced: %s", body)
-	}
+	require.Contains(t, body, "http://localhost:8080/npm/test-pkg/-/test-pkg-1.0.0.tgz")
+	require.NotContains(t, body, "registry.npmjs.org")
 }
 
 func TestExtractVersionFromTarball(t *testing.T) {
@@ -318,9 +289,7 @@ func TestExtractVersionFromTarball(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := extractVersionFromTarball(tt.packageName, tt.tarballName)
-			if got != tt.want {
-				t.Errorf("extractVersionFromTarball() = %q, want %q", got, tt.want)
-			}
+			require.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -361,13 +330,7 @@ func TestHandlerCacheHit(t *testing.T) {
 	w1 := httptest.NewRecorder()
 	h.ServeHTTP(w1, req1)
 
-	if w1.Code != http.StatusOK {
-		t.Fatalf("First request status = %d, want %d", w1.Code, http.StatusOK)
-	}
-	if w1.Body.String() != string(tarballContent) {
-		t.Errorf("First request body = %q, want %q", w1.Body.String(), tarballContent)
-	}
-	if fetchCount != 1 {
-		t.Errorf("Upstream fetch count = %d, want 1", fetchCount)
-	}
+	require.Equal(t, http.StatusOK, w1.Code)
+	require.Equal(t, string(tarballContent), w1.Body.String())
+	require.Equal(t, 1, fetchCount)
 }

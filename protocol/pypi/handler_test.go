@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"github.com/wolfeidau/content-cache/backend"
 	"github.com/wolfeidau/content-cache/store"
 )
@@ -15,13 +16,9 @@ func newTestHandler(t *testing.T, upstreamServer *httptest.Server) (*Handler, fu
 	t.Helper()
 	// Use a manual temp dir instead of t.TempDir() to avoid race with async goroutines
 	tmpDir, err := os.MkdirTemp("", "pypi-test-*")
-	if err != nil {
-		t.Fatalf("MkdirTemp() error = %v", err)
-	}
+	require.NoError(t, err)
 	b, err := backend.NewFilesystem(tmpDir)
-	if err != nil {
-		t.Fatalf("NewFilesystem() error = %v", err)
-	}
+	require.NoError(t, err)
 	cafs := store.NewCAFS(b)
 	idx := NewIndex(b)
 
@@ -67,17 +64,10 @@ func TestHandlerProject(t *testing.T) {
 
 		h.ServeHTTP(w, req)
 
-		if w.Code != http.StatusOK {
-			t.Errorf("Status = %d, want %d, body: %s", w.Code, http.StatusOK, w.Body.String())
-		}
+		require.Equal(t, http.StatusOK, w.Code)
 		body := w.Body.String()
-		if !strings.Contains(body, "requests-2.31.0") {
-			t.Error("Response should contain package filename")
-		}
-		// Check URL is rewritten to proxy with /pypi prefix
-		if !strings.Contains(body, "/pypi/packages/requests/") {
-			t.Error("Response should have rewritten URLs pointing to /pypi/packages/")
-		}
+		require.Contains(t, body, "requests-2.31.0")
+		require.Contains(t, body, "/pypi/packages/requests/")
 	})
 
 	t.Run("get project page JSON", func(t *testing.T) {
@@ -88,16 +78,10 @@ func TestHandlerProject(t *testing.T) {
 
 		h.ServeHTTP(w, req)
 
-		if w.Code != http.StatusOK {
-			t.Errorf("Status = %d, want %d", w.Code, http.StatusOK)
-		}
+		require.Equal(t, http.StatusOK, w.Code)
 		body := w.Body.String()
-		if !strings.Contains(body, `"api-version"`) {
-			t.Error("JSON response should contain api-version")
-		}
-		if !strings.Contains(body, `"name":"requests"`) {
-			t.Error("JSON response should contain project name")
-		}
+		require.Contains(t, body, `"api-version"`)
+		require.Contains(t, body, `"name":"requests"`)
 	})
 
 	t.Run("project not found", func(t *testing.T) {
@@ -106,9 +90,7 @@ func TestHandlerProject(t *testing.T) {
 
 		h.ServeHTTP(w, req)
 
-		if w.Code != http.StatusNotFound {
-			t.Errorf("Status = %d, want %d", w.Code, http.StatusNotFound)
-		}
+		require.Equal(t, http.StatusNotFound, w.Code)
 	})
 
 	t.Run("redirect missing trailing slash", func(t *testing.T) {
@@ -117,12 +99,8 @@ func TestHandlerProject(t *testing.T) {
 
 		h.ServeHTTP(w, req)
 
-		if w.Code != http.StatusMovedPermanently {
-			t.Errorf("Status = %d, want %d", w.Code, http.StatusMovedPermanently)
-		}
-		if loc := w.Header().Get("Location"); loc != "/simple/requests/" {
-			t.Errorf("Location = %q, want /simple/requests/", loc)
-		}
+		require.Equal(t, http.StatusMovedPermanently, w.Code)
+		require.Equal(t, "/simple/requests/", w.Header().Get("Location"))
 	})
 }
 
@@ -141,12 +119,8 @@ func TestHandlerRoot(t *testing.T) {
 
 		h.ServeHTTP(w, req)
 
-		if w.Code != http.StatusOK {
-			t.Errorf("Status = %d, want %d", w.Code, http.StatusOK)
-		}
-		if !strings.Contains(w.Body.String(), "Simple Index") {
-			t.Error("Response should contain Simple Index title")
-		}
+		require.Equal(t, http.StatusOK, w.Code)
+		require.Contains(t, w.Body.String(), "Simple Index")
 	})
 
 	t.Run("empty root JSON", func(t *testing.T) {
@@ -156,16 +130,10 @@ func TestHandlerRoot(t *testing.T) {
 
 		h.ServeHTTP(w, req)
 
-		if w.Code != http.StatusOK {
-			t.Errorf("Status = %d, want %d", w.Code, http.StatusOK)
-		}
+		require.Equal(t, http.StatusOK, w.Code)
 		body := w.Body.String()
-		if !strings.Contains(body, `"api-version"`) {
-			t.Error("JSON response should contain api-version")
-		}
-		if !strings.Contains(body, `"projects"`) {
-			t.Error("JSON response should contain projects array")
-		}
+		require.Contains(t, body, `"api-version"`)
+		require.Contains(t, body, `"projects"`)
 	})
 
 	t.Run("redirect missing trailing slash", func(t *testing.T) {
@@ -174,9 +142,7 @@ func TestHandlerRoot(t *testing.T) {
 
 		h.ServeHTTP(w, req)
 
-		if w.Code != http.StatusMovedPermanently {
-			t.Errorf("Status = %d, want %d", w.Code, http.StatusMovedPermanently)
-		}
+		require.Equal(t, http.StatusMovedPermanently, w.Code)
 	})
 }
 
@@ -193,9 +159,7 @@ func TestHandlerMethodNotAllowed(t *testing.T) {
 
 			h.ServeHTTP(w, req)
 
-			if w.Code != http.StatusMethodNotAllowed {
-				t.Errorf("Status = %d, want %d", w.Code, http.StatusMethodNotAllowed)
-			}
+			require.Equal(t, http.StatusMethodNotAllowed, w.Code)
 		})
 	}
 }
@@ -225,9 +189,7 @@ func TestNormalizeProjectName(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			got := NormalizeProjectName(tt.input)
-			if got != tt.want {
-				t.Errorf("NormalizeProjectName(%q) = %q, want %q", tt.input, got, tt.want)
-			}
+			require.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -246,39 +208,23 @@ func TestParseProjectPageHTML(t *testing.T) {
 </html>`
 
 	files, err := ParseProjectPageHTML([]byte(html), "https://pypi.org/simple/requests/")
-	if err != nil {
-		t.Fatalf("ParseProjectPageHTML() error = %v", err)
-	}
+	require.NoError(t, err)
 
-	if len(files) != 4 {
-		t.Fatalf("len(files) = %d, want 4", len(files))
-	}
+	require.Len(t, files, 4)
 
 	// Check first file
-	if files[0].Filename != "requests-2.31.0.tar.gz" {
-		t.Errorf("files[0].Filename = %q, want requests-2.31.0.tar.gz", files[0].Filename)
-	}
-	if files[0].Hashes["sha256"] != "942c5a758f" {
-		t.Errorf("files[0].Hashes[sha256] = %q, want 942c5a758f", files[0].Hashes["sha256"])
-	}
+	require.Equal(t, "requests-2.31.0.tar.gz", files[0].Filename)
+	require.Equal(t, "942c5a758f", files[0].Hashes["sha256"])
 
 	// Check second file with requires-python
-	if files[1].RequiresPython != ">=3.7" {
-		t.Errorf("files[1].RequiresPython = %q, want >=3.7", files[1].RequiresPython)
-	}
+	require.Equal(t, ">=3.7", files[1].RequiresPython)
 
 	// Check relative URL resolution
-	if !strings.HasPrefix(files[1].URL, "https://pypi.org/") {
-		t.Errorf("Relative URL not resolved correctly: %s", files[1].URL)
-	}
+	require.True(t, strings.HasPrefix(files[1].URL, "https://pypi.org/"))
 
 	// Check yanked files
-	if files[2].Yanked != true {
-		t.Errorf("files[2].Yanked = %v, want true", files[2].Yanked)
-	}
-	if files[3].Yanked != "security issue" {
-		t.Errorf("files[3].Yanked = %v, want 'security issue'", files[3].Yanked)
-	}
+	require.Equal(t, true, files[2].Yanked)
+	require.Equal(t, "security issue", files[3].Yanked)
 }
 
 func TestParseHashFragment(t *testing.T) {
@@ -299,17 +245,11 @@ func TestParseHashFragment(t *testing.T) {
 		t.Run(tt.fragment, func(t *testing.T) {
 			hashes := parseHashFragment(tt.fragment)
 			if tt.wantAlg == "" {
-				if hashes != nil {
-					t.Errorf("parseHashFragment(%q) = %v, want nil", tt.fragment, hashes)
-				}
+				require.Nil(t, hashes)
 				return
 			}
-			if hashes == nil {
-				t.Fatalf("parseHashFragment(%q) = nil, want non-nil", tt.fragment)
-			}
-			if hashes[tt.wantAlg] != tt.wantHash {
-				t.Errorf("parseHashFragment(%q)[%s] = %q, want %q", tt.fragment, tt.wantAlg, hashes[tt.wantAlg], tt.wantHash)
-			}
+			require.NotNil(t, hashes)
+			require.Equal(t, tt.wantHash, hashes[tt.wantAlg])
 		})
 	}
 }
@@ -341,15 +281,11 @@ func TestHandlerFile(t *testing.T) {
 
 	// Create shared storage for this test
 	tmpDir, err := os.MkdirTemp("", "pypi-file-test-*")
-	if err != nil {
-		t.Fatalf("MkdirTemp() error = %v", err)
-	}
+	require.NoError(t, err)
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	b, err := backend.NewFilesystem(tmpDir)
-	if err != nil {
-		t.Fatalf("NewFilesystem() error = %v", err)
-	}
+	require.NoError(t, err)
 	cafs := store.NewCAFS(b)
 	idx := NewIndex(b)
 
@@ -361,9 +297,7 @@ func TestHandlerFile(t *testing.T) {
 	req.Host = "localhost:8080"
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("Project page status = %d, want %d, body: %s", w.Code, http.StatusOK, w.Body.String())
-	}
+	require.Equal(t, http.StatusOK, w.Code)
 
 	// Wait for async caching to complete
 	h.Close()
@@ -379,12 +313,8 @@ func TestHandlerFile(t *testing.T) {
 
 		h2.ServeHTTP(w, req)
 
-		if w.Code != http.StatusOK {
-			t.Errorf("Status = %d, want %d, body: %s", w.Code, http.StatusOK, w.Body.String())
-		}
-		if w.Body.String() != string(fileContent) {
-			t.Errorf("Body = %q, want %q", w.Body.String(), fileContent)
-		}
+		require.Equal(t, http.StatusOK, w.Code)
+		require.Equal(t, string(fileContent), w.Body.String())
 	})
 
 	t.Run("file not found", func(t *testing.T) {
@@ -393,9 +323,7 @@ func TestHandlerFile(t *testing.T) {
 
 		h2.ServeHTTP(w, req)
 
-		if w.Code != http.StatusNotFound {
-			t.Errorf("Status = %d, want %d", w.Code, http.StatusNotFound)
-		}
+		require.Equal(t, http.StatusNotFound, w.Code)
 	})
 }
 
@@ -425,15 +353,11 @@ func TestHandlerIntegrityCheckFailure(t *testing.T) {
 	defer upstream.Close()
 
 	tmpDir, err := os.MkdirTemp("", "pypi-test-*")
-	if err != nil {
-		t.Fatalf("MkdirTemp() error = %v", err)
-	}
+	require.NoError(t, err)
 	defer os.RemoveAll(tmpDir)
 
 	b, err := backend.NewFilesystem(tmpDir)
-	if err != nil {
-		t.Fatalf("NewFilesystem() error = %v", err)
-	}
+	require.NoError(t, err)
 	cafs := store.NewCAFS(b)
 	idx := NewIndex(b)
 
@@ -445,9 +369,7 @@ func TestHandlerIntegrityCheckFailure(t *testing.T) {
 	req.Host = "localhost:8080"
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("Project page status = %d, want %d", w.Code, http.StatusOK)
-	}
+	require.Equal(t, http.StatusOK, w.Code)
 
 	// Wait for async caching to complete
 	h.Close()
@@ -461,12 +383,8 @@ func TestHandlerIntegrityCheckFailure(t *testing.T) {
 	w = httptest.NewRecorder()
 	h2.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadGateway {
-		t.Errorf("Status = %d, want %d (integrity check should fail)", w.Code, http.StatusBadGateway)
-	}
-	if !strings.Contains(w.Body.String(), "integrity check failed") {
-		t.Errorf("Body should mention integrity check failure, got: %s", w.Body.String())
-	}
+	require.Equal(t, http.StatusBadGateway, w.Code)
+	require.Contains(t, w.Body.String(), "integrity check failed")
 }
 
 func TestHandlerMalformedUpstream(t *testing.T) {
@@ -489,9 +407,7 @@ func TestHandlerMalformedUpstream(t *testing.T) {
 
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadGateway {
-		t.Errorf("Status = %d, want %d for malformed JSON", w.Code, http.StatusBadGateway)
-	}
+	require.Equal(t, http.StatusBadGateway, w.Code)
 }
 
 func TestHandlerHEADRequest(t *testing.T) {
@@ -520,15 +436,11 @@ func TestHandlerHEADRequest(t *testing.T) {
 	defer upstream.Close()
 
 	tmpDir, err := os.MkdirTemp("", "pypi-test-*")
-	if err != nil {
-		t.Fatalf("MkdirTemp() error = %v", err)
-	}
+	require.NoError(t, err)
 	defer os.RemoveAll(tmpDir)
 
 	b, err := backend.NewFilesystem(tmpDir)
-	if err != nil {
-		t.Fatalf("NewFilesystem() error = %v", err)
-	}
+	require.NoError(t, err)
 	cafs := store.NewCAFS(b)
 	idx := NewIndex(b)
 
@@ -542,13 +454,8 @@ func TestHandlerHEADRequest(t *testing.T) {
 
 		h.ServeHTTP(w, req)
 
-		if w.Code != http.StatusOK {
-			t.Errorf("Status = %d, want %d", w.Code, http.StatusOK)
-		}
-		// HEAD should return headers but no body
-		if w.Body.Len() > 0 {
-			t.Errorf("HEAD response should have empty body, got %d bytes", w.Body.Len())
-		}
+		require.Equal(t, http.StatusOK, w.Code)
+		require.Zero(t, w.Body.Len())
 	})
 
 	// Fetch project page first to populate index for file test
@@ -570,16 +477,8 @@ func TestHandlerHEADRequest(t *testing.T) {
 
 		h2.ServeHTTP(w, req)
 
-		if w.Code != http.StatusOK {
-			t.Errorf("Status = %d, want %d", w.Code, http.StatusOK)
-		}
-		// HEAD should return Content-Length header
-		if cl := w.Header().Get("Content-Length"); cl == "" {
-			t.Error("HEAD response should include Content-Length header")
-		}
-		// HEAD should return empty body
-		if w.Body.Len() > 0 {
-			t.Errorf("HEAD response should have empty body, got %d bytes", w.Body.Len())
-		}
+		require.Equal(t, http.StatusOK, w.Code)
+		require.NotEmpty(t, w.Header().Get("Content-Length"))
+		require.Zero(t, w.Body.Len())
 	})
 }
