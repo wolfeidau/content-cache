@@ -21,8 +21,11 @@ content-cache acts as a local caching proxy that:
 go build -o content-cache ./cmd/content-cache
 ./content-cache -address :8080 -storage ./cache
 
-# Configure Go to use the cache
+# Configure Go to use the cache (option 1: with /goproxy prefix)
 export GOPROXY=http://localhost:8080/goproxy,direct
+
+# Or use directly at root (option 2: no prefix needed)
+# export GOPROXY=http://localhost:8080,direct
 
 # Downloads are now cached locally
 go get github.com/pkg/errors@v0.9.1  # First request: ~12ms (upstream)
@@ -65,6 +68,7 @@ pip install requests  # Second request: served from cache
 - **Pull-Through Caching**: Fetches from upstream on cache miss, caches for future requests
 - **Cache Expiration**: TTL-based and size-based (LRU) eviction with configurable intervals
 - **Authentication**: Support for OCI registry authentication with username/password
+- **Health & Stats Endpoints**: `/health` for liveness checks, `/stats` for cache statistics
 
 ### Planned
 - S3 storage backend
@@ -87,10 +91,11 @@ graph TD
 
     E --> F[Storage Backend]
 
-    A -.-> A1["/goproxy/*"]
+    A -.-> A1["/goproxy/* or /*"]
     A -.-> A2["/npm/*"]
     A -.-> A3["/v2/*"]
     A -.-> A4["/pypi/*"]
+    A -.-> A5["/health, /stats"]
 
     E -.-> E1["blobs/{hash[0:2]}/{hash}"]
     E -.-> E2["TTL + LRU Expiration"]
@@ -222,8 +227,14 @@ curl http://localhost:8080/pypi/simple/requests/
 # Test the OCI registry endpoint
 curl http://localhost:8080/v2/
 
-# Check cache statistics
-ls -lh ./cache/blobs/  # View cached content size
+# Health check
+curl http://localhost:8080/health
+
+# Check cache statistics (requires cache-ttl or cache-max-size to be set)
+curl http://localhost:8080/stats
+
+# View cached content size on disk
+ls -lh ./cache/blobs/
 ```
 
 ## Goals
