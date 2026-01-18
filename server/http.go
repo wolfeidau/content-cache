@@ -12,6 +12,7 @@ import (
 	"github.com/wolfeidau/content-cache/backend"
 	"github.com/wolfeidau/content-cache/expiry"
 	"github.com/wolfeidau/content-cache/protocol/goproxy"
+	"github.com/wolfeidau/content-cache/protocol/maven"
 	"github.com/wolfeidau/content-cache/protocol/npm"
 	"github.com/wolfeidau/content-cache/protocol/oci"
 	"github.com/wolfeidau/content-cache/protocol/pypi"
@@ -52,6 +53,13 @@ type Config struct {
 	// Default: 5 minutes (new versions may be published)
 	PyPIMetadataTTL time.Duration
 
+	// UpstreamMaven is the upstream Maven repository URL
+	UpstreamMaven string
+
+	// MavenMetadataTTL is how long to cache maven-metadata.xml.
+	// Default: 5 minutes (new versions may be published)
+	MavenMetadataTTL time.Duration
+
 	// CacheTTL is the time-to-live for cached content.
 	// Content not accessed within this duration is expired.
 	// Zero disables TTL-based expiration.
@@ -77,18 +85,20 @@ type Server struct {
 	logger     *slog.Logger
 
 	// Components
-	backend   backend.Backend
-	store     store.Store
-	index     *goproxy.Index
-	goproxy   *goproxy.Handler
-	npmIndex  *npm.Index
-	npm       *npm.Handler
-	ociIndex  *oci.Index
-	oci       *oci.Handler
-	pypiIndex *pypi.Index
-	pypi      *pypi.Handler
-	metadata  *expiry.MetadataStore
-	expiryMgr *expiry.Manager
+	backend    backend.Backend
+	store      store.Store
+	index      *goproxy.Index
+	goproxy    *goproxy.Handler
+	npmIndex   *npm.Index
+	npm        *npm.Handler
+	ociIndex   *oci.Index
+	oci        *oci.Handler
+	pypiIndex  *pypi.Index
+	pypi       *pypi.Handler
+	mavenIndex *maven.Index
+	maven      *maven.Handler
+	metadata   *expiry.MetadataStore
+	expiryMgr  *expiry.Manager
 }
 
 // New creates a new server with the given configuration.
@@ -192,21 +202,39 @@ func New(cfg Config) (*Server, error) {
 	}
 	pypiHandler := pypi.NewHandler(pypiIndex, cafsStore, pypiHandlerOpts...)
 
+	// Initialize Maven components
+	mavenIndex := maven.NewIndex(fsBackend)
+	mavenUpstreamOpts := []maven.UpstreamOption{}
+	if cfg.UpstreamMaven != "" {
+		mavenUpstreamOpts = append(mavenUpstreamOpts, maven.WithRepositoryURL(cfg.UpstreamMaven))
+	}
+	mavenUpstream := maven.NewUpstream(mavenUpstreamOpts...)
+	mavenHandlerOpts := []maven.HandlerOption{
+		maven.WithUpstream(mavenUpstream),
+		maven.WithLogger(cfg.Logger.With("component", "maven")),
+	}
+	if cfg.MavenMetadataTTL > 0 {
+		mavenHandlerOpts = append(mavenHandlerOpts, maven.WithMetadataTTL(cfg.MavenMetadataTTL))
+	}
+	mavenHandler := maven.NewHandler(mavenIndex, cafsStore, mavenHandlerOpts...)
+
 	s := &Server{
-		config:    cfg,
-		logger:    cfg.Logger,
-		backend:   fsBackend,
-		store:     cafsStore,
-		index:     goIndex,
-		goproxy:   goHandler,
-		npmIndex:  npmIndex,
-		npm:       npmHandler,
-		ociIndex:  ociIndex,
-		oci:       ociHandler,
-		pypiIndex: pypiIndex,
-		pypi:      pypiHandler,
-		metadata:  metadataStore,
-		expiryMgr: expiryMgr,
+		config:     cfg,
+		logger:     cfg.Logger,
+		backend:    fsBackend,
+		store:      cafsStore,
+		index:      goIndex,
+		goproxy:    goHandler,
+		npmIndex:   npmIndex,
+		npm:        npmHandler,
+		ociIndex:   ociIndex,
+		oci:        ociHandler,
+		pypiIndex:  pypiIndex,
+		pypi:       pypiHandler,
+		mavenIndex: mavenIndex,
+		maven:      mavenHandler,
+		metadata:   metadataStore,
+		expiryMgr:  expiryMgr,
 	}
 
 	// Build HTTP server
@@ -246,6 +274,11 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// The pypi handler handles all paths under /pypi/
 	mux.Handle("GET /pypi/", http.StripPrefix("/pypi", s.pypi))
 	mux.Handle("HEAD /pypi/", http.StripPrefix("/pypi", s.pypi))
+
+	// Maven repository endpoints
+	// The maven handler handles all paths under /maven/
+	mux.Handle("GET /maven/", http.StripPrefix("/maven", s.maven))
+	mux.Handle("HEAD /maven/", http.StripPrefix("/maven", s.maven))
 
 	// GOPROXY endpoints
 	// The goproxy handler handles all paths under /goproxy/

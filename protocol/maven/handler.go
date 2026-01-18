@@ -1,0 +1,662 @@
+package maven
+
+import (
+	"context"
+	"crypto/md5" //nolint:gosec // MD5 required for Maven protocol compatibility
+	"crypto/sha1"
+	"crypto/sha256"
+	"crypto/sha512"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"hash"
+	"io"
+	"log/slog"
+	"net/http"
+	"os"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+
+	contentcache "github.com/wolfeidau/content-cache"
+	"github.com/wolfeidau/content-cache/store"
+)
+
+const (
+	// cacheTimeout is the maximum time allowed for background caching operations.
+	cacheTimeout = 5 * time.Minute
+
+	// defaultMetadataTTL is the default TTL for maven-metadata.xml caching.
+	defaultMetadataTTL = 5 * time.Minute
+)
+
+// Regex patterns for parsing Maven repository paths.
+var (
+	// metadataRegex matches maven-metadata.xml paths:
+	// /{groupPath}/{artifactId}/maven-metadata.xml
+	metadataRegex = regexp.MustCompile(`^/(.+)/([^/]+)/maven-metadata\.xml$`)
+
+	// metadataChecksumRegex matches maven-metadata.xml checksum paths:
+	// /{groupPath}/{artifactId}/maven-metadata.xml.{md5|sha1|sha256|sha512}
+	metadataChecksumRegex = regexp.MustCompile(`^/(.+)/([^/]+)/maven-metadata\.xml\.(md5|sha1|sha256|sha512)$`)
+
+	// artifactRegex matches artifact paths:
+	// /{groupPath}/{artifactId}/{version}/{artifactId}-{version}[-{classifier}].{extension}
+	// Uses non-greedy matching for groupPath to handle nested groups correctly
+	artifactRegex = regexp.MustCompile(`^/(.+)/([^/]+)/([^/]+)/([^/]+)$`)
+)
+
+// Handler implements the Maven repository protocol as an HTTP handler.
+type Handler struct {
+	index       *Index
+	store       store.Store
+	upstream    *Upstream
+	logger      *slog.Logger
+	metadataTTL time.Duration
+
+	// Lifecycle management for background goroutines
+	wg     sync.WaitGroup
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+// HandlerOption configures a Handler.
+type HandlerOption func(*Handler)
+
+// WithLogger sets the logger for the handler.
+func WithLogger(logger *slog.Logger) HandlerOption {
+	return func(h *Handler) {
+		h.logger = logger
+	}
+}
+
+// WithUpstream sets the upstream repository.
+func WithUpstream(upstream *Upstream) HandlerOption {
+	return func(h *Handler) {
+		h.upstream = upstream
+	}
+}
+
+// WithMetadataTTL sets the TTL for maven-metadata.xml caching.
+func WithMetadataTTL(ttl time.Duration) HandlerOption {
+	return func(h *Handler) {
+		h.metadataTTL = ttl
+	}
+}
+
+// NewHandler creates a new Maven repository handler.
+func NewHandler(index *Index, store store.Store, opts ...HandlerOption) *Handler {
+	ctx, cancel := context.WithCancel(context.Background())
+	h := &Handler{
+		index:       index,
+		store:       store,
+		upstream:    NewUpstream(),
+		logger:      slog.Default(),
+		metadataTTL: defaultMetadataTTL,
+		ctx:         ctx,
+		cancel:      cancel,
+	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
+}
+
+// Close shuts down the handler and waits for background operations to complete.
+func (h *Handler) Close() {
+	h.cancel()
+	h.wg.Wait()
+}
+
+// ServeHTTP implements http.Handler.
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	path := r.URL.Path
+
+	// Handle root-level files (e.g., /archetype-catalog.xml)
+	if path == "/archetype-catalog.xml" {
+		h.handleRootFile(w, r, "archetype-catalog.xml")
+		return
+	}
+
+	// Handle root-level checksum files (e.g., /archetype-catalog.xml.sha1)
+	for _, checksumExt := range []string{".md5", ".sha1", ".sha256", ".sha512"} {
+		if strings.HasSuffix(path, checksumExt) {
+			baseFile := strings.TrimSuffix(path, checksumExt)
+			if baseFile == "/archetype-catalog.xml" {
+				checksumType := strings.TrimPrefix(checksumExt, ".")
+				h.handleRootFileChecksum(w, r, "archetype-catalog.xml", checksumType)
+				return
+			}
+		}
+	}
+
+	// Check for metadata checksum request first (more specific pattern)
+	if matches := metadataChecksumRegex.FindStringSubmatch(path); matches != nil {
+		groupPath := matches[1]
+		artifactID := matches[2]
+		checksumType := matches[3]
+		groupID := pathToGroupID(groupPath)
+		h.handleMetadataChecksum(w, r, groupID, artifactID, checksumType)
+		return
+	}
+
+	// Check for metadata request
+	if matches := metadataRegex.FindStringSubmatch(path); matches != nil {
+		groupPath := matches[1]
+		artifactID := matches[2]
+		groupID := pathToGroupID(groupPath)
+		h.handleMetadata(w, r, groupID, artifactID)
+		return
+	}
+
+	// Must be an artifact request
+	if matches := artifactRegex.FindStringSubmatch(path); matches != nil {
+		groupPath := matches[1]
+		artifactID := matches[2]
+		version := matches[3]
+		filename := matches[4]
+		groupID := pathToGroupID(groupPath)
+
+		// Parse the filename to determine if it's a checksum or artifact
+		coord, checksumType, err := parseArtifactFilename(artifactID, version, filename)
+		if err != nil {
+			h.logger.Debug("failed to parse artifact filename", "path", path, "error", err)
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		coord.GroupID = groupID
+
+		if checksumType != "" {
+			h.handleArtifactChecksum(w, r, coord, checksumType)
+		} else {
+			h.handleArtifact(w, r, coord)
+		}
+		return
+	}
+
+	http.Error(w, "not found", http.StatusNotFound)
+}
+
+// handleRootFile handles root-level files like archetype-catalog.xml.
+func (h *Handler) handleRootFile(w http.ResponseWriter, r *http.Request, filename string) {
+	ctx := r.Context()
+	logger := h.logger.With("filename", filename, "endpoint", "root-file")
+
+	// Fetch from upstream (no caching for root files as they change frequently)
+	logger.Debug("fetching root file from upstream")
+	data, err := h.upstream.FetchRootFile(ctx, filename)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		logger.Error("upstream fetch failed", "error", err)
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/xml")
+	if _, err := w.Write(data); err != nil {
+		logger.Error("failed to write response", "error", err)
+	}
+}
+
+// handleRootFileChecksum handles checksums for root-level files.
+func (h *Handler) handleRootFileChecksum(w http.ResponseWriter, r *http.Request, filename, checksumType string) {
+	ctx := r.Context()
+	logger := h.logger.With("filename", filename, "checksumType", checksumType, "endpoint", "root-file-checksum")
+
+	// Try to fetch checksum file from upstream first
+	checksumFile := filename + "." + checksumType
+	data, err := h.upstream.FetchRootFile(ctx, checksumFile)
+	if err == nil {
+		logger.Debug("fetched checksum from upstream")
+		w.Header().Set("Content-Type", "text/plain")
+		if _, err := w.Write(data); err != nil {
+			logger.Error("failed to write response", "error", err)
+		}
+		return
+	}
+
+	// If checksum file not found, compute from content
+	if errors.Is(err, ErrNotFound) {
+		logger.Debug("checksum file not found, computing from content")
+		content, err := h.upstream.FetchRootFile(ctx, filename)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				http.Error(w, "not found", http.StatusNotFound)
+				return
+			}
+			logger.Error("upstream fetch failed", "error", err)
+			http.Error(w, "upstream error", http.StatusBadGateway)
+			return
+		}
+
+		checksum := computeChecksum(content, checksumType)
+		w.Header().Set("Content-Type", "text/plain")
+		if _, err := w.Write([]byte(checksum)); err != nil {
+			logger.Error("failed to write response", "error", err)
+		}
+		return
+	}
+
+	logger.Error("upstream fetch failed", "error", err)
+	http.Error(w, "upstream error", http.StatusBadGateway)
+}
+
+// handleMetadata handles maven-metadata.xml requests.
+func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request, groupID, artifactID string) {
+	ctx := r.Context()
+	logger := h.logger.With("groupId", groupID, "artifactId", artifactID, "endpoint", "metadata")
+
+	// Try cache first
+	cached, err := h.index.GetCachedMetadata(ctx, groupID, artifactID)
+	if err == nil && !h.index.IsMetadataExpired(cached, h.metadataTTL) {
+		logger.Debug("cache hit")
+		w.Header().Set("Content-Type", "application/xml")
+		if _, err := w.Write(cached.Metadata); err != nil {
+			logger.Error("failed to write response", "error", err)
+		}
+		return
+	}
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		logger.Error("cache read failed", "error", err)
+	}
+
+	// Fetch from upstream
+	logger.Debug("cache miss, fetching from upstream")
+	rawMeta, err := h.upstream.FetchMetadataRaw(ctx, groupID, artifactID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		logger.Error("upstream fetch failed", "error", err)
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+
+	// Cache metadata asynchronously
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+		cacheCtx, cancel := context.WithTimeout(h.ctx, cacheTimeout)
+		defer cancel()
+		meta := &CachedMetadata{
+			GroupID:    groupID,
+			ArtifactID: artifactID,
+			Metadata:   rawMeta,
+		}
+		if err := h.index.PutCachedMetadata(cacheCtx, meta); err != nil {
+			logger.Error("failed to cache metadata", "error", err)
+		} else {
+			logger.Debug("cached metadata")
+		}
+	}()
+
+	w.Header().Set("Content-Type", "application/xml")
+	if _, err := w.Write(rawMeta); err != nil {
+		logger.Error("failed to write response", "error", err)
+	}
+}
+
+// handleMetadataChecksum handles maven-metadata.xml checksum requests.
+func (h *Handler) handleMetadataChecksum(w http.ResponseWriter, r *http.Request, groupID, artifactID, checksumType string) {
+	ctx := r.Context()
+	logger := h.logger.With("groupId", groupID, "artifactId", artifactID, "checksumType", checksumType, "endpoint", "metadata-checksum")
+
+	// Try to get cached metadata and compute checksum
+	cached, err := h.index.GetCachedMetadata(ctx, groupID, artifactID)
+	if err == nil && !h.index.IsMetadataExpired(cached, h.metadataTTL) {
+		checksum := computeChecksum(cached.Metadata, checksumType)
+		logger.Debug("computed checksum from cache")
+		w.Header().Set("Content-Type", "text/plain")
+		if _, err := w.Write([]byte(checksum)); err != nil {
+			logger.Error("failed to write response", "error", err)
+		}
+		return
+	}
+
+	// Fetch checksum from upstream - try to get the checksum file directly first
+	// If that fails, fall back to computing from metadata
+	logger.Debug("fetching metadata for checksum")
+	rawMeta, err := h.upstream.FetchMetadataRaw(ctx, groupID, artifactID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		logger.Error("upstream fetch failed", "error", err)
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+
+	checksum := computeChecksum(rawMeta, checksumType)
+	w.Header().Set("Content-Type", "text/plain")
+	if _, err := w.Write([]byte(checksum)); err != nil {
+		logger.Error("failed to write response", "error", err)
+	}
+}
+
+// handleArtifact handles artifact file requests (JAR, POM, etc.).
+func (h *Handler) handleArtifact(w http.ResponseWriter, r *http.Request, coord ArtifactCoordinate) {
+	ctx := r.Context()
+	logger := h.logger.With(
+		"groupId", coord.GroupID,
+		"artifactId", coord.ArtifactID,
+		"version", coord.Version,
+		"classifier", coord.Classifier,
+		"extension", coord.Extension,
+		"endpoint", "artifact",
+	)
+
+	// Try cache first
+	cached, err := h.index.GetCachedArtifact(ctx, coord)
+	if err == nil && !cached.Hash.IsZero() {
+		rc, err := h.store.Get(ctx, cached.Hash)
+		if err == nil {
+			logger.Debug("cache hit")
+			defer func() { _ = rc.Close() }()
+			w.Header().Set("Content-Type", contentTypeForExtension(coord.Extension))
+			if _, err := io.Copy(w, rc); err != nil {
+				logger.Error("failed to stream artifact", "error", err)
+			}
+			return
+		}
+		logger.Warn("artifact hash in index but not in store", "hash", cached.Hash.ShortString(), "error", err)
+	}
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		logger.Error("cache read failed", "error", err)
+	}
+
+	// Fetch SHA1 checksum from upstream for integrity verification
+	sha1Checksum, _ := h.upstream.FetchChecksum(ctx, coord, ChecksumSHA1)
+
+	// Fetch from upstream
+	logger.Debug("cache miss, fetching from upstream")
+	rc, contentLength, err := h.upstream.FetchArtifact(ctx, coord)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		logger.Error("upstream fetch failed", "error", err)
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+	defer func() { _ = rc.Close() }()
+
+	// Create temp file to avoid memory exhaustion for large artifacts
+	tmpFile, err := os.CreateTemp("", "maven-artifact-*")
+	if err != nil {
+		logger.Error("failed to create temp file", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	tmpPath := tmpFile.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	// Stream to temp file while computing hashes
+	hr := contentcache.NewHashingReader(rc)
+	sha1Hash := sha1.New()
+	md5Hash := md5.New()
+	multiWriter := io.MultiWriter(tmpFile, sha1Hash, md5Hash)
+
+	size, err := io.Copy(multiWriter, hr)
+	if err != nil {
+		_ = tmpFile.Close()
+		logger.Error("failed to read artifact", "error", err)
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+	blake3Hash := hr.Sum()
+	computedSHA1 := hex.EncodeToString(sha1Hash.Sum(nil))
+	computedMD5 := hex.EncodeToString(md5Hash.Sum(nil))
+
+	// Verify integrity if we have expected checksums
+	if sha1Checksum != "" && computedSHA1 != sha1Checksum {
+		_ = tmpFile.Close()
+		logger.Error("SHA1 integrity check failed",
+			"expected", sha1Checksum,
+			"computed", computedSHA1,
+		)
+		http.Error(w, "integrity check failed", http.StatusBadGateway)
+		return
+	}
+
+	if sha1Checksum != "" {
+		logger.Debug("integrity check passed", "sha1", computedSHA1)
+	}
+
+	// Seek to beginning for sending to client
+	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+		_ = tmpFile.Close()
+		logger.Error("failed to seek temp file", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// Write to client
+	w.Header().Set("Content-Type", contentTypeForExtension(coord.Extension))
+	if contentLength > 0 {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
+	}
+	if _, err := io.Copy(w, tmpFile); err != nil {
+		logger.Error("failed to write response", "error", err)
+	}
+	_ = tmpFile.Close()
+
+	// Cache asynchronously
+	checksums := Checksums{
+		SHA1: computedSHA1,
+		MD5:  computedMD5,
+	}
+	h.startBackgroundCache(coord, blake3Hash, size, tmpPath, checksums, logger)
+}
+
+// handleArtifactChecksum handles artifact checksum requests.
+func (h *Handler) handleArtifactChecksum(w http.ResponseWriter, r *http.Request, coord ArtifactCoordinate, checksumType string) {
+	ctx := r.Context()
+	logger := h.logger.With(
+		"groupId", coord.GroupID,
+		"artifactId", coord.ArtifactID,
+		"version", coord.Version,
+		"checksumType", checksumType,
+		"endpoint", "artifact-checksum",
+	)
+
+	// Try cache first - get cached artifact and return stored checksum
+	cached, err := h.index.GetCachedArtifact(ctx, coord)
+	if err == nil {
+		var checksum string
+		switch checksumType {
+		case ChecksumMD5:
+			checksum = cached.Checksums.MD5
+		case ChecksumSHA1:
+			checksum = cached.Checksums.SHA1
+		case ChecksumSHA256:
+			checksum = cached.Checksums.SHA256
+		case ChecksumSHA512:
+			checksum = cached.Checksums.SHA512
+		}
+		if checksum != "" {
+			logger.Debug("cache hit for checksum")
+			w.Header().Set("Content-Type", "text/plain")
+			if _, err := w.Write([]byte(checksum)); err != nil {
+				logger.Error("failed to write response", "error", err)
+			}
+			return
+		}
+	}
+
+	// Fetch from upstream
+	logger.Debug("cache miss, fetching checksum from upstream")
+	checksum, err := h.upstream.FetchChecksum(ctx, coord, checksumType)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		logger.Error("upstream fetch failed", "error", err)
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain")
+	if _, err := w.Write([]byte(checksum)); err != nil {
+		logger.Error("failed to write response", "error", err)
+	}
+}
+
+// startBackgroundCache starts a background caching operation.
+func (h *Handler) startBackgroundCache(coord ArtifactCoordinate, hash contentcache.Hash, size int64, tmpPath string, checksums Checksums, logger *slog.Logger) {
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+
+		ctx, cancel := context.WithTimeout(h.ctx, cacheTimeout)
+		defer cancel()
+
+		h.cacheArtifact(ctx, coord, hash, size, tmpPath, checksums, logger)
+	}()
+}
+
+// cacheArtifact stores an artifact in the cache from a temp file.
+func (h *Handler) cacheArtifact(ctx context.Context, coord ArtifactCoordinate, hash contentcache.Hash, size int64, tmpPath string, checksums Checksums, logger *slog.Logger) {
+	// Open temp file for reading
+	tmpFile, err := os.Open(tmpPath)
+	if err != nil {
+		logger.Error("failed to open temp file for caching", "error", err)
+		return
+	}
+	defer func() { _ = tmpFile.Close() }()
+
+	// Store in CAFS
+	storedHash, err := h.store.Put(ctx, tmpFile)
+	if err != nil {
+		logger.Error("failed to store artifact", "error", err)
+		return
+	}
+
+	// Verify hash matches
+	if storedHash != hash {
+		logger.Warn("hash mismatch during caching", "expected", hash.ShortString(), "got", storedHash.ShortString())
+	}
+
+	// Update index
+	artifact := &CachedArtifact{
+		GroupID:    coord.GroupID,
+		ArtifactID: coord.ArtifactID,
+		Version:    coord.Version,
+		Classifier: coord.Classifier,
+		Extension:  coord.Extension,
+		Hash:       hash,
+		Size:       size,
+		Checksums:  checksums,
+	}
+	if err := h.index.PutCachedArtifact(ctx, artifact); err != nil {
+		logger.Error("failed to update index", "error", err)
+		return
+	}
+
+	logger.Info("cached artifact", "hash", hash.ShortString(), "size", size)
+}
+
+// parseArtifactFilename parses a Maven artifact filename.
+// Returns the artifact coordinate (without groupID) and optionally the checksum type.
+// Example filenames:
+//   - commons-lang3-3.12.0.jar
+//   - commons-lang3-3.12.0-sources.jar
+//   - commons-lang3-3.12.0.pom
+//   - commons-lang3-3.12.0.jar.sha1
+func parseArtifactFilename(artifactID, version, filename string) (ArtifactCoordinate, string, error) {
+	coord := ArtifactCoordinate{
+		ArtifactID: artifactID,
+		Version:    version,
+	}
+
+	// Check for checksum suffix
+	checksumType := ""
+	for _, ct := range []string{ChecksumMD5, ChecksumSHA1, ChecksumSHA256, ChecksumSHA512} {
+		suffix := "." + ct
+		if strings.HasSuffix(filename, suffix) {
+			checksumType = ct
+			filename = strings.TrimSuffix(filename, suffix)
+			break
+		}
+	}
+
+	// Expected base name: {artifactId}-{version}[-{classifier}].{extension}
+	prefix := artifactID + "-" + version
+	if !strings.HasPrefix(filename, prefix) {
+		return coord, "", fmt.Errorf("filename does not match expected pattern: %s", filename)
+	}
+
+	remainder := strings.TrimPrefix(filename, prefix)
+	if remainder == "" {
+		return coord, "", fmt.Errorf("filename missing extension: %s", filename)
+	}
+
+	// Check for classifier or extension
+	switch {
+	case strings.HasPrefix(remainder, "-"):
+		// Has classifier: -{classifier}.{extension}
+		remainder = strings.TrimPrefix(remainder, "-")
+		lastDot := strings.LastIndex(remainder, ".")
+		if lastDot <= 0 {
+			return coord, "", fmt.Errorf("invalid classifier/extension format: %s", filename)
+		}
+		coord.Classifier = remainder[:lastDot]
+		coord.Extension = remainder[lastDot+1:]
+	case strings.HasPrefix(remainder, "."):
+		// No classifier: .{extension}
+		coord.Extension = strings.TrimPrefix(remainder, ".")
+	default:
+		return coord, "", fmt.Errorf("invalid filename format: %s", filename)
+	}
+
+	if coord.Extension == "" {
+		return coord, "", fmt.Errorf("missing extension: %s", filename)
+	}
+
+	return coord, checksumType, nil
+}
+
+// computeChecksum computes a checksum of the given data.
+func computeChecksum(data []byte, checksumType string) string {
+	var h hash.Hash
+	switch checksumType {
+	case ChecksumMD5:
+		h = md5.New()
+	case ChecksumSHA1:
+		h = sha1.New()
+	case ChecksumSHA256:
+		h = sha256.New()
+	case ChecksumSHA512:
+		h = sha512.New()
+	default:
+		return ""
+	}
+	h.Write(data)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// contentTypeForExtension returns the content type for a file extension.
+func contentTypeForExtension(ext string) string {
+	switch ext {
+	case ExtensionJAR, ExtensionWAR, ExtensionEAR, ExtensionAAR:
+		return "application/java-archive"
+	case ExtensionPOM:
+		return "application/xml"
+	case ExtensionZIP:
+		return "application/zip"
+	default:
+		return "application/octet-stream"
+	}
+}
