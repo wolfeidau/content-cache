@@ -246,6 +246,13 @@ var normalizeRegex = regexp.MustCompile(`[-_.]+`)
 
 // NormalizeProjectName normalizes a project name according to PEP 503.
 // Lowercases and replaces runs of '.', '-', '_' with a single '-'.
+// Returns an empty string if the input is empty or contains only separators.
 func NormalizeProjectName(name string) string {
-	return strings.ToLower(normalizeRegex.ReplaceAllString(name, "-"))
+	if name == "" {
+		return ""
+	}
+	normalized := strings.ToLower(normalizeRegex.ReplaceAllString(name, "-"))
+	// Trim leading/trailing hyphens that might result from normalization
+	normalized = strings.Trim(normalized, "-")
+	return normalized
 }

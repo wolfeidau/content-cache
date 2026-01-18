@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -216,9 +217,8 @@ func (h *Handler) handleProject(w http.ResponseWriter, r *http.Request, project 
 
 	// Create cached project from parsed files
 	cached = &CachedProject{
-		Name:    normalized,
-		Files:   make(map[string]*CachedFile),
-		RawPage: body,
+		Name:  normalized,
+		Files: make(map[string]*CachedFile),
 	}
 	for _, f := range files {
 		cached.Files[f.Filename] = &CachedFile{
@@ -280,6 +280,13 @@ func (h *Handler) handleFile(w http.ResponseWriter, r *http.Request) {
 			logger.Debug("cache hit")
 			defer func() { _ = rc.Close() }()
 			w.Header().Set("Content-Type", "application/octet-stream")
+			if cachedFile.Size > 0 {
+				w.Header().Set("Content-Length", strconv.FormatInt(cachedFile.Size, 10))
+			}
+			// For HEAD requests, just return headers without body
+			if r.Method == http.MethodHead {
+				return
+			}
 			if _, err := io.Copy(w, rc); err != nil {
 				logger.Error("failed to stream file", "error", err)
 			}
@@ -391,8 +398,12 @@ func (h *Handler) handleFile(w http.ResponseWriter, r *http.Request) {
 
 	// Write to client
 	w.Header().Set("Content-Type", "application/octet-stream")
-	if _, err := io.Copy(w, tmpFile); err != nil {
-		logger.Error("failed to write response", "error", err)
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	// For HEAD requests, just return headers without body
+	if r.Method != http.MethodHead {
+		if _, err := io.Copy(w, tmpFile); err != nil {
+			logger.Error("failed to write response", "error", err)
+		}
 	}
 	_ = tmpFile.Close()
 
@@ -470,6 +481,16 @@ func (h *Handler) writeProjectResponse(w http.ResponseWriter, r *http.Request, c
 	sort.Slice(files, func(i, j int) bool {
 		return files[i].Filename < files[j].Filename
 	})
+
+	// For HEAD requests, just set content type and return
+	if r.Method == http.MethodHead {
+		if wantsJSON(r) {
+			w.Header().Set("Content-Type", ContentTypeJSON)
+		} else {
+			w.Header().Set("Content-Type", ContentTypeHTML)
+		}
+		return
+	}
 
 	if wantsJSON(r) {
 		h.writeProjectJSON(w, normalized, files)
@@ -560,7 +581,7 @@ func (h *Handler) writeProjectHTML(w http.ResponseWriter, project string, files 
 		fd := fileData{
 			URL:            f.URL,
 			Filename:       f.Filename,
-			RequiresPython: template.HTMLEscapeString(f.RequiresPython),
+			RequiresPython: f.RequiresPython, // html/template auto-escapes
 		}
 		// Add hash fragment if available
 		if sha256, ok := f.Hashes["sha256"]; ok {

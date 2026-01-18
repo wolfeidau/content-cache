@@ -109,8 +109,16 @@ func (idx *Index) SetFileHash(ctx context.Context, project, filename string, has
 	var cached CachedProject
 	rc, err := idx.backend.Read(ctx, key)
 	if err == nil {
-		_ = json.NewDecoder(rc).Decode(&cached)
+		decodeErr := json.NewDecoder(rc).Decode(&cached)
 		_ = rc.Close()
+		// If decode fails, we'll start fresh with an empty project
+		// This handles corrupted cache entries gracefully
+		if decodeErr != nil {
+			cached = CachedProject{}
+		}
+	} else if !errors.Is(err, backend.ErrNotFound) {
+		// Unexpected read error (not just missing cache entry)
+		return fmt.Errorf("reading existing project info: %w", err)
 	}
 
 	if cached.Name == "" {

@@ -45,7 +45,6 @@ type ProjectFile struct {
 type CachedProject struct {
 	Name      string                 `json:"name"`
 	Files     map[string]*CachedFile `json:"files"` // filename -> CachedFile
-	RawPage   []byte                 `json:"raw_page,omitempty"`
 	CachedAt  time.Time              `json:"cached_at"`
 	UpdatedAt time.Time              `json:"updated_at"`
 }

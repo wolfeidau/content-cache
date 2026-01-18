@@ -214,6 +214,12 @@ func TestNormalizeProjectName(t *testing.T) {
 		{"Pillow", "pillow"},
 		{"some__weird___name", "some-weird-name"},
 		{"A.B_C-D", "a-b-c-d"},
+		// Edge cases
+		{"", ""},
+		{"___", ""},
+		{"-.-", ""},
+		{"-foo-", "foo"},
+		{"_bar_", "bar"},
 	}
 
 	for _, tt := range tests {
@@ -389,6 +395,151 @@ func TestHandlerFile(t *testing.T) {
 
 		if w.Code != http.StatusNotFound {
 			t.Errorf("Status = %d, want %d", w.Code, http.StatusNotFound)
+		}
+	})
+}
+
+func TestHandlerIntegrityCheckFailure(t *testing.T) {
+	// Upstream returns file with wrong content (hash won't match)
+	wrongContent := []byte("this-is-wrong-content")
+	expectedHash := "e8d468b23a7abc7dfe5cf9832305250ad33b58a189ffa6037368d41278aab330" // hash of different content
+
+	var upstreamURL string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/simple/bad-pkg/" {
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<!DOCTYPE html>
+<html><body>
+<a href="` + upstreamURL + `/files/bad_pkg-1.0.0.whl#sha256=` + expectedHash + `">bad_pkg-1.0.0.whl</a>
+</body></html>`))
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "bad_pkg-1.0.0.whl") {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(wrongContent) // Wrong content!
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	upstreamURL = upstream.URL
+	defer upstream.Close()
+
+	h, cleanup := newTestHandler(t, upstream)
+	defer cleanup()
+
+	// First fetch project page to populate index
+	req := httptest.NewRequest(http.MethodGet, "/simple/bad-pkg/", nil)
+	req.Host = "localhost:8080"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Project page status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	// Now try to download the file - should fail integrity check
+	req = httptest.NewRequest(http.MethodGet, "/packages/bad-pkg/bad_pkg-1.0.0.whl", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("Status = %d, want %d (integrity check should fail)", w.Code, http.StatusBadGateway)
+	}
+	if !strings.Contains(w.Body.String(), "integrity check failed") {
+		t.Errorf("Body should mention integrity check failure, got: %s", w.Body.String())
+	}
+}
+
+func TestHandlerMalformedUpstream(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/simple/malformed-json/" {
+			w.Header().Set("Content-Type", ContentTypeJSON)
+			_, _ = w.Write([]byte(`{"invalid json`)) // Malformed JSON
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer upstream.Close()
+
+	h, cleanup := newTestHandler(t, upstream)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodGet, "/simple/malformed-json/", nil)
+	req.Header.Set("Accept", ContentTypeJSON)
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("Status = %d, want %d for malformed JSON", w.Code, http.StatusBadGateway)
+	}
+}
+
+func TestHandlerHEADRequest(t *testing.T) {
+	fileContent := []byte("test-file-content-for-head")
+	// SHA256 of fileContent
+	fileHash := "f81b8bf17fad7a3b7885eb526b4efc62ed2843eb52514eb76b59936c527ad6cf"
+
+	var upstreamURL string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/simple/head-test/" {
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<!DOCTYPE html>
+<html><body>
+<a href="` + upstreamURL + `/files/head_test-1.0.0.whl#sha256=` + fileHash + `">head_test-1.0.0.whl</a>
+</body></html>`))
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "head_test-1.0.0.whl") {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(fileContent)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	upstreamURL = upstream.URL
+	defer upstream.Close()
+
+	h, cleanup := newTestHandler(t, upstream)
+	defer cleanup()
+
+	t.Run("HEAD on project page", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodHead, "/simple/head-test/", nil)
+		req.Host = "localhost:8080"
+		w := httptest.NewRecorder()
+
+		h.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("Status = %d, want %d", w.Code, http.StatusOK)
+		}
+		// HEAD should return headers but no body
+		if w.Body.Len() > 0 {
+			t.Errorf("HEAD response should have empty body, got %d bytes", w.Body.Len())
+		}
+	})
+
+	// Fetch project page first to populate index for file test
+	req := httptest.NewRequest(http.MethodGet, "/simple/head-test/", nil)
+	req.Host = "localhost:8080"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	t.Run("HEAD on file download", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodHead, "/packages/head-test/head_test-1.0.0.whl", nil)
+		w := httptest.NewRecorder()
+
+		h.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("Status = %d, want %d", w.Code, http.StatusOK)
+		}
+		// HEAD should return Content-Length header
+		if cl := w.Header().Get("Content-Length"); cl == "" {
+			t.Error("HEAD response should include Content-Length header")
+		}
+		// HEAD should return empty body
+		if w.Body.Len() > 0 {
+			t.Errorf("HEAD response should have empty body, got %d bytes", w.Body.Len())
 		}
 	})
 }
