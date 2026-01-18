@@ -1,6 +1,6 @@
 # content-cache
 
-A content-addressable caching proxy for Go modules, NPM packages, and OCI registries. Reduces build times and network bandwidth by caching package downloads locally with automatic deduplication and expiration policies.
+A content-addressable caching proxy for Go modules, NPM packages, PyPI packages, and OCI registries. Reduces build times and network bandwidth by caching package downloads locally with automatic deduplication and expiration policies.
 
 ## Problem
 
@@ -37,6 +37,13 @@ npm install express  # Second request: served from cache
 
 # Use as an OCI registry mirror
 docker pull localhost:8080/library/alpine:latest
+
+# Configure pip to use the cache
+pip install --index-url http://localhost:8080/pypi/simple/ requests
+
+# Python packages are now cached
+pip install requests  # First request: fetches from upstream
+pip install requests  # Second request: served from cache
 ```
 
 ## Performance
@@ -51,6 +58,7 @@ docker pull localhost:8080/library/alpine:latest
 ### Implemented
 - **GOPROXY Protocol**: Full support for Go module proxy protocol (`/@v/list`, `.info`, `.mod`, `.zip`)
 - **NPM Registry Protocol**: Complete NPM registry support with tarball caching and integrity verification
+- **PyPI Simple API**: Full support for PEP 503/691 Simple Repository API with wheel and sdist caching
 - **OCI Distribution v2**: Read-through cache for container registries with tag-to-digest resolution
 - **Content-Addressable Storage**: BLAKE3 hashing with automatic deduplication
 - **Filesystem Backend**: Atomic writes with sharded directory structure
@@ -70,16 +78,19 @@ graph TD
     A[HTTP Server] --> B[GOPROXY Handler]
     A --> C[NPM Handler]
     A --> D[OCI Handler]
+    A --> G[PyPI Handler]
 
     B --> E[Content-Addressable Store]
     C --> E
     D --> E
+    G --> E
 
     E --> F[Storage Backend]
 
     A -.-> A1["/goproxy/*"]
     A -.-> A2["/npm/*"]
     A -.-> A3["/v2/*"]
+    A -.-> A4["/pypi/*"]
 
     E -.-> E1["blobs/{hash[0:2]}/{hash}"]
     E -.-> E2["TTL + LRU Expiration"]
@@ -107,6 +118,7 @@ All configuration options are provided via command-line flags:
 -go-upstream ""             # Upstream Go module proxy URL (default: proxy.golang.org)
 -npm-upstream ""            # Upstream NPM registry URL (default: registry.npmjs.org)
 -oci-upstream ""            # Upstream OCI registry URL (default: registry-1.docker.io)
+-pypi-upstream ""           # Upstream PyPI Simple API URL (default: pypi.org/simple/)
 ```
 
 ### OCI Authentication
@@ -114,6 +126,11 @@ All configuration options are provided via command-line flags:
 -oci-username ""            # OCI registry username for authentication
 -oci-password ""            # OCI registry password for authentication
 -oci-tag-ttl 5m             # TTL for OCI tag->digest cache mappings
+```
+
+### PyPI Options
+```bash
+-pypi-metadata-ttl 5m       # TTL for PyPI project metadata cache
 ```
 
 ### Cache Management
@@ -141,6 +158,8 @@ All configuration options are provided via command-line flags:
   -oci-username myuser \
   -oci-password mypassword \
   -oci-tag-ttl 10m \
+  -pypi-upstream https://pypi.org/simple/ \
+  -pypi-metadata-ttl 10m \
   -cache-ttl 336h \
   -cache-max-size 21474836480 \
   -expiry-check-interval 30m \
@@ -169,6 +188,10 @@ All configuration options are provided via command-line flags:
 │       └── versions/
 │           └── 4.18.2/
 │               └── tarball  # Reference to blob
+├── pypi/                    # PyPI package index
+│   └── projects/
+│       └── requests/
+│           └── metadata.json  # Project files and hashes
 └── oci/                     # OCI image index
     └── library/
         └── alpine/
@@ -192,6 +215,9 @@ curl http://localhost:8080/goproxy/github.com/pkg/errors/@v/v0.9.1.info
 
 # Test the NPM registry endpoint
 curl http://localhost:8080/npm/express
+
+# Test the PyPI Simple API endpoint
+curl http://localhost:8080/pypi/simple/requests/
 
 # Test the OCI registry endpoint
 curl http://localhost:8080/v2/

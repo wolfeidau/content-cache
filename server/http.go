@@ -14,6 +14,7 @@ import (
 	"github.com/wolfeidau/content-cache/protocol/goproxy"
 	"github.com/wolfeidau/content-cache/protocol/npm"
 	"github.com/wolfeidau/content-cache/protocol/oci"
+	"github.com/wolfeidau/content-cache/protocol/pypi"
 	"github.com/wolfeidau/content-cache/store"
 )
 
@@ -43,6 +44,13 @@ type Config struct {
 	// OCITagTTL is how long to cache tag->digest mappings.
 	// Default: 5 minutes (tags can change, unlike digests)
 	OCITagTTL time.Duration
+
+	// UpstreamPyPI is the upstream PyPI Simple API URL
+	UpstreamPyPI string
+
+	// PyPIMetadataTTL is how long to cache project metadata.
+	// Default: 5 minutes (new versions may be published)
+	PyPIMetadataTTL time.Duration
 
 	// CacheTTL is the time-to-live for cached content.
 	// Content not accessed within this duration is expired.
@@ -77,6 +85,8 @@ type Server struct {
 	npm       *npm.Handler
 	ociIndex  *oci.Index
 	oci       *oci.Handler
+	pypiIndex *pypi.Index
+	pypi      *pypi.Handler
 	metadata  *expiry.MetadataStore
 	expiryMgr *expiry.Manager
 }
@@ -166,6 +176,22 @@ func New(cfg Config) (*Server, error) {
 	}
 	ociHandler := oci.NewHandler(ociIndex, cafsStore, ociHandlerOpts...)
 
+	// Initialize PyPI components
+	pypiIndex := pypi.NewIndex(fsBackend)
+	pypiUpstreamOpts := []pypi.UpstreamOption{}
+	if cfg.UpstreamPyPI != "" {
+		pypiUpstreamOpts = append(pypiUpstreamOpts, pypi.WithSimpleURL(cfg.UpstreamPyPI))
+	}
+	pypiUpstream := pypi.NewUpstream(pypiUpstreamOpts...)
+	pypiHandlerOpts := []pypi.HandlerOption{
+		pypi.WithUpstream(pypiUpstream),
+		pypi.WithLogger(cfg.Logger.With("component", "pypi")),
+	}
+	if cfg.PyPIMetadataTTL > 0 {
+		pypiHandlerOpts = append(pypiHandlerOpts, pypi.WithMetadataTTL(cfg.PyPIMetadataTTL))
+	}
+	pypiHandler := pypi.NewHandler(pypiIndex, cafsStore, pypiHandlerOpts...)
+
 	s := &Server{
 		config:    cfg,
 		logger:    cfg.Logger,
@@ -177,6 +203,8 @@ func New(cfg Config) (*Server, error) {
 		npm:       npmHandler,
 		ociIndex:  ociIndex,
 		oci:       ociHandler,
+		pypiIndex: pypiIndex,
+		pypi:      pypiHandler,
 		metadata:  metadataStore,
 		expiryMgr: expiryMgr,
 	}
@@ -213,6 +241,11 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// The OCI handler handles all paths under /v2/
 	mux.Handle("GET /v2/", s.oci)
 	mux.Handle("HEAD /v2/", s.oci)
+
+	// PyPI Simple API endpoints
+	// The pypi handler handles all paths under /pypi/
+	mux.Handle("GET /pypi/", http.StripPrefix("/pypi", s.pypi))
+	mux.Handle("HEAD /pypi/", http.StripPrefix("/pypi", s.pypi))
 
 	// GOPROXY endpoints
 	// The goproxy handler handles all paths under /goproxy/
