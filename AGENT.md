@@ -24,3 +24,10 @@ feat: add npm registry support and TTL/LRU cache expiration
 - Implement expiry system with TTL and LRU eviction policies
 - Fix golangci-lint errors across codebase
 ```
+
+## Code Style
+- **Logging**: ALWAYS use `"log/slog"` for all logging operations
+- Use `testify/require` for tests
+- Error handling: return errors up the stack, log at top level
+- Package names: lowercase, descriptive (buildkite, commands, trace, tokens)
+- Use contexts for cancellation and tracing throughout

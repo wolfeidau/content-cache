@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	contentcache "github.com/wolfeidau/content-cache"
 	"github.com/wolfeidau/content-cache/backend"
 	"github.com/wolfeidau/content-cache/store"
@@ -19,14 +20,10 @@ import (
 func newTestHandler(t *testing.T, upstreamURL string) (*Handler, func()) {
 	t.Helper()
 	tmpDir, err := os.MkdirTemp("", "oci-handler-test-*")
-	if err != nil {
-		t.Fatalf("MkdirTemp() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	b, err := backend.NewFilesystem(tmpDir)
-	if err != nil {
-		t.Fatalf("NewFilesystem() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	idx := NewIndex(b)
 	st := store.NewCAFS(b)
@@ -55,15 +52,9 @@ func TestHandlerVersionCheck(t *testing.T) {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 
-		if w.Code != http.StatusOK {
-			t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
-		}
-		if ct := w.Header().Get("Content-Type"); ct != "application/json" {
-			t.Errorf("Content-Type = %q, want %q", ct, "application/json")
-		}
-		if v := w.Header().Get("Docker-Distribution-API-Version"); v != "registry/2.0" {
-			t.Errorf("Docker-Distribution-API-Version = %q, want %q", v, "registry/2.0")
-		}
+		require.Equal(t, http.StatusOK, w.Code)
+		require.Equal(t, "application/json", w.Header().Get("Content-Type"))
+		require.Equal(t, "registry/2.0", w.Header().Get("Docker-Distribution-API-Version"))
 	})
 
 	t.Run("GET /v2 (without trailing slash)", func(t *testing.T) {
@@ -71,9 +62,7 @@ func TestHandlerVersionCheck(t *testing.T) {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 
-		if w.Code != http.StatusOK {
-			t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
-		}
+		require.Equal(t, http.StatusOK, w.Code)
 	})
 
 	t.Run("HEAD /v2/", func(t *testing.T) {
@@ -81,9 +70,7 @@ func TestHandlerVersionCheck(t *testing.T) {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 
-		if w.Code != http.StatusOK {
-			t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
-		}
+		require.Equal(t, http.StatusOK, w.Code)
 	})
 }
 
@@ -98,9 +85,7 @@ func TestHandlerMethodNotAllowed(t *testing.T) {
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, req)
 
-			if w.Code != http.StatusMethodNotAllowed {
-				t.Errorf("status = %d, want %d", w.Code, http.StatusMethodNotAllowed)
-			}
+			require.Equal(t, http.StatusMethodNotAllowed, w.Code)
 		})
 	}
 }
@@ -120,9 +105,7 @@ func TestHandlerNotFound(t *testing.T) {
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, req)
 
-			if w.Code != http.StatusNotFound {
-				t.Errorf("status = %d, want %d", w.Code, http.StatusNotFound)
-			}
+			require.Equal(t, http.StatusNotFound, w.Code)
 		})
 	}
 }
@@ -157,18 +140,10 @@ func TestHandlerGetManifest(t *testing.T) {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 
-		if w.Code != http.StatusOK {
-			t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
-		}
-		if ct := w.Header().Get("Content-Type"); ct != "application/vnd.oci.image.manifest.v1+json" {
-			t.Errorf("Content-Type = %q", ct)
-		}
-		if d := w.Header().Get("Docker-Content-Digest"); d != manifestDigest {
-			t.Errorf("Docker-Content-Digest = %q", d)
-		}
-		if w.Body.String() != manifestContent {
-			t.Errorf("body = %q", w.Body.String())
-		}
+		require.Equal(t, http.StatusOK, w.Code)
+		require.Equal(t, "application/vnd.oci.image.manifest.v1+json", w.Header().Get("Content-Type"))
+		require.Equal(t, manifestDigest, w.Header().Get("Docker-Content-Digest"))
+		require.Equal(t, manifestContent, w.Body.String())
 	})
 
 	t.Run("fetch by digest", func(t *testing.T) {
@@ -176,9 +151,7 @@ func TestHandlerGetManifest(t *testing.T) {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 
-		if w.Code != http.StatusOK {
-			t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
-		}
+		require.Equal(t, http.StatusOK, w.Code)
 	})
 
 	t.Run("not found", func(t *testing.T) {
@@ -186,9 +159,7 @@ func TestHandlerGetManifest(t *testing.T) {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 
-		if w.Code != http.StatusNotFound {
-			t.Errorf("status = %d, want %d", w.Code, http.StatusNotFound)
-		}
+		require.Equal(t, http.StatusNotFound, w.Code)
 	})
 
 	// Wait for background caching
@@ -205,9 +176,7 @@ func TestHandlerGetManifest(t *testing.T) {
 		h2.ServeHTTP(w, req)
 
 		// Should still work (will fetch from upstream since new handler has empty cache)
-		if w.Code != http.StatusOK {
-			t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
-		}
+		require.Equal(t, http.StatusOK, w.Code)
 	})
 }
 
@@ -238,15 +207,9 @@ func TestHandlerHeadManifest(t *testing.T) {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 
-		if w.Code != http.StatusOK {
-			t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
-		}
-		if ct := w.Header().Get("Content-Type"); ct != "application/vnd.oci.image.manifest.v1+json" {
-			t.Errorf("Content-Type = %q", ct)
-		}
-		if d := w.Header().Get("Docker-Content-Digest"); d != "sha256:abc123" {
-			t.Errorf("Docker-Content-Digest = %q", d)
-		}
+		require.Equal(t, http.StatusOK, w.Code)
+		require.Equal(t, "application/vnd.oci.image.manifest.v1+json", w.Header().Get("Content-Type"))
+		require.Equal(t, "sha256:abc123", w.Header().Get("Docker-Content-Digest"))
 	})
 
 	t.Run("not found", func(t *testing.T) {
@@ -254,9 +217,7 @@ func TestHandlerHeadManifest(t *testing.T) {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 
-		if w.Code != http.StatusNotFound {
-			t.Errorf("status = %d, want %d", w.Code, http.StatusNotFound)
-		}
+		require.Equal(t, http.StatusNotFound, w.Code)
 	})
 }
 
@@ -286,18 +247,10 @@ func TestHandlerGetBlob(t *testing.T) {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 
-		if w.Code != http.StatusOK {
-			t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
-		}
-		if ct := w.Header().Get("Content-Type"); ct != "application/octet-stream" {
-			t.Errorf("Content-Type = %q", ct)
-		}
-		if d := w.Header().Get("Docker-Content-Digest"); d != blobDigest {
-			t.Errorf("Docker-Content-Digest = %q, want %q", d, blobDigest)
-		}
-		if w.Body.String() != string(blobContent) {
-			t.Errorf("body mismatch")
-		}
+		require.Equal(t, http.StatusOK, w.Code)
+		require.Equal(t, "application/octet-stream", w.Header().Get("Content-Type"))
+		require.Equal(t, blobDigest, w.Header().Get("Docker-Content-Digest"))
+		require.Equal(t, string(blobContent), w.Body.String())
 	})
 
 	t.Run("not found", func(t *testing.T) {
@@ -305,9 +258,7 @@ func TestHandlerGetBlob(t *testing.T) {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 
-		if w.Code != http.StatusNotFound {
-			t.Errorf("status = %d, want %d", w.Code, http.StatusNotFound)
-		}
+		require.Equal(t, http.StatusNotFound, w.Code)
 	})
 
 	t.Run("invalid digest format", func(t *testing.T) {
@@ -316,9 +267,7 @@ func TestHandlerGetBlob(t *testing.T) {
 		h.ServeHTTP(w, req)
 
 		// Should return 404 as the path regex doesn't match
-		if w.Code != http.StatusNotFound {
-			t.Errorf("status = %d, want %d", w.Code, http.StatusNotFound)
-		}
+		require.Equal(t, http.StatusNotFound, w.Code)
 	})
 }
 
@@ -348,15 +297,9 @@ func TestHandlerHeadBlob(t *testing.T) {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 
-		if w.Code != http.StatusOK {
-			t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
-		}
-		if ct := w.Header().Get("Content-Type"); ct != "application/octet-stream" {
-			t.Errorf("Content-Type = %q", ct)
-		}
-		if cl := w.Header().Get("Content-Length"); cl != "4096" {
-			t.Errorf("Content-Length = %q", cl)
-		}
+		require.Equal(t, http.StatusOK, w.Code)
+		require.Equal(t, "application/octet-stream", w.Header().Get("Content-Type"))
+		require.Equal(t, "4096", w.Header().Get("Content-Length"))
 	})
 
 	t.Run("not found", func(t *testing.T) {
@@ -364,9 +307,7 @@ func TestHandlerHeadBlob(t *testing.T) {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 
-		if w.Code != http.StatusNotFound {
-			t.Errorf("status = %d, want %d", w.Code, http.StatusNotFound)
-		}
+		require.Equal(t, http.StatusNotFound, w.Code)
 	})
 }
 
@@ -391,16 +332,12 @@ func TestHandlerCaching(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("first request status = %d, want %d", w.Code, http.StatusOK)
-	}
+	require.Equal(t, http.StatusOK, w.Code)
 
 	// Wait for background caching
 	h.Close()
 
-	if requestCount != 1 {
-		t.Errorf("upstream request count = %d, want 1", requestCount)
-	}
+	require.Equal(t, 1, requestCount)
 
 	// Create new handler with same store to test cache
 	// Note: In a real scenario, we'd reuse the same handler
@@ -443,9 +380,7 @@ func TestHandlerWithAuth(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
-	}
+	require.Equal(t, http.StatusOK, w.Code)
 }
 
 func TestHandlerDigestVerification(t *testing.T) {
@@ -467,9 +402,7 @@ func TestHandlerDigestVerification(t *testing.T) {
 	h.ServeHTTP(w, req)
 
 	// Should fail with bad gateway due to digest mismatch
-	if w.Code != http.StatusBadGateway {
-		t.Errorf("status = %d, want %d (digest verification should fail)", w.Code, http.StatusBadGateway)
-	}
+	require.Equal(t, http.StatusBadGateway, w.Code)
 }
 
 func TestHandlerManifestCacheHit(t *testing.T) {
@@ -487,9 +420,7 @@ func TestHandlerManifestCacheHit(t *testing.T) {
 
 	// Create handler with short TTL
 	tmpDir, err := os.MkdirTemp("", "oci-cache-test-*")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	b, _ := backend.NewFilesystem(tmpDir)
@@ -507,9 +438,7 @@ func TestHandlerManifestCacheHit(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("first request failed: %d", w.Code)
-	}
+	require.Equal(t, http.StatusOK, w.Code)
 
 	// Wait for background caching
 	h.Close()
@@ -526,13 +455,8 @@ func TestHandlerManifestCacheHit(t *testing.T) {
 	w2 := httptest.NewRecorder()
 	h2.ServeHTTP(w2, req2)
 
-	if w2.Code != http.StatusOK {
-		t.Fatalf("second request failed: %d", w2.Code)
-	}
-
-	if requestCount != 1 {
-		t.Errorf("upstream request count = %d, want 1 (second request should be cache hit)", requestCount)
-	}
+	require.Equal(t, http.StatusOK, w2.Code)
+	require.Equal(t, 1, requestCount)
 }
 
 func TestHandlerBlobCacheHit(t *testing.T) {
@@ -549,9 +473,7 @@ func TestHandlerBlobCacheHit(t *testing.T) {
 	defer upstream.Close()
 
 	tmpDir, err := os.MkdirTemp("", "oci-blob-cache-test-*")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	b, _ := backend.NewFilesystem(tmpDir)
@@ -567,9 +489,7 @@ func TestHandlerBlobCacheHit(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("first request failed: %d", w.Code)
-	}
+	require.Equal(t, http.StatusOK, w.Code)
 
 	// Wait for background caching
 	h.Close()
@@ -585,17 +505,9 @@ func TestHandlerBlobCacheHit(t *testing.T) {
 	w2 := httptest.NewRecorder()
 	h2.ServeHTTP(w2, req2)
 
-	if w2.Code != http.StatusOK {
-		t.Fatalf("second request failed: %d", w2.Code)
-	}
-
-	if w2.Body.String() != string(blobContent) {
-		t.Error("cached blob content mismatch")
-	}
-
-	if requestCount != 1 {
-		t.Errorf("upstream request count = %d, want 1", requestCount)
-	}
+	require.Equal(t, http.StatusOK, w2.Code)
+	require.Equal(t, string(blobContent), w2.Body.String())
+	require.Equal(t, 1, requestCount)
 }
 
 func TestHandlerUpstreamError(t *testing.T) {
@@ -611,9 +523,7 @@ func TestHandlerUpstreamError(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadGateway {
-		t.Errorf("status = %d, want %d", w.Code, http.StatusBadGateway)
-	}
+	require.Equal(t, http.StatusBadGateway, w.Code)
 }
 
 func TestHandlerNestedImageName(t *testing.T) {
@@ -636,9 +546,7 @@ func TestHandlerNestedImageName(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
-	}
+	require.Equal(t, http.StatusOK, w.Code)
 }
 
 func TestHandlerClose(t *testing.T) {
@@ -662,18 +570,14 @@ func TestHandlerOptions(t *testing.T) {
 		h := NewHandler(idx, st)
 		defer h.Close()
 
-		if h.tagTTL != DefaultTagTTL {
-			t.Errorf("tagTTL = %v, want %v", h.tagTTL, DefaultTagTTL)
-		}
+		require.Equal(t, DefaultTagTTL, h.tagTTL)
 	})
 
 	t.Run("custom tag TTL", func(t *testing.T) {
 		h := NewHandler(idx, st, WithTagTTL(10*time.Minute))
 		defer h.Close()
 
-		if h.tagTTL != 10*time.Minute {
-			t.Errorf("tagTTL = %v, want %v", h.tagTTL, 10*time.Minute)
-		}
+		require.Equal(t, 10*time.Minute, h.tagTTL)
 	})
 }
 
@@ -706,24 +610,16 @@ func TestHandlerHeadManifestCacheHit(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
-	}
-	if d := w.Header().Get("Docker-Content-Digest"); d != manifestDigest {
-		t.Errorf("Docker-Content-Digest = %q, want %q", d, manifestDigest)
-	}
-	if cl := w.Header().Get("Content-Length"); cl != "1024" {
-		t.Errorf("Content-Length = %q, want %q", cl, "1024")
-	}
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, manifestDigest, w.Header().Get("Docker-Content-Digest"))
+	require.Equal(t, "1024", w.Header().Get("Content-Length"))
 
 	// HEAD by digest - should also hit cache
 	req2 := httptest.NewRequest(http.MethodHead, "/v2/library/alpine/manifests/"+manifestDigest, nil)
 	w2 := httptest.NewRecorder()
 	h.ServeHTTP(w2, req2)
 
-	if w2.Code != http.StatusOK {
-		t.Errorf("digest HEAD status = %d, want %d", w2.Code, http.StatusOK)
-	}
+	require.Equal(t, http.StatusOK, w2.Code)
 }
 
 func TestHandlerHeadBlobCacheHit(t *testing.T) {
@@ -753,15 +649,9 @@ func TestHandlerHeadBlobCacheHit(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
-	}
-	if d := w.Header().Get("Docker-Content-Digest"); d != blobDigest {
-		t.Errorf("Docker-Content-Digest = %q, want %q", d, blobDigest)
-	}
-	if cl := w.Header().Get("Content-Length"); cl != "4096" {
-		t.Errorf("Content-Length = %q, want %q", cl, "4096")
-	}
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, blobDigest, w.Header().Get("Docker-Content-Digest"))
+	require.Equal(t, "4096", w.Header().Get("Content-Length"))
 }
 
 func TestHandlerTagTTLExpiry(t *testing.T) {
@@ -795,9 +685,7 @@ func TestHandlerTagTTLExpiry(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("first request failed: %d", w.Code)
-	}
+	require.Equal(t, http.StatusOK, w.Code)
 
 	// Wait for TTL to expire and background caching
 	h.Close()
@@ -814,14 +702,9 @@ func TestHandlerTagTTLExpiry(t *testing.T) {
 	w2 := httptest.NewRecorder()
 	h2.ServeHTTP(w2, req2)
 
-	if w2.Code != http.StatusOK {
-		t.Fatalf("second request failed: %d", w2.Code)
-	}
-
+	require.Equal(t, http.StatusOK, w2.Code)
 	// Should have made 2 upstream requests (TTL expired)
-	if requestCount != 2 {
-		t.Errorf("upstream request count = %d, want 2", requestCount)
-	}
+	require.Equal(t, 2, requestCount)
 }
 
 func BenchmarkHandlerVersionCheck(b *testing.B) {

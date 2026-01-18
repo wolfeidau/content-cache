@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	contentcache "github.com/wolfeidau/content-cache"
 	"github.com/wolfeidau/content-cache/backend"
 )
@@ -19,25 +20,15 @@ func TestMetadataStoreCreateAndGet(t *testing.T) {
 
 	// Create metadata
 	err := meta.Create(ctx, hash, 1024)
-	if err != nil {
-		t.Fatalf("Create() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	// Get metadata
 	got, err := meta.Get(ctx, hash)
-	if err != nil {
-		t.Fatalf("Get() error = %v", err)
-	}
+	require.NoError(t, err)
 
-	if got.Hash != hash {
-		t.Errorf("Hash = %v, want %v", got.Hash, hash)
-	}
-	if got.Size != 1024 {
-		t.Errorf("Size = %d, want %d", got.Size, 1024)
-	}
-	if got.CreatedAt.IsZero() {
-		t.Error("CreatedAt should not be zero")
-	}
+	require.Equal(t, hash, got.Hash)
+	require.Equal(t, int64(1024), got.Size)
+	require.False(t, got.CreatedAt.IsZero())
 
 	_ = b // Use b to avoid unused variable warning
 }
@@ -56,9 +47,7 @@ func TestMetadataStoreTouch(t *testing.T) {
 
 	// Verify initial time
 	got, _ := meta.Get(ctx, hash)
-	if !got.LastAccessed.Equal(oldTime) {
-		t.Errorf("initial LastAccessed = %v, want %v", got.LastAccessed, oldTime)
-	}
+	require.True(t, got.LastAccessed.Equal(oldTime))
 
 	// Touch with new time
 	newTime := time.Now()
@@ -67,9 +56,7 @@ func TestMetadataStoreTouch(t *testing.T) {
 
 	// Verify updated time
 	got, _ = meta.Get(ctx, hash)
-	if !got.LastAccessed.Equal(newTime) {
-		t.Errorf("updated LastAccessed = %v, want %v", got.LastAccessed, newTime)
-	}
+	require.True(t, got.LastAccessed.Equal(newTime))
 }
 
 func TestMetadataStoreDelete(t *testing.T) {
@@ -83,15 +70,11 @@ func TestMetadataStoreDelete(t *testing.T) {
 
 	// Delete
 	err := meta.Delete(ctx, hash)
-	if err != nil {
-		t.Fatalf("Delete() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	// Verify deleted
 	_, err = meta.Get(ctx, hash)
-	if err == nil {
-		t.Error("expected error after delete, got nil")
-	}
+	require.Error(t, err)
 }
 
 func TestMetadataStoreList(t *testing.T) {
@@ -113,13 +96,9 @@ func TestMetadataStoreList(t *testing.T) {
 
 	// List all
 	blobs, err := meta.List(ctx)
-	if err != nil {
-		t.Fatalf("List() error = %v", err)
-	}
+	require.NoError(t, err)
 
-	if len(blobs) != len(hashes) {
-		t.Errorf("List() returned %d blobs, want %d", len(blobs), len(hashes))
-	}
+	require.Len(t, blobs, len(hashes))
 }
 
 func TestMetadataStoreStats(t *testing.T) {
@@ -140,16 +119,10 @@ func TestMetadataStoreStats(t *testing.T) {
 	_ = meta.Create(ctx, contentcache.HashBytes([]byte("new")), 300)
 
 	stats, err := meta.GetStats(ctx)
-	if err != nil {
-		t.Fatalf("GetStats() error = %v", err)
-	}
+	require.NoError(t, err)
 
-	if stats.TotalBlobs != 3 {
-		t.Errorf("TotalBlobs = %d, want 3", stats.TotalBlobs)
-	}
-	if stats.TotalSize != 600 {
-		t.Errorf("TotalSize = %d, want 600", stats.TotalSize)
-	}
+	require.Equal(t, int64(3), stats.TotalBlobs)
+	require.Equal(t, int64(600), stats.TotalSize)
 }
 
 func TestManagerTTLExpiration(t *testing.T) {
@@ -184,24 +157,16 @@ func TestManagerTTLExpiration(t *testing.T) {
 	// Run expiration
 	result := mgr.RunOnce(ctx)
 
-	if result.TTLExpired != 1 {
-		t.Errorf("TTLExpired = %d, want 1", result.TTLExpired)
-	}
-	if result.BytesFreed != 100 {
-		t.Errorf("BytesFreed = %d, want 100", result.BytesFreed)
-	}
+	require.Equal(t, 1, result.TTLExpired)
+	require.Equal(t, int64(100), result.BytesFreed)
 
 	// Old blob should be gone
 	exists, _ := b.Exists(ctx, blobKey(oldHash))
-	if exists {
-		t.Error("old blob should be deleted")
-	}
+	require.False(t, exists)
 
 	// New blob should still exist
 	exists, _ = b.Exists(ctx, blobKey(newHash))
-	if !exists {
-		t.Error("new blob should still exist")
-	}
+	require.True(t, exists)
 }
 
 func TestManagerLRUEviction(t *testing.T) {
@@ -234,24 +199,18 @@ func TestManagerLRUEviction(t *testing.T) {
 	// Run eviction
 	result := mgr.RunOnce(ctx)
 
-	if result.LRUEvicted != 2 {
-		t.Errorf("LRUEvicted = %d, want 2", result.LRUEvicted)
-	}
+	require.Equal(t, 2, result.LRUEvicted)
 
 	// Oldest blobs should be gone
 	for i := 0; i < 2; i++ {
 		exists, _ := b.Exists(ctx, blobKey(hashes[i]))
-		if exists {
-			t.Errorf("blob %d should be evicted", i)
-		}
+		require.False(t, exists)
 	}
 
 	// Newer blobs should remain
 	for i := 2; i < 5; i++ {
 		exists, _ := b.Exists(ctx, blobKey(hashes[i]))
-		if !exists {
-			t.Errorf("blob %d should still exist", i)
-		}
+		require.True(t, exists)
 	}
 }
 
@@ -289,12 +248,8 @@ func TestManagerCombinedTTLAndLRU(t *testing.T) {
 	result := mgr.RunOnce(ctx)
 
 	// 1 TTL expired + 1 LRU evicted
-	if result.TTLExpired != 1 {
-		t.Errorf("TTLExpired = %d, want 1", result.TTLExpired)
-	}
-	if result.LRUEvicted != 1 {
-		t.Errorf("LRUEvicted = %d, want 1", result.LRUEvicted)
-	}
+	require.Equal(t, 1, result.TTLExpired)
+	require.Equal(t, 1, result.LRUEvicted)
 }
 
 func TestManagerForceExpire(t *testing.T) {
@@ -320,9 +275,7 @@ func TestManagerForceExpire(t *testing.T) {
 	// Force expire anything older than 2 hours (should expire -3h and -5h blobs)
 	result := mgr.ForceExpire(ctx, 2*time.Hour)
 
-	if result.TTLExpired != 2 {
-		t.Errorf("TTLExpired = %d, want 2", result.TTLExpired)
-	}
+	require.Equal(t, 2, result.TTLExpired)
 }
 
 func TestManagerBackgroundRun(t *testing.T) {
@@ -339,9 +292,7 @@ func TestManagerBackgroundRun(t *testing.T) {
 
 	// Start manager
 	err := mgr.Start(ctx)
-	if err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	// Let it run a couple cycles
 	time.Sleep(150 * time.Millisecond)
@@ -359,8 +310,6 @@ func newTestMetadataStore(t *testing.T) (*MetadataStore, backend.Backend, func()
 	t.Helper()
 	tmpDir := t.TempDir()
 	b, err := backend.NewFilesystem(tmpDir)
-	if err != nil {
-		t.Fatalf("NewFilesystem() error = %v", err)
-	}
+	require.NoError(t, err)
 	return NewMetadataStore(b), b, func() {}
 }

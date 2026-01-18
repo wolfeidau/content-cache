@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestUpstreamCheckVersion(t *testing.T) {
@@ -22,9 +24,7 @@ func TestUpstreamCheckVersion(t *testing.T) {
 
 		u := NewUpstream(WithRegistryURL(server.URL))
 		err := u.CheckVersion(context.Background())
-		if err != nil {
-			t.Errorf("CheckVersion() error = %v", err)
-		}
+		require.NoError(t, err)
 	})
 
 	t.Run("auth required returns no error", func(t *testing.T) {
@@ -35,10 +35,7 @@ func TestUpstreamCheckVersion(t *testing.T) {
 
 		u := NewUpstream(WithRegistryURL(server.URL))
 		err := u.CheckVersion(context.Background())
-		// 401 is acceptable for version check (means registry exists)
-		if err != nil {
-			t.Errorf("CheckVersion() error = %v", err)
-		}
+		require.NoError(t, err)
 	})
 }
 
@@ -65,25 +62,15 @@ func TestUpstreamFetchManifest(t *testing.T) {
 
 	t.Run("success", func(t *testing.T) {
 		content, mediaType, digest, err := u.FetchManifest(context.Background(), "library/alpine", "latest")
-		if err != nil {
-			t.Fatalf("FetchManifest() error = %v", err)
-		}
-		if string(content) != manifestContent {
-			t.Errorf("content = %q", content)
-		}
-		if mediaType != "application/vnd.oci.image.manifest.v1+json" {
-			t.Errorf("mediaType = %q", mediaType)
-		}
-		if digest != manifestDigest {
-			t.Errorf("digest = %q", digest)
-		}
+		require.NoError(t, err)
+		require.Equal(t, manifestContent, string(content))
+		require.Equal(t, "application/vnd.oci.image.manifest.v1+json", mediaType)
+		require.Equal(t, manifestDigest, digest)
 	})
 
 	t.Run("not found", func(t *testing.T) {
 		_, _, _, err := u.FetchManifest(context.Background(), "library/notfound", "latest")
-		if err != ErrNotFound {
-			t.Errorf("FetchManifest() error = %v, want ErrNotFound", err)
-		}
+		require.ErrorIs(t, err, ErrNotFound)
 	})
 }
 
@@ -107,25 +94,15 @@ func TestUpstreamHeadManifest(t *testing.T) {
 
 	t.Run("success", func(t *testing.T) {
 		digest, size, mediaType, err := u.HeadManifest(context.Background(), "library/alpine", "latest")
-		if err != nil {
-			t.Fatalf("HeadManifest() error = %v", err)
-		}
-		if digest != "sha256:abc123" {
-			t.Errorf("digest = %q", digest)
-		}
-		if size != 1024 {
-			t.Errorf("size = %d", size)
-		}
-		if mediaType != "application/vnd.oci.image.manifest.v1+json" {
-			t.Errorf("mediaType = %q", mediaType)
-		}
+		require.NoError(t, err)
+		require.Equal(t, "sha256:abc123", digest)
+		require.Equal(t, int64(1024), size)
+		require.Equal(t, "application/vnd.oci.image.manifest.v1+json", mediaType)
 	})
 
 	t.Run("not found", func(t *testing.T) {
 		_, _, _, err := u.HeadManifest(context.Background(), "library/notfound", "latest")
-		if err != ErrNotFound {
-			t.Errorf("HeadManifest() error = %v, want ErrNotFound", err)
-		}
+		require.ErrorIs(t, err, ErrNotFound)
 	})
 }
 
@@ -146,23 +123,17 @@ func TestUpstreamFetchBlob(t *testing.T) {
 
 	t.Run("success", func(t *testing.T) {
 		rc, size, err := u.FetchBlob(context.Background(), "library/alpine", "sha256:abc123")
-		if err != nil {
-			t.Fatalf("FetchBlob() error = %v", err)
-		}
+		require.NoError(t, err)
 		defer func() { _ = rc.Close() }()
 
 		content, _ := io.ReadAll(rc)
-		if string(content) != string(blobContent) {
-			t.Errorf("content = %q", content)
-		}
+		require.Equal(t, string(blobContent), string(content))
 		_ = size // size may be -1 if Content-Length not set
 	})
 
 	t.Run("not found", func(t *testing.T) {
 		_, _, err := u.FetchBlob(context.Background(), "library/alpine", "sha256:notfound")
-		if err != ErrNotFound {
-			t.Errorf("FetchBlob() error = %v, want ErrNotFound", err)
-		}
+		require.ErrorIs(t, err, ErrNotFound)
 	})
 }
 
@@ -184,19 +155,13 @@ func TestUpstreamHeadBlob(t *testing.T) {
 
 	t.Run("success", func(t *testing.T) {
 		size, err := u.HeadBlob(context.Background(), "library/alpine", "sha256:abc123")
-		if err != nil {
-			t.Fatalf("HeadBlob() error = %v", err)
-		}
-		if size != 4096 {
-			t.Errorf("size = %d, want 4096", size)
-		}
+		require.NoError(t, err)
+		require.Equal(t, int64(4096), size)
 	})
 
 	t.Run("not found", func(t *testing.T) {
 		_, err := u.HeadBlob(context.Background(), "library/alpine", "sha256:notfound")
-		if err != ErrNotFound {
-			t.Errorf("HeadBlob() error = %v, want ErrNotFound", err)
-		}
+		require.ErrorIs(t, err, ErrNotFound)
 	})
 }
 
@@ -236,49 +201,34 @@ func TestUpstreamWithAuth(t *testing.T) {
 
 	// First request should trigger auth
 	_, _, _, err := u.FetchManifest(context.Background(), "library/alpine", "latest")
-	if err != nil {
-		t.Fatalf("FetchManifest() error = %v", err)
-	}
-	if authCallCount != 1 {
-		t.Errorf("auth calls = %d, want 1", authCallCount)
-	}
+	require.NoError(t, err)
+	require.Equal(t, 1, authCallCount)
 
 	// Second request should use cached token
 	_, _, _, err = u.FetchManifest(context.Background(), "library/alpine", "latest")
-	if err != nil {
-		t.Fatalf("FetchManifest() error = %v", err)
-	}
-	if authCallCount != 1 {
-		t.Errorf("auth calls = %d, want 1 (should use cached token)", authCallCount)
-	}
+	require.NoError(t, err)
+	require.Equal(t, 1, authCallCount)
 }
 
 func TestUpstreamOptions(t *testing.T) {
 	t.Run("default registry", func(t *testing.T) {
 		u := NewUpstream()
-		if u.baseURL != DefaultRegistryURL {
-			t.Errorf("baseURL = %q, want %q", u.baseURL, DefaultRegistryURL)
-		}
+		require.Equal(t, DefaultRegistryURL, u.baseURL)
 	})
 
 	t.Run("custom registry", func(t *testing.T) {
 		u := NewUpstream(WithRegistryURL("https://gcr.io"))
-		if u.baseURL != "https://gcr.io" {
-			t.Errorf("baseURL = %q", u.baseURL)
-		}
+		require.Equal(t, "https://gcr.io", u.baseURL)
 	})
 
 	t.Run("trailing slash removed", func(t *testing.T) {
 		u := NewUpstream(WithRegistryURL("https://gcr.io/"))
-		if u.baseURL != "https://gcr.io" {
-			t.Errorf("baseURL = %q", u.baseURL)
-		}
+		require.Equal(t, "https://gcr.io", u.baseURL)
 	})
 
 	t.Run("basic auth", func(t *testing.T) {
 		u := NewUpstream(WithBasicAuth("user", "pass"))
-		if u.username != "user" || u.password != "pass" {
-			t.Errorf("credentials not set correctly")
-		}
+		require.Equal(t, "user", u.username)
+		require.Equal(t, "pass", u.password)
 	})
 }

@@ -2,10 +2,10 @@ package goproxy
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	contentcache "github.com/wolfeidau/content-cache"
 	"github.com/wolfeidau/content-cache/backend"
 )
@@ -25,9 +25,7 @@ func TestEncodePath(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			got := encodePath(tt.input)
-			if got != tt.expected {
-				t.Errorf("encodePath(%q) = %q, want %q", tt.input, got, tt.expected)
-			}
+			require.Equal(t, tt.expected, got)
 		})
 	}
 }
@@ -48,13 +46,12 @@ func TestDecodePath(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			got, err := decodePath(tt.input)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("decodePath(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+			if tt.wantErr {
+				require.Error(t, err)
 				return
 			}
-			if got != tt.expected {
-				t.Errorf("decodePath(%q) = %q, want %q", tt.input, got, tt.expected)
-			}
+			require.NoError(t, err)
+			require.Equal(t, tt.expected, got)
 		})
 	}
 }
@@ -72,12 +69,8 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 		t.Run(path, func(t *testing.T) {
 			encoded := encodePath(path)
 			decoded, err := decodePath(encoded)
-			if err != nil {
-				t.Fatalf("decodePath() error = %v", err)
-			}
-			if decoded != path {
-				t.Errorf("round-trip failed: got %q, want %q", decoded, path)
-			}
+			require.NoError(t, err)
+			require.Equal(t, path, decoded)
 		})
 	}
 }
@@ -91,12 +84,8 @@ func TestIndexListVersions(t *testing.T) {
 
 	// Initially empty
 	versions, err := idx.ListVersions(ctx, modulePath)
-	if err != nil {
-		t.Fatalf("ListVersions() error = %v", err)
-	}
-	if len(versions) != 0 {
-		t.Errorf("ListVersions() = %v, want empty", versions)
-	}
+	require.NoError(t, err)
+	require.Empty(t, versions)
 
 	// Add some versions
 	mv := &ModuleVersion{
@@ -109,19 +98,14 @@ func TestIndexListVersions(t *testing.T) {
 
 	for _, v := range []string{"v1.0.0", "v1.0.1", "v1.1.0"} {
 		mv.Info.Version = v
-		if err := idx.PutModuleVersion(ctx, modulePath, v, mv, []byte("module test")); err != nil {
-			t.Fatalf("PutModuleVersion(%s) error = %v", v, err)
-		}
+		err := idx.PutModuleVersion(ctx, modulePath, v, mv, []byte("module test"))
+		require.NoError(t, err)
 	}
 
 	// List should return all versions
 	versions, err = idx.ListVersions(ctx, modulePath)
-	if err != nil {
-		t.Fatalf("ListVersions() error = %v", err)
-	}
-	if len(versions) != 3 {
-		t.Errorf("ListVersions() returned %d versions, want 3", len(versions))
-	}
+	require.NoError(t, err)
+	require.Len(t, versions, 3)
 }
 
 func TestIndexGetVersionInfo(t *testing.T) {
@@ -134,9 +118,7 @@ func TestIndexGetVersionInfo(t *testing.T) {
 
 	// Not found initially
 	_, err := idx.GetVersionInfo(ctx, modulePath, version)
-	if !errors.Is(err, ErrNotFound) {
-		t.Errorf("GetVersionInfo() error = %v, want ErrNotFound", err)
-	}
+	require.ErrorIs(t, err, ErrNotFound)
 
 	// Store version
 	now := time.Now().Truncate(time.Second)
@@ -149,22 +131,14 @@ func TestIndexGetVersionInfo(t *testing.T) {
 	}
 	modFile := []byte("module github.com/test/module\n\ngo 1.21\n")
 
-	if err := idx.PutModuleVersion(ctx, modulePath, version, mv, modFile); err != nil {
-		t.Fatalf("PutModuleVersion() error = %v", err)
-	}
+	err = idx.PutModuleVersion(ctx, modulePath, version, mv, modFile)
+	require.NoError(t, err)
 
 	// Get version info
 	info, err := idx.GetVersionInfo(ctx, modulePath, version)
-	if err != nil {
-		t.Fatalf("GetVersionInfo() error = %v", err)
-	}
-
-	if info.Version != version {
-		t.Errorf("Version = %q, want %q", info.Version, version)
-	}
-	if !info.Time.Equal(now) {
-		t.Errorf("Time = %v, want %v", info.Time, now)
-	}
+	require.NoError(t, err)
+	require.Equal(t, version, info.Version)
+	require.True(t, info.Time.Equal(now))
 }
 
 func TestIndexGetMod(t *testing.T) {
@@ -185,19 +159,13 @@ func TestIndexGetMod(t *testing.T) {
 		ZipHash: contentcache.HashBytes([]byte("zip")),
 	}
 
-	if err := idx.PutModuleVersion(ctx, modulePath, version, mv, modContent); err != nil {
-		t.Fatalf("PutModuleVersion() error = %v", err)
-	}
+	err := idx.PutModuleVersion(ctx, modulePath, version, mv, modContent)
+	require.NoError(t, err)
 
 	// Get mod file
 	got, err := idx.GetMod(ctx, modulePath, version)
-	if err != nil {
-		t.Fatalf("GetMod() error = %v", err)
-	}
-
-	if string(got) != string(modContent) {
-		t.Errorf("GetMod() = %q, want %q", got, modContent)
-	}
+	require.NoError(t, err)
+	require.Equal(t, modContent, got)
 }
 
 func TestIndexDeleteModuleVersion(t *testing.T) {
@@ -213,32 +181,24 @@ func TestIndexDeleteModuleVersion(t *testing.T) {
 		Info:    VersionInfo{Version: version},
 		ZipHash: contentcache.HashBytes([]byte("zip")),
 	}
-	if err := idx.PutModuleVersion(ctx, modulePath, version, mv, []byte("mod")); err != nil {
-		t.Fatalf("PutModuleVersion() error = %v", err)
-	}
+	err := idx.PutModuleVersion(ctx, modulePath, version, mv, []byte("mod"))
+	require.NoError(t, err)
 
 	// Verify it exists
-	_, err := idx.GetVersionInfo(ctx, modulePath, version)
-	if err != nil {
-		t.Fatalf("GetVersionInfo() error = %v", err)
-	}
+	_, err = idx.GetVersionInfo(ctx, modulePath, version)
+	require.NoError(t, err)
 
 	// Delete it
-	if err := idx.DeleteModuleVersion(ctx, modulePath, version); err != nil {
-		t.Fatalf("DeleteModuleVersion() error = %v", err)
-	}
+	err = idx.DeleteModuleVersion(ctx, modulePath, version)
+	require.NoError(t, err)
 
 	// Verify it's gone
 	_, err = idx.GetVersionInfo(ctx, modulePath, version)
-	if !errors.Is(err, ErrNotFound) {
-		t.Errorf("GetVersionInfo() error = %v, want ErrNotFound", err)
-	}
+	require.ErrorIs(t, err, ErrNotFound)
 
 	// Version list should be empty
 	versions, _ := idx.ListVersions(ctx, modulePath)
-	if len(versions) != 0 {
-		t.Errorf("ListVersions() = %v, want empty", versions)
-	}
+	require.Empty(t, versions)
 }
 
 func TestIndexCaseInsensitiveModule(t *testing.T) {
@@ -255,15 +215,12 @@ func TestIndexCaseInsensitiveModule(t *testing.T) {
 		Info:    VersionInfo{Version: version},
 		ZipHash: contentcache.HashBytes([]byte("zip")),
 	}
-	if err := idx.PutModuleVersion(ctx, modulePath, version, mv, []byte("mod")); err != nil {
-		t.Fatalf("PutModuleVersion() error = %v", err)
-	}
+	err := idx.PutModuleVersion(ctx, modulePath, version, mv, []byte("mod"))
+	require.NoError(t, err)
 
 	// Should be retrievable with same path
-	_, err := idx.GetVersionInfo(ctx, modulePath, version)
-	if err != nil {
-		t.Fatalf("GetVersionInfo() error = %v", err)
-	}
+	_, err = idx.GetVersionInfo(ctx, modulePath, version)
+	require.NoError(t, err)
 }
 
 // Helper functions
@@ -272,8 +229,6 @@ func newTestIndex(t *testing.T) (*Index, func()) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	b, err := backend.NewFilesystem(tmpDir)
-	if err != nil {
-		t.Fatalf("NewFilesystem() error = %v", err)
-	}
+	require.NoError(t, err)
 	return NewIndex(b), func() {}
 }

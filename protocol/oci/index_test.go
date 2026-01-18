@@ -2,76 +2,51 @@ package oci
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	contentcache "github.com/wolfeidau/content-cache"
 	"github.com/wolfeidau/content-cache/backend"
 )
 
-func newTestIndex(t *testing.T) (*Index, func()) {
+func newTestIndex(t *testing.T) *Index {
 	t.Helper()
-	tmpDir, err := os.MkdirTemp("", "oci-index-test-*")
-	if err != nil {
-		t.Fatalf("MkdirTemp() error = %v", err)
-	}
+	tmpDir := t.TempDir()
 	b, err := backend.NewFilesystem(tmpDir)
-	if err != nil {
-		t.Fatalf("NewFilesystem() error = %v", err)
-	}
-	idx := NewIndex(b)
-	return idx, func() {
-		_ = os.RemoveAll(tmpDir)
-	}
+	require.NoError(t, err)
+	return NewIndex(b)
 }
 
 func TestIndexTagDigest(t *testing.T) {
-	idx, cleanup := newTestIndex(t)
-	defer cleanup()
+	idx := newTestIndex(t)
 
 	ctx := context.Background()
 
 	t.Run("get non-existent tag", func(t *testing.T) {
 		_, _, err := idx.GetTagDigest(ctx, "library/alpine", "latest")
-		if err != ErrNotFound {
-			t.Errorf("GetTagDigest() error = %v, want ErrNotFound", err)
-		}
+		require.ErrorIs(t, err, ErrNotFound)
 	})
 
 	t.Run("set and get tag", func(t *testing.T) {
 		digest := "sha256:abc123def456"
 		err := idx.SetTagDigest(ctx, "library/alpine", "latest", digest)
-		if err != nil {
-			t.Fatalf("SetTagDigest() error = %v", err)
-		}
+		require.NoError(t, err)
 
 		gotDigest, refreshedAt, err := idx.GetTagDigest(ctx, "library/alpine", "latest")
-		if err != nil {
-			t.Fatalf("GetTagDigest() error = %v", err)
-		}
-		if gotDigest != digest {
-			t.Errorf("GetTagDigest() digest = %q, want %q", gotDigest, digest)
-		}
-		if refreshedAt.IsZero() {
-			t.Error("GetTagDigest() refreshedAt should not be zero")
-		}
+		require.NoError(t, err)
+		require.Equal(t, digest, gotDigest)
+		require.False(t, refreshedAt.IsZero())
 	})
 
 	t.Run("update tag", func(t *testing.T) {
 		newDigest := "sha256:newdigest789"
 		err := idx.SetTagDigest(ctx, "library/alpine", "latest", newDigest)
-		if err != nil {
-			t.Fatalf("SetTagDigest() error = %v", err)
-		}
+		require.NoError(t, err)
 
 		gotDigest, _, err := idx.GetTagDigest(ctx, "library/alpine", "latest")
-		if err != nil {
-			t.Fatalf("GetTagDigest() error = %v", err)
-		}
-		if gotDigest != newDigest {
-			t.Errorf("GetTagDigest() digest = %q, want %q", gotDigest, newDigest)
-		}
+		require.NoError(t, err)
+		require.Equal(t, newDigest, gotDigest)
 	})
 
 	t.Run("multiple tags", func(t *testing.T) {
@@ -81,18 +56,13 @@ func TestIndexTagDigest(t *testing.T) {
 		d1, _, _ := idx.GetTagDigest(ctx, "library/alpine", "3.18")
 		d2, _, _ := idx.GetTagDigest(ctx, "library/alpine", "3.19")
 
-		if d1 != "sha256:version318" {
-			t.Errorf("tag 3.18 = %q", d1)
-		}
-		if d2 != "sha256:version319" {
-			t.Errorf("tag 3.19 = %q", d2)
-		}
+		require.Equal(t, "sha256:version318", d1)
+		require.Equal(t, "sha256:version319", d2)
 	})
 }
 
 func TestIndexRefreshTag(t *testing.T) {
-	idx, cleanup := newTestIndex(t)
-	defer cleanup()
+	idx := newTestIndex(t)
 
 	ctx := context.Background()
 
@@ -103,27 +73,20 @@ func TestIndexRefreshTag(t *testing.T) {
 	// Wait a bit and refresh
 	time.Sleep(10 * time.Millisecond)
 	err := idx.RefreshTag(ctx, "library/nginx", "latest")
-	if err != nil {
-		t.Fatalf("RefreshTag() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	_, newRefresh, _ := idx.GetTagDigest(ctx, "library/nginx", "latest")
-	if !newRefresh.After(originalRefresh) {
-		t.Error("RefreshTag() should update refreshedAt")
-	}
+	require.True(t, newRefresh.After(originalRefresh))
 }
 
 func TestIndexManifest(t *testing.T) {
-	idx, cleanup := newTestIndex(t)
-	defer cleanup()
+	idx := newTestIndex(t)
 
 	ctx := context.Background()
 
 	t.Run("get non-existent manifest", func(t *testing.T) {
 		_, err := idx.GetManifest(ctx, "sha256:nonexistent")
-		if err != ErrNotFound {
-			t.Errorf("GetManifest() error = %v, want ErrNotFound", err)
-		}
+		require.ErrorIs(t, err, ErrNotFound)
 	})
 
 	t.Run("put and get manifest", func(t *testing.T) {
@@ -133,40 +96,25 @@ func TestIndexManifest(t *testing.T) {
 		size := int64(1024)
 
 		err := idx.PutManifest(ctx, digest, mediaType, hash, size)
-		if err != nil {
-			t.Fatalf("PutManifest() error = %v", err)
-		}
+		require.NoError(t, err)
 
 		manifest, err := idx.GetManifest(ctx, digest)
-		if err != nil {
-			t.Fatalf("GetManifest() error = %v", err)
-		}
-		if manifest.Digest != digest {
-			t.Errorf("Digest = %q, want %q", manifest.Digest, digest)
-		}
-		if manifest.MediaType != mediaType {
-			t.Errorf("MediaType = %q, want %q", manifest.MediaType, mediaType)
-		}
-		if manifest.ContentHash != hash {
-			t.Errorf("ContentHash = %v, want %v", manifest.ContentHash, hash)
-		}
-		if manifest.Size != size {
-			t.Errorf("Size = %d, want %d", manifest.Size, size)
-		}
+		require.NoError(t, err)
+		require.Equal(t, digest, manifest.Digest)
+		require.Equal(t, mediaType, manifest.MediaType)
+		require.Equal(t, hash, manifest.ContentHash)
+		require.Equal(t, size, manifest.Size)
 	})
 }
 
 func TestIndexBlob(t *testing.T) {
-	idx, cleanup := newTestIndex(t)
-	defer cleanup()
+	idx := newTestIndex(t)
 
 	ctx := context.Background()
 
 	t.Run("get non-existent blob", func(t *testing.T) {
 		_, err := idx.GetBlob(ctx, "sha256:nonexistent")
-		if err != ErrNotFound {
-			t.Errorf("GetBlob() error = %v, want ErrNotFound", err)
-		}
+		require.ErrorIs(t, err, ErrNotFound)
 	})
 
 	t.Run("put and get blob", func(t *testing.T) {
@@ -175,40 +123,25 @@ func TestIndexBlob(t *testing.T) {
 		size := int64(2048)
 
 		err := idx.PutBlob(ctx, digest, hash, size)
-		if err != nil {
-			t.Fatalf("PutBlob() error = %v", err)
-		}
+		require.NoError(t, err)
 
 		blob, err := idx.GetBlob(ctx, digest)
-		if err != nil {
-			t.Fatalf("GetBlob() error = %v", err)
-		}
-		if blob.Digest != digest {
-			t.Errorf("Digest = %q, want %q", blob.Digest, digest)
-		}
-		if blob.ContentHash != hash {
-			t.Errorf("ContentHash = %v, want %v", blob.ContentHash, hash)
-		}
-		if blob.Size != size {
-			t.Errorf("Size = %d, want %d", blob.Size, size)
-		}
+		require.NoError(t, err)
+		require.Equal(t, digest, blob.Digest)
+		require.Equal(t, hash, blob.ContentHash)
+		require.Equal(t, size, blob.Size)
 	})
 }
 
 func TestIndexListImages(t *testing.T) {
-	idx, cleanup := newTestIndex(t)
-	defer cleanup()
+	idx := newTestIndex(t)
 
 	ctx := context.Background()
 
 	// Empty list
 	images, err := idx.ListImages(ctx)
-	if err != nil {
-		t.Fatalf("ListImages() error = %v", err)
-	}
-	if len(images) != 0 {
-		t.Errorf("ListImages() = %v, want empty", images)
-	}
+	require.NoError(t, err)
+	require.Empty(t, images)
 
 	// Add some images
 	_ = idx.SetTagDigest(ctx, "library/alpine", "latest", "sha256:a")
@@ -216,12 +149,8 @@ func TestIndexListImages(t *testing.T) {
 	_ = idx.SetTagDigest(ctx, "myrepo/myimage", "v1", "sha256:c")
 
 	images, err = idx.ListImages(ctx)
-	if err != nil {
-		t.Fatalf("ListImages() error = %v", err)
-	}
-	if len(images) != 3 {
-		t.Errorf("ListImages() len = %d, want 3", len(images))
-	}
+	require.NoError(t, err)
+	require.Len(t, images, 3)
 }
 
 func TestEncodeDecodeImageName(t *testing.T) {
@@ -238,12 +167,8 @@ func TestEncodeDecodeImageName(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			encoded := encodeImageName(tt.name)
 			decoded, err := decodeImageName(encoded)
-			if err != nil {
-				t.Fatalf("decodeImageName() error = %v", err)
-			}
-			if decoded != tt.name {
-				t.Errorf("round-trip: got %q, want %q", decoded, tt.name)
-			}
+			require.NoError(t, err)
+			require.Equal(t, tt.name, decoded)
 		})
 	}
 }

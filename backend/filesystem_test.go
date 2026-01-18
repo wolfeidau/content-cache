@@ -3,12 +3,13 @@ package backend
 import (
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewFilesystem(t *testing.T) {
@@ -16,22 +17,14 @@ func TestNewFilesystem(t *testing.T) {
 	root := filepath.Join(tmpDir, "cache")
 
 	fs, err := NewFilesystem(root)
-	if err != nil {
-		t.Fatalf("NewFilesystem() error = %v", err)
-	}
+	require.NoError(t, err)
 
-	if fs.Root() != root {
-		t.Errorf("Root() = %q, want %q", fs.Root(), root)
-	}
+	require.Equal(t, root, fs.Root())
 
 	// Check directory was created
 	info, err := os.Stat(root)
-	if err != nil {
-		t.Fatalf("root directory not created: %v", err)
-	}
-	if !info.IsDir() {
-		t.Error("root is not a directory")
-	}
+	require.NoError(t, err)
+	require.True(t, info.IsDir())
 }
 
 func TestFilesystemWriteRead(t *testing.T) {
@@ -44,25 +37,17 @@ func TestFilesystemWriteRead(t *testing.T) {
 
 	// Write
 	err := fs.Write(ctx, key, bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	// Read
 	rc, err := fs.Read(ctx, key)
-	if err != nil {
-		t.Fatalf("Read() error = %v", err)
-	}
+	require.NoError(t, err)
 	defer func() { _ = rc.Close() }()
 
 	got, err := io.ReadAll(rc)
-	if err != nil {
-		t.Fatalf("io.ReadAll() error = %v", err)
-	}
+	require.NoError(t, err)
 
-	if !bytes.Equal(got, data) {
-		t.Errorf("Read() = %q, want %q", got, data)
-	}
+	require.Equal(t, data, got)
 }
 
 func TestFilesystemReadNotFound(t *testing.T) {
@@ -72,9 +57,7 @@ func TestFilesystemReadNotFound(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := fs.Read(ctx, "nonexistent/key")
-	if !errors.Is(err, ErrNotFound) {
-		t.Errorf("Read() error = %v, want ErrNotFound", err)
-	}
+	require.ErrorIs(t, err, ErrNotFound)
 }
 
 func TestFilesystemExists(t *testing.T) {
@@ -86,27 +69,17 @@ func TestFilesystemExists(t *testing.T) {
 
 	// Before write
 	exists, err := fs.Exists(ctx, key)
-	if err != nil {
-		t.Fatalf("Exists() error = %v", err)
-	}
-	if exists {
-		t.Error("Exists() = true before write, want false")
-	}
+	require.NoError(t, err)
+	require.False(t, exists)
 
 	// Write
 	err = fs.Write(ctx, key, bytes.NewReader([]byte("data")))
-	if err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	// After write
 	exists, err = fs.Exists(ctx, key)
-	if err != nil {
-		t.Fatalf("Exists() error = %v", err)
-	}
-	if !exists {
-		t.Error("Exists() = false after write, want true")
-	}
+	require.NoError(t, err)
+	require.True(t, exists)
 }
 
 func TestFilesystemDelete(t *testing.T) {
@@ -118,27 +91,19 @@ func TestFilesystemDelete(t *testing.T) {
 
 	// Write
 	err := fs.Write(ctx, key, bytes.NewReader([]byte("data")))
-	if err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	// Delete
 	err = fs.Delete(ctx, key)
-	if err != nil {
-		t.Fatalf("Delete() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	// Verify deleted
 	exists, _ := fs.Exists(ctx, key)
-	if exists {
-		t.Error("key still exists after Delete")
-	}
+	require.False(t, exists)
 
 	// Delete nonexistent should not error (idempotent)
 	err = fs.Delete(ctx, "nonexistent")
-	if err != nil {
-		t.Errorf("Delete() of nonexistent key error = %v, want nil", err)
-	}
+	require.NoError(t, err)
 }
 
 func TestFilesystemSize(t *testing.T) {
@@ -151,19 +116,13 @@ func TestFilesystemSize(t *testing.T) {
 
 	// Write
 	err := fs.Write(ctx, key, bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	// Size
 	size, err := fs.Size(ctx, key)
-	if err != nil {
-		t.Fatalf("Size() error = %v", err)
-	}
+	require.NoError(t, err)
 
-	if size != int64(len(data)) {
-		t.Errorf("Size() = %d, want %d", size, len(data))
-	}
+	require.Equal(t, int64(len(data)), size)
 }
 
 func TestFilesystemSizeNotFound(t *testing.T) {
@@ -173,9 +132,7 @@ func TestFilesystemSizeNotFound(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := fs.Size(ctx, "nonexistent")
-	if !errors.Is(err, ErrNotFound) {
-		t.Errorf("Size() error = %v, want ErrNotFound", err)
-	}
+	require.ErrorIs(t, err, ErrNotFound)
 }
 
 func TestFilesystemList(t *testing.T) {
@@ -194,33 +151,23 @@ func TestFilesystemList(t *testing.T) {
 
 	for _, key := range keys {
 		err := fs.Write(ctx, key, bytes.NewReader([]byte("data")))
-		if err != nil {
-			t.Fatalf("Write(%s) error = %v", key, err)
-		}
+		require.NoError(t, err)
 	}
 
 	// List all
 	all, err := fs.List(ctx, "")
-	if err != nil {
-		t.Fatalf("List() error = %v", err)
-	}
+	require.NoError(t, err)
 	sort.Strings(all)
 	sort.Strings(keys)
-	if !equalStringSlices(all, keys) {
-		t.Errorf("List() = %v, want %v", all, keys)
-	}
+	require.Equal(t, keys, all)
 
 	// List with prefix
 	dir1Files, err := fs.List(ctx, "dir1")
-	if err != nil {
-		t.Fatalf("List(dir1) error = %v", err)
-	}
+	require.NoError(t, err)
 	expected := []string{"dir1/file1.txt", "dir1/file2.txt", "dir1/subdir/file3.txt"}
 	sort.Strings(dir1Files)
 	sort.Strings(expected)
-	if !equalStringSlices(dir1Files, expected) {
-		t.Errorf("List(dir1) = %v, want %v", dir1Files, expected)
-	}
+	require.Equal(t, expected, dir1Files)
 }
 
 func TestFilesystemWriter(t *testing.T) {
@@ -233,36 +180,24 @@ func TestFilesystemWriter(t *testing.T) {
 
 	// Get writer
 	w, err := fs.Writer(ctx, key)
-	if err != nil {
-		t.Fatalf("Writer() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	// Write data
 	n, err := w.Write(data)
-	if err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
-	if n != len(data) {
-		t.Errorf("Write() = %d, want %d", n, len(data))
-	}
+	require.NoError(t, err)
+	require.Equal(t, len(data), n)
 
 	// Close to commit
 	err = w.Close()
-	if err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	// Verify
 	rc, err := fs.Read(ctx, key)
-	if err != nil {
-		t.Fatalf("Read() error = %v", err)
-	}
+	require.NoError(t, err)
 	defer func() { _ = rc.Close() }()
 
 	got, _ := io.ReadAll(rc)
-	if !bytes.Equal(got, data) {
-		t.Errorf("Read() = %q, want %q", got, data)
-	}
+	require.Equal(t, data, got)
 }
 
 func TestFilesystemAtomicWrite(t *testing.T) {
@@ -275,15 +210,11 @@ func TestFilesystemAtomicWrite(t *testing.T) {
 
 	// Write initial data
 	err := fs.Write(ctx, key, bytes.NewReader(originalData))
-	if err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	// Simulate failed write by using Writer and aborting
 	w, err := fs.Writer(ctx, key)
-	if err != nil {
-		t.Fatalf("Writer() error = %v", err)
-	}
+	require.NoError(t, err)
 	_, _ = w.Write([]byte("partial"))
 
 	// Get atomicWriter to call Abort
@@ -292,15 +223,11 @@ func TestFilesystemAtomicWrite(t *testing.T) {
 
 	// Original data should still be there
 	rc, err := fs.Read(ctx, key)
-	if err != nil {
-		t.Fatalf("Read() error = %v", err)
-	}
+	require.NoError(t, err)
 	defer func() { _ = rc.Close() }()
 
 	got, _ := io.ReadAll(rc)
-	if !bytes.Equal(got, originalData) {
-		t.Errorf("data corrupted after aborted write: got %q, want %q", got, originalData)
-	}
+	require.Equal(t, originalData, got)
 }
 
 func TestFilesystemOverwrite(t *testing.T) {
@@ -312,28 +239,20 @@ func TestFilesystemOverwrite(t *testing.T) {
 
 	// Write initial
 	err := fs.Write(ctx, key, bytes.NewReader([]byte("initial")))
-	if err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	// Overwrite
 	newData := []byte("new content that is longer")
 	err = fs.Write(ctx, key, bytes.NewReader(newData))
-	if err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	// Verify overwrite
 	rc, err := fs.Read(ctx, key)
-	if err != nil {
-		t.Fatalf("Read() error = %v", err)
-	}
+	require.NoError(t, err)
 	defer func() { _ = rc.Close() }()
 
 	got, _ := io.ReadAll(rc)
-	if !bytes.Equal(got, newData) {
-		t.Errorf("Read() = %q, want %q", got, newData)
-	}
+	require.Equal(t, newData, got)
 }
 
 // Helper functions
@@ -342,20 +261,6 @@ func newTestFilesystem(t *testing.T) (*Filesystem, func()) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	fs, err := NewFilesystem(tmpDir)
-	if err != nil {
-		t.Fatalf("NewFilesystem() error = %v", err)
-	}
+	require.NoError(t, err)
 	return fs, func() {}
-}
-
-func equalStringSlices(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

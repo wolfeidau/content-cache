@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"github.com/wolfeidau/content-cache/backend"
 	"github.com/wolfeidau/content-cache/store"
 )
@@ -33,14 +34,8 @@ func TestHandlerList(t *testing.T) {
 
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
-	}
-
-	body := rec.Body.String()
-	if !strings.Contains(body, "v1.0.0") {
-		t.Errorf("response missing v1.0.0: %s", body)
-	}
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), "v1.0.0")
 }
 
 func TestHandlerInfo(t *testing.T) {
@@ -74,18 +69,12 @@ func TestHandlerInfo(t *testing.T) {
 
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
-	}
+	require.Equal(t, http.StatusOK, rec.Code)
 
 	var info VersionInfo
-	if err := json.NewDecoder(rec.Body).Decode(&info); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-
-	if info.Version != "v1.0.0" {
-		t.Errorf("Version = %q, want %q", info.Version, "v1.0.0")
-	}
+	err := json.NewDecoder(rec.Body).Decode(&info)
+	require.NoError(t, err)
+	require.Equal(t, "v1.0.0", info.Version)
 }
 
 func TestHandlerMod(t *testing.T) {
@@ -115,13 +104,8 @@ func TestHandlerMod(t *testing.T) {
 
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
-	}
-
-	if rec.Body.String() != modContent {
-		t.Errorf("body = %q, want %q", rec.Body.String(), modContent)
-	}
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, modContent, rec.Body.String())
 }
 
 func TestHandlerZip(t *testing.T) {
@@ -152,17 +136,9 @@ func TestHandlerZip(t *testing.T) {
 
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
-	}
-
-	if rec.Header().Get("Content-Type") != "application/zip" {
-		t.Errorf("Content-Type = %q, want application/zip", rec.Header().Get("Content-Type"))
-	}
-
-	if rec.Body.String() != zipContent {
-		t.Errorf("body length = %d, want %d", rec.Body.Len(), len(zipContent))
-	}
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "application/zip", rec.Header().Get("Content-Type"))
+	require.Equal(t, zipContent, rec.Body.String())
 }
 
 func TestHandlerNotFound(t *testing.T) {
@@ -178,9 +154,7 @@ func TestHandlerNotFound(t *testing.T) {
 
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
-	}
+	require.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 func TestHandlerCacheHit(t *testing.T) {
@@ -223,14 +197,8 @@ func TestHandlerCacheHit(t *testing.T) {
 	initialCalls := upstreamCalls
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
-	}
-
-	// Should not have called upstream
-	if upstreamCalls != initialCalls {
-		t.Errorf("upstream was called %d times for cached module", upstreamCalls-initialCalls)
-	}
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, initialCalls, upstreamCalls)
 }
 
 func TestHandlerZipCacheHit(t *testing.T) {
@@ -260,20 +228,11 @@ func TestHandlerZipCacheHit(t *testing.T) {
 
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
-	}
+	require.Equal(t, http.StatusOK, rec.Code)
 
-	// Verify content
 	body, _ := io.ReadAll(rec.Body)
-	if string(body) != zipContent {
-		t.Errorf("body = %q, want %q", body, zipContent)
-	}
-
-	// Should not have called upstream
-	if upstreamCalls != 0 {
-		t.Errorf("upstream was called %d times for cached zip", upstreamCalls)
-	}
+	require.Equal(t, zipContent, string(body))
+	require.Equal(t, 0, upstreamCalls)
 }
 
 func TestHandlerUppercaseModule(t *testing.T) {
@@ -296,9 +255,7 @@ func TestHandlerUppercaseModule(t *testing.T) {
 
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
-	}
+	require.Equal(t, http.StatusOK, rec.Code)
 }
 
 func TestHandlerInvalidPath(t *testing.T) {
@@ -319,9 +276,7 @@ func TestHandlerInvalidPath(t *testing.T) {
 
 			handler.ServeHTTP(rec, req)
 
-			if rec.Code != http.StatusBadRequest {
-				t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
-			}
+			require.Equal(t, http.StatusBadRequest, rec.Code)
 		})
 	}
 }
@@ -334,9 +289,7 @@ func TestHandlerMethodNotAllowed(t *testing.T) {
 
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusMethodNotAllowed {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
-	}
+	require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
 }
 
 // Helper functions
@@ -352,9 +305,7 @@ func newTestHandlerWithComponents(t *testing.T, upstreamURL string) (*Handler, *
 
 	tmpDir := t.TempDir()
 	b, err := backend.NewFilesystem(tmpDir)
-	if err != nil {
-		t.Fatalf("NewFilesystem() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	idx := NewIndex(b)
 	cafsStore := store.NewCAFS(b)
