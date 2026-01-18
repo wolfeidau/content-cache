@@ -424,8 +424,21 @@ func TestHandlerIntegrityCheckFailure(t *testing.T) {
 	upstreamURL = upstream.URL
 	defer upstream.Close()
 
-	h, cleanup := newTestHandler(t, upstream)
-	defer cleanup()
+	tmpDir, err := os.MkdirTemp("", "pypi-test-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp() error = %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	b, err := backend.NewFilesystem(tmpDir)
+	if err != nil {
+		t.Fatalf("NewFilesystem() error = %v", err)
+	}
+	cafs := store.NewCAFS(b)
+	idx := NewIndex(b)
+
+	pypiUpstream := NewUpstream(WithSimpleURL(upstream.URL + "/simple/"))
+	h := NewHandler(idx, cafs, WithUpstream(pypiUpstream))
 
 	// First fetch project page to populate index
 	req := httptest.NewRequest(http.MethodGet, "/simple/bad-pkg/", nil)
@@ -436,10 +449,17 @@ func TestHandlerIntegrityCheckFailure(t *testing.T) {
 		t.Fatalf("Project page status = %d, want %d", w.Code, http.StatusOK)
 	}
 
+	// Wait for async caching to complete
+	h.Close()
+
+	// Create new handler with same storage for file download
+	h2 := NewHandler(idx, cafs, WithUpstream(pypiUpstream))
+	defer h2.Close()
+
 	// Now try to download the file - should fail integrity check
 	req = httptest.NewRequest(http.MethodGet, "/packages/bad-pkg/bad_pkg-1.0.0.whl", nil)
 	w = httptest.NewRecorder()
-	h.ServeHTTP(w, req)
+	h2.ServeHTTP(w, req)
 
 	if w.Code != http.StatusBadGateway {
 		t.Errorf("Status = %d, want %d (integrity check should fail)", w.Code, http.StatusBadGateway)
@@ -499,8 +519,21 @@ func TestHandlerHEADRequest(t *testing.T) {
 	upstreamURL = upstream.URL
 	defer upstream.Close()
 
-	h, cleanup := newTestHandler(t, upstream)
-	defer cleanup()
+	tmpDir, err := os.MkdirTemp("", "pypi-test-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp() error = %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	b, err := backend.NewFilesystem(tmpDir)
+	if err != nil {
+		t.Fatalf("NewFilesystem() error = %v", err)
+	}
+	cafs := store.NewCAFS(b)
+	idx := NewIndex(b)
+
+	pypiUpstream := NewUpstream(WithSimpleURL(upstream.URL + "/simple/"))
+	h := NewHandler(idx, cafs, WithUpstream(pypiUpstream))
 
 	t.Run("HEAD on project page", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodHead, "/simple/head-test/", nil)
@@ -524,11 +557,18 @@ func TestHandlerHEADRequest(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
+	// Wait for async caching to complete
+	h.Close()
+
+	// Create new handler with same storage for file download test
+	h2 := NewHandler(idx, cafs, WithUpstream(pypiUpstream))
+	defer h2.Close()
+
 	t.Run("HEAD on file download", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodHead, "/packages/head-test/head_test-1.0.0.whl", nil)
 		w := httptest.NewRecorder()
 
-		h.ServeHTTP(w, req)
+		h2.ServeHTTP(w, req)
 
 		if w.Code != http.StatusOK {
 			t.Errorf("Status = %d, want %d", w.Code, http.StatusOK)
