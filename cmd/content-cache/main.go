@@ -24,21 +24,23 @@ func main() {
 func run() error {
 	// Parse flags
 	var (
-		address         = flag.String("address", ":8080", "Address to listen on")
-		storage         = flag.String("storage", "./cache", "Storage directory path")
-		goUpstream      = flag.String("go-upstream", "", "Upstream Go module proxy URL (default: proxy.golang.org)")
-		npmUpstream     = flag.String("npm-upstream", "", "Upstream NPM registry URL (default: registry.npmjs.org)")
-		ociUpstream     = flag.String("oci-upstream", "", "Upstream OCI registry URL (default: registry-1.docker.io)")
-		ociUsername     = flag.String("oci-username", "", "OCI registry username for authentication")
-		ociPassword     = flag.String("oci-password", "", "OCI registry password for authentication")
-		ociTagTTL       = flag.Duration("oci-tag-ttl", 5*time.Minute, "TTL for OCI tag->digest cache mappings")
-		pypiUpstream    = flag.String("pypi-upstream", "", "Upstream PyPI Simple API URL (default: pypi.org/simple/)")
-		pypiMetadataTTL = flag.Duration("pypi-metadata-ttl", 5*time.Minute, "TTL for PyPI project metadata cache")
-		cacheTTL        = flag.Duration("cache-ttl", 7*24*time.Hour, "Cache TTL (e.g., 168h for 7 days, 0 to disable)")
-		cacheMaxSize    = flag.Int64("cache-max-size", 10*1024*1024*1024, "Maximum cache size in bytes (default: 10GB, 0 to disable)")
-		expiryCheck     = flag.Duration("expiry-check-interval", time.Hour, "How often to check for expired content")
-		logLevel        = flag.String("log-level", "info", "Log level (debug, info, warn, error)")
-		logFormat       = flag.String("log-format", "text", "Log format (text, json)")
+		address          = flag.String("address", ":8080", "Address to listen on")
+		storage          = flag.String("storage", "./cache", "Storage directory path")
+		goUpstream       = flag.String("go-upstream", "", "Upstream Go module proxy URL (default: proxy.golang.org)")
+		npmUpstream      = flag.String("npm-upstream", "", "Upstream NPM registry URL (default: registry.npmjs.org)")
+		ociUpstream      = flag.String("oci-upstream", "", "Upstream OCI registry URL (default: registry-1.docker.io)")
+		ociUsername      = flag.String("oci-username", "", "OCI registry username for authentication")
+		ociPassword      = flag.String("oci-password", "", "OCI registry password for authentication")
+		ociTagTTL        = flag.Duration("oci-tag-ttl", 5*time.Minute, "TTL for OCI tag->digest cache mappings")
+		pypiUpstream     = flag.String("pypi-upstream", "", "Upstream PyPI Simple API URL (default: pypi.org/simple/)")
+		pypiMetadataTTL  = flag.Duration("pypi-metadata-ttl", 5*time.Minute, "TTL for PyPI project metadata cache")
+		mavenUpstream    = flag.String("maven-upstream", "", "Upstream Maven repository URL (default: repo.maven.apache.org/maven2)")
+		mavenMetadataTTL = flag.Duration("maven-metadata-ttl", 5*time.Minute, "TTL for maven-metadata.xml cache")
+		cacheTTL         = flag.Duration("cache-ttl", 7*24*time.Hour, "Cache TTL (e.g., 168h for 7 days, 0 to disable)")
+		cacheMaxSize     = flag.Int64("cache-max-size", 10*1024*1024*1024, "Maximum cache size in bytes (default: 10GB, 0 to disable)")
+		expiryCheck      = flag.Duration("expiry-check-interval", time.Hour, "How often to check for expired content")
+		logLevel         = flag.String("log-level", "info", "Log level (debug, info, warn, error)")
+		logFormat        = flag.String("log-format", "text", "Log format (text, json)")
 	)
 	flag.Parse()
 
@@ -81,6 +83,8 @@ func run() error {
 		OCITagTTL:           *ociTagTTL,
 		UpstreamPyPI:        *pypiUpstream,
 		PyPIMetadataTTL:     *pypiMetadataTTL,
+		UpstreamMaven:       *mavenUpstream,
+		MavenMetadataTTL:    *mavenMetadataTTL,
 		CacheTTL:            *cacheTTL,
 		CacheMaxSize:        *cacheMaxSize,
 		ExpiryCheckInterval: *expiryCheck,
@@ -120,6 +124,7 @@ func run() error {
 		"npm_url", fmt.Sprintf("http://localhost%s/npm", srv.Address()),
 		"oci_url", fmt.Sprintf("http://localhost%s/v2", srv.Address()),
 		"pypi_url", fmt.Sprintf("http://localhost%s/pypi/simple", srv.Address()),
+		"maven_url", fmt.Sprintf("http://localhost%s/maven", srv.Address()),
 	)
 	fmt.Println()
 	fmt.Println("To use as a Go module proxy:")
@@ -133,6 +138,16 @@ func run() error {
 	fmt.Println()
 	fmt.Println("To use as a PyPI mirror:")
 	fmt.Printf("  pip install --index-url http://localhost%s/pypi/simple/ requests\n", srv.Address())
+	fmt.Println()
+	fmt.Println("To use as a Maven repository mirror:")
+	fmt.Println("  Add to ~/.m2/settings.xml:")
+	fmt.Println("  <mirrors>")
+	fmt.Println("    <mirror>")
+	fmt.Println("      <id>content-cache</id>")
+	fmt.Println("      <mirrorOf>central</mirrorOf>")
+	fmt.Printf("      <url>http://localhost%s/maven</url>\n", srv.Address())
+	fmt.Println("    </mirror>")
+	fmt.Println("  </mirrors>")
 	fmt.Println()
 
 	// Wait for shutdown or error
