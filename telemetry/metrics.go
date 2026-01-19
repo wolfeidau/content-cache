@@ -2,7 +2,9 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -20,6 +22,9 @@ import (
 const (
 	meterName = "github.com/wolfeidau/content-cache"
 )
+
+// ErrMetricsAlreadyInitialized is returned when InitMetrics is called more than once.
+var ErrMetricsAlreadyInitialized = errors.New("metrics already initialized")
 
 // MetricsConfig configures the metrics system.
 type MetricsConfig struct {
@@ -42,19 +47,42 @@ type MetricsConfig struct {
 
 // Metrics holds the OpenTelemetry metric instruments.
 type Metrics struct {
-	requestsTotal  metric.Int64Counter
+	requestsTotal      metric.Int64Counter
 	responseBytesTotal metric.Int64Counter
-	requestDuration metric.Float64Histogram
+	requestDuration    metric.Float64Histogram
 
 	meterProvider *sdkmetric.MeterProvider
 	promHandler   http.Handler
 }
 
-var globalMetrics *Metrics
+var (
+	globalMetrics *Metrics
+	initOnce      sync.Once
+	initErr       error
+)
 
 // InitMetrics initializes the OpenTelemetry metrics system.
 // Returns a shutdown function that should be called on application exit.
+// Returns ErrMetricsAlreadyInitialized if called more than once.
 func InitMetrics(ctx context.Context, cfg MetricsConfig) (shutdown func(context.Context) error, err error) {
+	var alreadyInitialized bool
+
+	initOnce.Do(func() {
+		initErr = doInitMetrics(ctx, cfg)
+	})
+
+	if initErr != nil {
+		return nil, initErr
+	}
+
+	if alreadyInitialized {
+		return nil, ErrMetricsAlreadyInitialized
+	}
+
+	return shutdownMetrics, nil
+}
+
+func doInitMetrics(ctx context.Context, cfg MetricsConfig) error {
 	if cfg.ServiceName == "" {
 		cfg.ServiceName = "content-cache"
 	}
@@ -72,7 +100,7 @@ func InitMetrics(ctx context.Context, cfg MetricsConfig) (shutdown func(context.
 		),
 	)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	var readers []sdkmetric.Reader
@@ -85,7 +113,7 @@ func InitMetrics(ctx context.Context, cfg MetricsConfig) (shutdown func(context.
 			otlpmetricgrpc.WithInsecure(), // Use WithTLSCredentials for production
 		)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		readers = append(readers, sdkmetric.NewPeriodicReader(otlpExporter,
 			sdkmetric.WithInterval(cfg.FlushInterval),
@@ -96,7 +124,7 @@ func InitMetrics(ctx context.Context, cfg MetricsConfig) (shutdown func(context.
 	if cfg.EnablePrometheus {
 		promExp, err := promexporter.New()
 		if err != nil {
-			return nil, err
+			return err
 		}
 		readers = append(readers, promExp)
 		promHandler = promhttp.Handler()
@@ -127,7 +155,7 @@ func InitMetrics(ctx context.Context, cfg MetricsConfig) (shutdown func(context.
 		metric.WithUnit("{request}"),
 	)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	responseBytesTotal, err := meter.Int64Counter(
@@ -136,7 +164,7 @@ func InitMetrics(ctx context.Context, cfg MetricsConfig) (shutdown func(context.
 		metric.WithUnit("By"),
 	)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	requestDuration, err := meter.Float64Histogram(
@@ -146,7 +174,7 @@ func InitMetrics(ctx context.Context, cfg MetricsConfig) (shutdown func(context.
 		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10),
 	)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	globalMetrics = &Metrics{
@@ -157,7 +185,17 @@ func InitMetrics(ctx context.Context, cfg MetricsConfig) (shutdown func(context.
 		promHandler:        promHandler,
 	}
 
-	return mp.Shutdown, nil
+	return nil
+}
+
+// shutdownMetrics shuts down the metrics provider and clears the global state.
+func shutdownMetrics(ctx context.Context) error {
+	if globalMetrics == nil {
+		return nil
+	}
+	err := globalMetrics.meterProvider.Shutdown(ctx)
+	globalMetrics = nil
+	return err
 }
 
 // RecordHTTP records HTTP request metrics.
@@ -185,7 +223,7 @@ func RecordHTTP(ctx context.Context, r *http.Request, protocol string, status in
 		attribute.String("protocol", protocol),
 		attribute.String("endpoint", endpoint),
 		attribute.String("cache_result", cacheResult),
-		attribute.String("status_class", statusClass(status)),
+		attribute.String("status_class", StatusClass(status)),
 		attribute.String("method", r.Method),
 	}
 
@@ -196,16 +234,20 @@ func RecordHTTP(ctx context.Context, r *http.Request, protocol string, status in
 }
 
 // PrometheusHandler returns the Prometheus metrics HTTP handler.
-// Returns nil if Prometheus export is not enabled.
+// Returns a handler that returns 404 if Prometheus export is not enabled,
+// allowing safe registration regardless of initialization order.
 func PrometheusHandler() http.Handler {
-	if globalMetrics == nil {
-		return nil
-	}
-	return globalMetrics.promHandler
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if globalMetrics == nil || globalMetrics.promHandler == nil {
+			http.NotFound(w, r)
+			return
+		}
+		globalMetrics.promHandler.ServeHTTP(w, r)
+	})
 }
 
-// statusClass returns the HTTP status class (2xx, 3xx, 4xx, 5xx).
-func statusClass(status int) string {
+// StatusClass returns the HTTP status class (2xx, 3xx, 4xx, 5xx).
+func StatusClass(status int) string {
 	switch {
 	case status >= 200 && status < 300:
 		return "2xx"

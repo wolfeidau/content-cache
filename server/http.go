@@ -2,9 +2,11 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -261,10 +263,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Cache stats
 	mux.HandleFunc("GET /stats", s.handleStats)
 
-	// Prometheus metrics endpoint (if enabled)
-	if promHandler := telemetry.PrometheusHandler(); promHandler != nil {
-		mux.Handle("GET /metrics", promHandler)
-	}
+	// Prometheus metrics endpoint (returns 404 if not enabled)
+	mux.Handle("GET /metrics", telemetry.PrometheusHandler())
 
 	// NPM registry endpoints
 	// The npm handler handles all paths under /npm/
@@ -360,7 +360,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 
 			// Response details
 			"status", wrapped.status,
-			"status_class", statusClass(wrapped.status),
+			"status_class", telemetry.StatusClass(wrapped.status),
 			"bytes_sent", wrapped.bytesWritten,
 
 			// Timing
@@ -429,6 +429,7 @@ func (s *Server) Address() string {
 }
 
 // responseWriter wraps http.ResponseWriter to capture the status code and bytes written.
+// It preserves http.Flusher and http.Hijacker interfaces for streaming support.
 type responseWriter struct {
 	http.ResponseWriter
 	status       int
@@ -446,9 +447,31 @@ func (rw *responseWriter) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// Flush implements http.Flusher for streaming responses.
+func (rw *responseWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Hijack implements http.Hijacker for connection upgrades.
+func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := rw.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, fmt.Errorf("hijacking not supported")
+}
+
+// Unwrap returns the underlying ResponseWriter.
+func (rw *responseWriter) Unwrap() http.ResponseWriter {
+	return rw.ResponseWriter
+}
+
 // deriveProtocol extracts the protocol name from the request path.
 func deriveProtocol(path string) string {
 	switch {
+	case path == "/health" || path == "/stats" || path == "/metrics":
+		return "internal"
 	case len(path) >= 5 && path[:5] == "/npm/":
 		return "npm"
 	case len(path) >= 6 && path[:6] == "/pypi/":
@@ -464,22 +487,6 @@ func deriveProtocol(path string) string {
 		if len(path) > 1 && path[0] == '/' {
 			return "goproxy"
 		}
-		return "unknown"
-	}
-}
-
-// statusClass returns the HTTP status class (2xx, 3xx, 4xx, 5xx).
-func statusClass(status int) string {
-	switch {
-	case status >= 200 && status < 300:
-		return "2xx"
-	case status >= 300 && status < 400:
-		return "3xx"
-	case status >= 400 && status < 500:
-		return "4xx"
-	case status >= 500:
-		return "5xx"
-	default:
 		return "unknown"
 	}
 }
