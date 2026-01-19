@@ -14,6 +14,7 @@ import (
 
 	contentcache "github.com/wolfeidau/content-cache"
 	"github.com/wolfeidau/content-cache/store"
+	"github.com/wolfeidau/content-cache/telemetry"
 )
 
 const (
@@ -140,7 +141,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleVersionCheck handles GET /v2/ requests.
-func (h *Handler) handleVersionCheck(w http.ResponseWriter, _ *http.Request) {
+func (h *Handler) handleVersionCheck(w http.ResponseWriter, r *http.Request) {
+	telemetry.SetEndpoint(r, "version")
+	telemetry.SetCacheResult(r, telemetry.CacheBypass)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
 	w.WriteHeader(http.StatusOK)
@@ -149,6 +152,7 @@ func (h *Handler) handleVersionCheck(w http.ResponseWriter, _ *http.Request) {
 
 // handleGetManifest handles GET /v2/{name}/manifests/{reference} requests.
 func (h *Handler) handleGetManifest(w http.ResponseWriter, r *http.Request, name, reference string) {
+	telemetry.SetEndpoint(r, "manifest")
 	ctx := r.Context()
 	logger := h.logger.With("name", name, "reference", reference, "endpoint", "manifest")
 
@@ -188,6 +192,7 @@ func (h *Handler) handleGetManifest(w http.ResponseWriter, r *http.Request, name
 	if cachedManifest != nil {
 		rc, err := h.store.Get(ctx, cachedManifest.ContentHash)
 		if err == nil {
+			telemetry.SetCacheResult(r, telemetry.CacheHit)
 			defer func() { _ = rc.Close() }()
 			w.Header().Set("Content-Type", cachedManifest.MediaType)
 			w.Header().Set(DockerContentDigestHeader, cachedManifest.Digest)
@@ -200,6 +205,7 @@ func (h *Handler) handleGetManifest(w http.ResponseWriter, r *http.Request, name
 	}
 
 	// Fetch from upstream
+	telemetry.SetCacheResult(r, telemetry.CacheMiss)
 	logger.Debug("cache miss, fetching from upstream")
 	content, mediaType, upstreamDigest, err := h.upstream.FetchManifest(ctx, name, reference)
 	if err != nil {
@@ -244,6 +250,7 @@ func (h *Handler) handleGetManifest(w http.ResponseWriter, r *http.Request, name
 
 // handleHeadManifest handles HEAD /v2/{name}/manifests/{reference} requests.
 func (h *Handler) handleHeadManifest(w http.ResponseWriter, r *http.Request, name, reference string) {
+	telemetry.SetEndpoint(r, "manifest-head")
 	ctx := r.Context()
 	logger := h.logger.With("name", name, "reference", reference, "endpoint", "manifest-head")
 
@@ -253,6 +260,7 @@ func (h *Handler) handleHeadManifest(w http.ResponseWriter, r *http.Request, nam
 		// Check cache for digest
 		cached, err := h.index.GetManifest(ctx, reference)
 		if err == nil {
+			telemetry.SetCacheResult(r, telemetry.CacheHit)
 			w.Header().Set("Content-Type", cached.MediaType)
 			w.Header().Set(DockerContentDigestHeader, cached.Digest)
 			w.Header().Set("Content-Length", fmt.Sprintf("%d", cached.Size))
@@ -265,6 +273,7 @@ func (h *Handler) handleHeadManifest(w http.ResponseWriter, r *http.Request, nam
 		if err == nil && time.Since(refreshedAt) < h.tagTTL {
 			cached, err := h.index.GetManifest(ctx, digest)
 			if err == nil {
+				telemetry.SetCacheResult(r, telemetry.CacheHit)
 				w.Header().Set("Content-Type", cached.MediaType)
 				w.Header().Set(DockerContentDigestHeader, cached.Digest)
 				w.Header().Set("Content-Length", fmt.Sprintf("%d", cached.Size))
@@ -275,6 +284,7 @@ func (h *Handler) handleHeadManifest(w http.ResponseWriter, r *http.Request, nam
 	}
 
 	// Fetch from upstream
+	telemetry.SetCacheResult(r, telemetry.CacheMiss)
 	digest, size, mediaType, err := h.upstream.HeadManifest(ctx, name, reference)
 	if err != nil {
 		if err == ErrNotFound {
@@ -298,6 +308,7 @@ func (h *Handler) handleHeadManifest(w http.ResponseWriter, r *http.Request, nam
 
 // handleGetBlob handles GET /v2/{name}/blobs/{digest} requests.
 func (h *Handler) handleGetBlob(w http.ResponseWriter, r *http.Request, name, digestStr string) {
+	telemetry.SetEndpoint(r, "blob")
 	ctx := r.Context()
 	logger := h.logger.With("name", name, "digest", digestStr, "endpoint", "blob")
 
@@ -308,6 +319,7 @@ func (h *Handler) handleGetBlob(w http.ResponseWriter, r *http.Request, name, di
 		if err == nil {
 			defer func() { _ = rc.Close() }()
 			logger.Debug("cache hit")
+			telemetry.SetCacheResult(r, telemetry.CacheHit)
 			w.Header().Set("Content-Type", "application/octet-stream")
 			w.Header().Set(DockerContentDigestHeader, digestStr)
 			if cached.Size > 0 {
@@ -322,6 +334,7 @@ func (h *Handler) handleGetBlob(w http.ResponseWriter, r *http.Request, name, di
 	}
 
 	// Fetch from upstream
+	telemetry.SetCacheResult(r, telemetry.CacheMiss)
 	logger.Debug("cache miss, fetching from upstream")
 	rc, size, err := h.upstream.FetchBlob(ctx, name, digestStr)
 	if err != nil {
@@ -421,12 +434,14 @@ func (h *Handler) handleGetBlob(w http.ResponseWriter, r *http.Request, name, di
 
 // handleHeadBlob handles HEAD /v2/{name}/blobs/{digest} requests.
 func (h *Handler) handleHeadBlob(w http.ResponseWriter, r *http.Request, name, digestStr string) {
+	telemetry.SetEndpoint(r, "blob-head")
 	ctx := r.Context()
 	logger := h.logger.With("name", name, "digest", digestStr, "endpoint", "blob-head")
 
 	// Check cache first
 	cached, err := h.index.GetBlob(ctx, digestStr)
 	if err == nil {
+		telemetry.SetCacheResult(r, telemetry.CacheHit)
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set(DockerContentDigestHeader, digestStr)
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", cached.Size))
@@ -435,6 +450,7 @@ func (h *Handler) handleHeadBlob(w http.ResponseWriter, r *http.Request, name, d
 	}
 
 	// Check upstream
+	telemetry.SetCacheResult(r, telemetry.CacheMiss)
 	size, err := h.upstream.HeadBlob(ctx, name, digestStr)
 	if err != nil {
 		if err == ErrNotFound {

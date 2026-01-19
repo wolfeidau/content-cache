@@ -14,6 +14,7 @@ import (
 
 	contentcache "github.com/wolfeidau/content-cache"
 	"github.com/wolfeidau/content-cache/store"
+	"github.com/wolfeidau/content-cache/telemetry"
 )
 
 const (
@@ -148,6 +149,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // handleList handles /{module}/@v/list requests.
 func (h *Handler) handleList(w http.ResponseWriter, r *http.Request, modulePath string) {
+	telemetry.SetEndpoint(r, "list")
 	ctx := r.Context()
 	logger := h.logger.With("module", modulePath, "endpoint", "list")
 
@@ -161,6 +163,7 @@ func (h *Handler) handleList(w http.ResponseWriter, r *http.Request, modulePath 
 	// In a more sophisticated implementation, we might merge with upstream
 	if len(versions) > 0 {
 		logger.Debug("cache hit", "versions", len(versions))
+		telemetry.SetCacheResult(r, telemetry.CacheHit)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		for _, v := range versions {
 			if _, err := fmt.Fprintln(w, v); err != nil {
@@ -173,6 +176,7 @@ func (h *Handler) handleList(w http.ResponseWriter, r *http.Request, modulePath 
 
 	// Fetch from upstream
 	logger.Debug("cache miss, fetching from upstream")
+	telemetry.SetCacheResult(r, telemetry.CacheMiss)
 	versions, err = h.upstream.FetchVersionList(ctx, modulePath)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -195,6 +199,7 @@ func (h *Handler) handleList(w http.ResponseWriter, r *http.Request, modulePath 
 
 // handleInfo handles /{module}/@v/{version}.info requests.
 func (h *Handler) handleInfo(w http.ResponseWriter, r *http.Request, modulePath, version string) {
+	telemetry.SetEndpoint(r, "info")
 	ctx := r.Context()
 	logger := h.logger.With("module", modulePath, "version", version, "endpoint", "info")
 
@@ -202,6 +207,7 @@ func (h *Handler) handleInfo(w http.ResponseWriter, r *http.Request, modulePath,
 	info, err := h.index.GetVersionInfo(ctx, modulePath, version)
 	if err == nil {
 		logger.Debug("cache hit")
+		telemetry.SetCacheResult(r, telemetry.CacheHit)
 		h.writeJSON(w, info, logger)
 		return
 	}
@@ -211,6 +217,7 @@ func (h *Handler) handleInfo(w http.ResponseWriter, r *http.Request, modulePath,
 
 	// Fetch from upstream
 	logger.Debug("cache miss, fetching from upstream")
+	telemetry.SetCacheResult(r, telemetry.CacheMiss)
 	info, err = h.upstream.FetchInfo(ctx, modulePath, version)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -230,6 +237,7 @@ func (h *Handler) handleInfo(w http.ResponseWriter, r *http.Request, modulePath,
 
 // handleMod handles /{module}/@v/{version}.mod requests.
 func (h *Handler) handleMod(w http.ResponseWriter, r *http.Request, modulePath, version string) {
+	telemetry.SetEndpoint(r, "mod")
 	ctx := r.Context()
 	logger := h.logger.With("module", modulePath, "version", version, "endpoint", "mod")
 
@@ -237,6 +245,7 @@ func (h *Handler) handleMod(w http.ResponseWriter, r *http.Request, modulePath, 
 	modFile, err := h.index.GetMod(ctx, modulePath, version)
 	if err == nil {
 		logger.Debug("cache hit")
+		telemetry.SetCacheResult(r, telemetry.CacheHit)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		if _, err := w.Write(modFile); err != nil {
 			logger.Error("failed to write response", "error", err)
@@ -249,6 +258,7 @@ func (h *Handler) handleMod(w http.ResponseWriter, r *http.Request, modulePath, 
 
 	// Fetch from upstream
 	logger.Debug("cache miss, fetching from upstream")
+	telemetry.SetCacheResult(r, telemetry.CacheMiss)
 	modFile, err = h.upstream.FetchMod(ctx, modulePath, version)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -271,6 +281,7 @@ func (h *Handler) handleMod(w http.ResponseWriter, r *http.Request, modulePath, 
 
 // handleZip handles /{module}/@v/{version}.zip requests.
 func (h *Handler) handleZip(w http.ResponseWriter, r *http.Request, modulePath, version string) {
+	telemetry.SetEndpoint(r, "zip")
 	ctx := r.Context()
 	logger := h.logger.With("module", modulePath, "version", version, "endpoint", "zip")
 
@@ -281,6 +292,7 @@ func (h *Handler) handleZip(w http.ResponseWriter, r *http.Request, modulePath, 
 		rc, err := h.store.Get(ctx, mv.ZipHash)
 		if err == nil {
 			logger.Debug("cache hit")
+			telemetry.SetCacheResult(r, telemetry.CacheHit)
 			defer func() { _ = rc.Close() }()
 			w.Header().Set("Content-Type", "application/zip")
 			if _, err := io.Copy(w, rc); err != nil {
@@ -296,6 +308,7 @@ func (h *Handler) handleZip(w http.ResponseWriter, r *http.Request, modulePath, 
 
 	// Fetch from upstream
 	logger.Debug("cache miss, fetching from upstream")
+	telemetry.SetCacheResult(r, telemetry.CacheMiss)
 
 	// For zip, we stream directly while also caching
 	zipReader, err := h.upstream.FetchZip(ctx, modulePath, version)
@@ -329,11 +342,13 @@ func (h *Handler) handleZip(w http.ResponseWriter, r *http.Request, modulePath, 
 
 // handleLatest handles /{module}/@latest requests.
 func (h *Handler) handleLatest(w http.ResponseWriter, r *http.Request, modulePath string) {
+	telemetry.SetEndpoint(r, "latest")
 	ctx := r.Context()
 	logger := h.logger.With("module", modulePath, "endpoint", "latest")
 
 	// Fetch from upstream (we don't cache @latest as it can change)
 	logger.Debug("fetching latest from upstream")
+	telemetry.SetCacheResult(r, telemetry.CacheBypass)
 	info, err := h.upstream.FetchLatest(ctx, modulePath)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {

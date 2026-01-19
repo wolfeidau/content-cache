@@ -21,6 +21,7 @@ import (
 
 	contentcache "github.com/wolfeidau/content-cache"
 	"github.com/wolfeidau/content-cache/store"
+	"github.com/wolfeidau/content-cache/telemetry"
 )
 
 const (
@@ -135,6 +136,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // handleRoot handles the root index listing all cached projects.
 func (h *Handler) handleRoot(w http.ResponseWriter, r *http.Request) {
+	telemetry.SetEndpoint(r, "root")
+	telemetry.SetCacheResult(r, telemetry.CacheHit)
 	ctx := r.Context()
 	logger := h.logger.With("endpoint", "root")
 
@@ -157,6 +160,7 @@ func (h *Handler) handleRoot(w http.ResponseWriter, r *http.Request) {
 
 // handleProject handles project page requests.
 func (h *Handler) handleProject(w http.ResponseWriter, r *http.Request, project string) {
+	telemetry.SetEndpoint(r, "project")
 	ctx := r.Context()
 	normalized := NormalizeProjectName(project)
 	logger := h.logger.With("project", normalized, "endpoint", "project")
@@ -165,6 +169,7 @@ func (h *Handler) handleProject(w http.ResponseWriter, r *http.Request, project 
 	cached, err := h.index.GetCachedProject(ctx, normalized)
 	if err == nil && !h.index.IsExpired(cached, h.metadataTTL) {
 		logger.Debug("cache hit")
+		telemetry.SetCacheResult(r, telemetry.CacheHit)
 		h.writeProjectResponse(w, r, cached, normalized)
 		return
 	}
@@ -174,6 +179,7 @@ func (h *Handler) handleProject(w http.ResponseWriter, r *http.Request, project 
 
 	// Fetch from upstream
 	logger.Debug("cache miss or expired, fetching from upstream")
+	telemetry.SetCacheResult(r, telemetry.CacheMiss)
 	body, contentType, err := h.upstream.FetchProjectPage(ctx, normalized)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -249,6 +255,7 @@ func (h *Handler) handleProject(w http.ResponseWriter, r *http.Request, project 
 
 // handleFile handles file download requests.
 func (h *Handler) handleFile(w http.ResponseWriter, r *http.Request) {
+	telemetry.SetEndpoint(r, "file")
 	ctx := r.Context()
 
 	// Path format: /packages/{project}/{filename}
@@ -278,6 +285,7 @@ func (h *Handler) handleFile(w http.ResponseWriter, r *http.Request) {
 		rc, err := h.store.Get(ctx, cachedFile.ContentHash)
 		if err == nil {
 			logger.Debug("cache hit")
+			telemetry.SetCacheResult(r, telemetry.CacheHit)
 			defer func() { _ = rc.Close() }()
 			w.Header().Set("Content-Type", "application/octet-stream")
 			if cachedFile.Size > 0 {
@@ -331,6 +339,7 @@ func (h *Handler) handleFile(w http.ResponseWriter, r *http.Request) {
 
 	// Fetch from upstream
 	logger.Debug("cache miss, fetching from upstream")
+	telemetry.SetCacheResult(r, telemetry.CacheMiss)
 	rc, err := h.upstream.FetchFile(ctx, upstreamURL)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {

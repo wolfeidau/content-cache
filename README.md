@@ -66,6 +66,16 @@ pip install requests  # Second request: served from cache
 
 # Maven artifacts are now cached
 mvn dependency:get -Dartifact=org.apache.commons:commons-lang3:3.12.0
+
+# Configure Gradle to use the cache (in settings.gradle.kts or build.gradle.kts)
+# repositories {
+#     maven {
+#         url = uri("http://localhost:8080/maven")
+#     }
+# }
+
+# Gradle uses the same Maven repository protocol - no separate handler needed
+./gradlew build  # Dependencies are cached through the Maven endpoint
 ```
 
 ## Performance
@@ -89,11 +99,14 @@ mvn dependency:get -Dartifact=org.apache.commons:commons-lang3:3.12.0
 - **Cache Expiration**: TTL-based and size-based (LRU) eviction with configurable intervals
 - **Authentication**: Support for OCI registry authentication with username/password
 - **Health & Stats Endpoints**: `/health` for liveness checks, `/stats` for cache statistics
+- **OpenTelemetry Metrics**: Request counts, bytes served, and latency histograms with cache hit/miss breakdown
+- **Prometheus Integration**: Optional `/metrics` endpoint for Prometheus scraping
+- **Structured Logging**: JSON logs with protocol, endpoint, cache_result, and timing fields
 
 ### Planned
 - S3 storage backend
 - Compression (zstd)
-- Metrics and tracing (OpenTelemetry)
+- OpenTelemetry tracing
 
 ## Architecture
 
@@ -181,6 +194,13 @@ All configuration options are provided via command-line flags:
 -log-format text            # Log format: text, json
 ```
 
+### Metrics Options
+```bash
+-metrics-otlp-endpoint ""   # OTLP gRPC endpoint for metrics export (e.g., localhost:4317)
+-metrics-prometheus         # Enable Prometheus /metrics endpoint
+-metrics-interval 10s       # Metrics export interval
+```
+
 ### Example: Full Configuration
 
 ```bash
@@ -201,7 +221,9 @@ All configuration options are provided via command-line flags:
   -cache-max-size 21474836480 \
   -expiry-check-interval 30m \
   -log-level debug \
-  -log-format json
+  -log-format json \
+  -metrics-prometheus \
+  -metrics-otlp-endpoint otel-collector:4317
 ```
 
 ## Storage Layout
@@ -280,6 +302,63 @@ curl http://localhost:8080/stats
 
 # View cached content size on disk
 ls -lh ./cache/blobs/
+```
+
+## Metrics & Observability
+
+content-cache exports OpenTelemetry metrics for monitoring cache effectiveness.
+
+### Metrics Exported
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `content_cache_http_requests_total` | Counter | Total requests by protocol, endpoint, cache_result, status |
+| `content_cache_http_response_bytes_total` | Counter | Bytes served by protocol, endpoint, cache_result, status |
+| `content_cache_http_request_duration_seconds` | Histogram | Request latency by protocol, endpoint, cache_result, status |
+
+### Labels
+
+- `protocol`: npm, pypi, goproxy, maven, oci
+- `endpoint`: metadata, tarball, artifact, blob, manifest, etc.
+- `cache_result`: hit, miss, bypass
+- `status_class`: 2xx, 3xx, 4xx, 5xx
+
+### Example Queries (PromQL)
+
+```promql
+# Cache hit rate by protocol
+sum(rate(content_cache_http_requests_total{cache_result="hit"}[5m])) by (protocol)
+/ sum(rate(content_cache_http_requests_total{cache_result=~"hit|miss"}[5m])) by (protocol)
+
+# Bandwidth served from cache (bytes/sec)
+sum(rate(content_cache_http_response_bytes_total{cache_result="hit"}[5m]))
+
+# P95 latency comparison: cache hits vs misses
+histogram_quantile(0.95, 
+  sum(rate(content_cache_http_request_duration_seconds_bucket[5m])) by (le, cache_result)
+)
+
+# Total bandwidth saved (approximate, cumulative)
+sum(content_cache_http_response_bytes_total{cache_result="hit"})
+```
+
+### Structured Logging
+
+With `-log-format json`, logs include fields for analysis:
+
+```json
+{
+  "level": "INFO",
+  "msg": "http request",
+  "protocol": "npm",
+  "endpoint": "tarball",
+  "cache_result": "hit",
+  "status": 200,
+  "status_class": "2xx",
+  "bytes_sent": 528640,
+  "duration_ms": 12,
+  "request_id": "550e8400-e29b-41d4-a716-446655440000"
+}
 ```
 
 ## Goals
