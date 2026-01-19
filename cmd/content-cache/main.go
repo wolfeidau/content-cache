@@ -117,38 +117,7 @@ func run() error {
 		}
 	}()
 
-	// Print usage info
-	logger.Info("server started",
-		"address", srv.Address(),
-		"goproxy_url", fmt.Sprintf("http://localhost%s/goproxy", srv.Address()),
-		"npm_url", fmt.Sprintf("http://localhost%s/npm", srv.Address()),
-		"oci_url", fmt.Sprintf("http://localhost%s/v2", srv.Address()),
-		"pypi_url", fmt.Sprintf("http://localhost%s/pypi/simple", srv.Address()),
-		"maven_url", fmt.Sprintf("http://localhost%s/maven", srv.Address()),
-	)
-	fmt.Println()
-	fmt.Println("To use as a Go module proxy:")
-	fmt.Printf("  export GOPROXY=http://localhost%s/goproxy,direct\n", srv.Address())
-	fmt.Println()
-	fmt.Println("To use as an NPM registry:")
-	fmt.Printf("  npm config set registry http://localhost%s/npm/\n", srv.Address())
-	fmt.Println()
-	fmt.Println("To use as an OCI registry mirror:")
-	fmt.Printf("  docker pull localhost%s/library/alpine:latest\n", srv.Address())
-	fmt.Println()
-	fmt.Println("To use as a PyPI mirror:")
-	fmt.Printf("  pip install --index-url http://localhost%s/pypi/simple/ requests\n", srv.Address())
-	fmt.Println()
-	fmt.Println("To use as a Maven repository mirror:")
-	fmt.Println("  Add to ~/.m2/settings.xml:")
-	fmt.Println("  <mirrors>")
-	fmt.Println("    <mirror>")
-	fmt.Println("      <id>content-cache</id>")
-	fmt.Println("      <mirrorOf>central</mirrorOf>")
-	fmt.Printf("      <url>http://localhost%s/maven</url>\n", srv.Address())
-	fmt.Println("    </mirror>")
-	fmt.Println("  </mirrors>")
-	fmt.Println()
+	logger.Info("server started", "address", srv.Address())
 
 	// Wait for shutdown or error
 	select {
