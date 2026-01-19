@@ -202,8 +202,10 @@ func (h *Handler) handleRootFile(w http.ResponseWriter, r *http.Request, filenam
 	}
 
 	w.Header().Set("Content-Type", "application/xml")
-	if _, err := w.Write(data); err != nil {
-		logger.Error("failed to write response", "error", err)
+	if r.Method != http.MethodHead {
+		if _, err := w.Write(data); err != nil {
+			logger.Error("failed to write response", "error", err)
+		}
 	}
 }
 
@@ -218,8 +220,10 @@ func (h *Handler) handleRootFileChecksum(w http.ResponseWriter, r *http.Request,
 	if err == nil {
 		logger.Debug("fetched checksum from upstream")
 		w.Header().Set("Content-Type", "text/plain")
-		if _, err := w.Write(data); err != nil {
-			logger.Error("failed to write response", "error", err)
+		if r.Method != http.MethodHead {
+			if _, err := w.Write(data); err != nil {
+				logger.Error("failed to write response", "error", err)
+			}
 		}
 		return
 	}
@@ -240,8 +244,10 @@ func (h *Handler) handleRootFileChecksum(w http.ResponseWriter, r *http.Request,
 
 		checksum := computeChecksum(content, checksumType)
 		w.Header().Set("Content-Type", "text/plain")
-		if _, err := w.Write([]byte(checksum)); err != nil {
-			logger.Error("failed to write response", "error", err)
+		if r.Method != http.MethodHead {
+			if _, err := w.Write([]byte(checksum)); err != nil {
+				logger.Error("failed to write response", "error", err)
+			}
 		}
 		return
 	}
@@ -260,8 +266,10 @@ func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request, groupID
 	if err == nil && !h.index.IsMetadataExpired(cached, h.metadataTTL) {
 		logger.Debug("cache hit")
 		w.Header().Set("Content-Type", "application/xml")
-		if _, err := w.Write(cached.Metadata); err != nil {
-			logger.Error("failed to write response", "error", err)
+		if r.Method != http.MethodHead {
+			if _, err := w.Write(cached.Metadata); err != nil {
+				logger.Error("failed to write response", "error", err)
+			}
 		}
 		return
 	}
@@ -301,8 +309,10 @@ func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request, groupID
 	}()
 
 	w.Header().Set("Content-Type", "application/xml")
-	if _, err := w.Write(rawMeta); err != nil {
-		logger.Error("failed to write response", "error", err)
+	if r.Method != http.MethodHead {
+		if _, err := w.Write(rawMeta); err != nil {
+			logger.Error("failed to write response", "error", err)
+		}
 	}
 }
 
@@ -317,8 +327,10 @@ func (h *Handler) handleMetadataChecksum(w http.ResponseWriter, r *http.Request,
 		checksum := computeChecksum(cached.Metadata, checksumType)
 		logger.Debug("computed checksum from cache")
 		w.Header().Set("Content-Type", "text/plain")
-		if _, err := w.Write([]byte(checksum)); err != nil {
-			logger.Error("failed to write response", "error", err)
+		if r.Method != http.MethodHead {
+			if _, err := w.Write([]byte(checksum)); err != nil {
+				logger.Error("failed to write response", "error", err)
+			}
 		}
 		return
 	}
@@ -339,8 +351,10 @@ func (h *Handler) handleMetadataChecksum(w http.ResponseWriter, r *http.Request,
 
 	checksum := computeChecksum(rawMeta, checksumType)
 	w.Header().Set("Content-Type", "text/plain")
-	if _, err := w.Write([]byte(checksum)); err != nil {
-		logger.Error("failed to write response", "error", err)
+	if r.Method != http.MethodHead {
+		if _, err := w.Write([]byte(checksum)); err != nil {
+			logger.Error("failed to write response", "error", err)
+		}
 	}
 }
 
@@ -364,8 +378,13 @@ func (h *Handler) handleArtifact(w http.ResponseWriter, r *http.Request, coord A
 			logger.Debug("cache hit")
 			defer func() { _ = rc.Close() }()
 			w.Header().Set("Content-Type", contentTypeForExtension(coord.Extension))
-			if _, err := io.Copy(w, rc); err != nil {
-				logger.Error("failed to stream artifact", "error", err)
+			if cached.Size > 0 {
+				w.Header().Set("Content-Length", fmt.Sprintf("%d", cached.Size))
+			}
+			if r.Method != http.MethodHead {
+				if _, err := io.Copy(w, rc); err != nil {
+					logger.Error("failed to stream artifact", "error", err)
+				}
 			}
 			return
 		}
@@ -380,7 +399,7 @@ func (h *Handler) handleArtifact(w http.ResponseWriter, r *http.Request, coord A
 
 	// Fetch from upstream
 	logger.Debug("cache miss, fetching from upstream")
-	rc, contentLength, err := h.upstream.FetchArtifact(ctx, coord)
+	rc, _, err := h.upstream.FetchArtifact(ctx, coord)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -400,17 +419,20 @@ func (h *Handler) handleArtifact(w http.ResponseWriter, r *http.Request, coord A
 		return
 	}
 	tmpPath := tmpFile.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
+	// Note: tmpPath cleanup is handled by cacheArtifact or on error paths below
 
 	// Stream to temp file while computing hashes
 	hr := contentcache.NewHashingReader(rc)
 	sha1Hash := sha1.New()
 	md5Hash := md5.New()
-	multiWriter := io.MultiWriter(tmpFile, sha1Hash, md5Hash)
+	sha256Hash := sha256.New()
+	sha512Hash := sha512.New()
+	multiWriter := io.MultiWriter(tmpFile, sha1Hash, md5Hash, sha256Hash, sha512Hash)
 
 	size, err := io.Copy(multiWriter, hr)
 	if err != nil {
 		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
 		logger.Error("failed to read artifact", "error", err)
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		return
@@ -418,10 +440,13 @@ func (h *Handler) handleArtifact(w http.ResponseWriter, r *http.Request, coord A
 	blake3Hash := hr.Sum()
 	computedSHA1 := hex.EncodeToString(sha1Hash.Sum(nil))
 	computedMD5 := hex.EncodeToString(md5Hash.Sum(nil))
+	computedSHA256 := hex.EncodeToString(sha256Hash.Sum(nil))
+	computedSHA512 := hex.EncodeToString(sha512Hash.Sum(nil))
 
 	// Verify integrity if we have expected checksums
 	if sha1Checksum != "" && computedSHA1 != sha1Checksum {
 		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
 		logger.Error("SHA1 integrity check failed",
 			"expected", sha1Checksum,
 			"computed", computedSHA1,
@@ -437,6 +462,7 @@ func (h *Handler) handleArtifact(w http.ResponseWriter, r *http.Request, coord A
 	// Seek to beginning for sending to client
 	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
 		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
 		logger.Error("failed to seek temp file", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -444,18 +470,22 @@ func (h *Handler) handleArtifact(w http.ResponseWriter, r *http.Request, coord A
 
 	// Write to client
 	w.Header().Set("Content-Type", contentTypeForExtension(coord.Extension))
-	if contentLength > 0 {
+	if size > 0 {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
 	}
-	if _, err := io.Copy(w, tmpFile); err != nil {
-		logger.Error("failed to write response", "error", err)
+	if r.Method != http.MethodHead {
+		if _, err := io.Copy(w, tmpFile); err != nil {
+			logger.Error("failed to write response", "error", err)
+		}
 	}
 	_ = tmpFile.Close()
 
 	// Cache asynchronously
 	checksums := Checksums{
-		SHA1: computedSHA1,
-		MD5:  computedMD5,
+		SHA1:   computedSHA1,
+		MD5:    computedMD5,
+		SHA256: computedSHA256,
+		SHA512: computedSHA512,
 	}
 	h.startBackgroundCache(coord, blake3Hash, size, tmpPath, checksums, logger)
 }
@@ -488,8 +518,10 @@ func (h *Handler) handleArtifactChecksum(w http.ResponseWriter, r *http.Request,
 		if checksum != "" {
 			logger.Debug("cache hit for checksum")
 			w.Header().Set("Content-Type", "text/plain")
-			if _, err := w.Write([]byte(checksum)); err != nil {
-				logger.Error("failed to write response", "error", err)
+			if r.Method != http.MethodHead {
+				if _, err := w.Write([]byte(checksum)); err != nil {
+					logger.Error("failed to write response", "error", err)
+				}
 			}
 			return
 		}
@@ -509,8 +541,10 @@ func (h *Handler) handleArtifactChecksum(w http.ResponseWriter, r *http.Request,
 	}
 
 	w.Header().Set("Content-Type", "text/plain")
-	if _, err := w.Write([]byte(checksum)); err != nil {
-		logger.Error("failed to write response", "error", err)
+	if r.Method != http.MethodHead {
+		if _, err := w.Write([]byte(checksum)); err != nil {
+			logger.Error("failed to write response", "error", err)
+		}
 	}
 }
 
@@ -529,6 +563,9 @@ func (h *Handler) startBackgroundCache(coord ArtifactCoordinate, hash contentcac
 
 // cacheArtifact stores an artifact in the cache from a temp file.
 func (h *Handler) cacheArtifact(ctx context.Context, coord ArtifactCoordinate, hash contentcache.Hash, size int64, tmpPath string, checksums Checksums, logger *slog.Logger) {
+	// Clean up temp file when done
+	defer func() { _ = os.Remove(tmpPath) }()
+
 	// Open temp file for reading
 	tmpFile, err := os.Open(tmpPath)
 	if err != nil {
@@ -575,6 +612,7 @@ func (h *Handler) cacheArtifact(ctx context.Context, coord ArtifactCoordinate, h
 //   - commons-lang3-3.12.0-sources.jar
 //   - commons-lang3-3.12.0.pom
 //   - commons-lang3-3.12.0.jar.sha1
+//   - mylib-1.0-20240118.123456-1.jar (snapshot with timestamp)
 func parseArtifactFilename(artifactID, version, filename string) (ArtifactCoordinate, string, error) {
 	coord := ArtifactCoordinate{
 		ArtifactID: artifactID,
@@ -593,12 +631,31 @@ func parseArtifactFilename(artifactID, version, filename string) (ArtifactCoordi
 	}
 
 	// Expected base name: {artifactId}-{version}[-{classifier}].{extension}
+	// For snapshots, version may be "1.0-SNAPSHOT" but filename uses timestamp like "1.0-20240118.123456-1"
 	prefix := artifactID + "-" + version
-	if !strings.HasPrefix(filename, prefix) {
+	remainder := ""
+
+	if strings.HasPrefix(filename, prefix) {
+		remainder = strings.TrimPrefix(filename, prefix)
+	} else if strings.HasSuffix(version, "-SNAPSHOT") {
+		// Try snapshot timestamp format: artifactId-baseVersion-timestamp-buildNumber.ext
+		baseVersion := strings.TrimSuffix(version, "-SNAPSHOT")
+		snapshotPrefix := artifactID + "-" + baseVersion + "-"
+		if strings.HasPrefix(filename, snapshotPrefix) {
+			// Extract the rest and find the extension
+			rest := strings.TrimPrefix(filename, snapshotPrefix)
+			// Format: YYYYMMDD.HHMMSS-buildNum[-classifier].ext
+			// Find the extension by looking for last dot after the timestamp pattern
+			if idx := findSnapshotExtensionIndex(rest); idx > 0 {
+				remainder = rest[idx:]
+			}
+		}
+	}
+
+	if remainder == "" && !strings.HasPrefix(filename, prefix) {
 		return coord, "", fmt.Errorf("filename does not match expected pattern: %s", filename)
 	}
 
-	remainder := strings.TrimPrefix(filename, prefix)
 	if remainder == "" {
 		return coord, "", fmt.Errorf("filename missing extension: %s", filename)
 	}
@@ -626,6 +683,32 @@ func parseArtifactFilename(artifactID, version, filename string) (ArtifactCoordi
 	}
 
 	return coord, checksumType, nil
+}
+
+// findSnapshotExtensionIndex finds where the extension starts in a snapshot filename remainder.
+// Input format: "YYYYMMDD.HHMMSS-buildNum[-classifier].ext" e.g., "20240118.123456-1.jar"
+// Returns the index of the last segment starting with "." or "-" before the extension.
+func findSnapshotExtensionIndex(s string) int {
+	// Pattern: timestamp.time-buildnum[-classifier].ext
+	// We need to find where the artifact naming ends and extension begins
+	// Look for pattern like "-1.jar" or "-1-sources.jar"
+	parts := strings.Split(s, "-")
+	if len(parts) < 2 {
+		return -1
+	}
+	// The build number part contains the extension: "1.jar" or we have classifier after
+	// Find the first part after timestamp that contains a dot for extension
+	for i := 1; i < len(parts); i++ {
+		if dotIdx := strings.Index(parts[i], "."); dotIdx > 0 {
+			// Found extension, calculate position
+			pos := 0
+			for j := 0; j < i; j++ {
+				pos += len(parts[j]) + 1 // +1 for the "-"
+			}
+			return pos + dotIdx
+		}
+	}
+	return -1
 }
 
 // computeChecksum computes a checksum of the given data.
