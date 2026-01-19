@@ -21,6 +21,7 @@ import (
 
 	contentcache "github.com/wolfeidau/content-cache"
 	"github.com/wolfeidau/content-cache/store"
+	"github.com/wolfeidau/content-cache/telemetry"
 )
 
 const (
@@ -185,6 +186,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // handleRootFile handles root-level files like archetype-catalog.xml.
 func (h *Handler) handleRootFile(w http.ResponseWriter, r *http.Request, filename string) {
+	telemetry.SetEndpoint(r, "root-file")
+	telemetry.SetCacheResult(r, telemetry.CacheBypass)
+
 	ctx := r.Context()
 	logger := h.logger.With("filename", filename, "endpoint", "root-file")
 
@@ -211,6 +215,9 @@ func (h *Handler) handleRootFile(w http.ResponseWriter, r *http.Request, filenam
 
 // handleRootFileChecksum handles checksums for root-level files.
 func (h *Handler) handleRootFileChecksum(w http.ResponseWriter, r *http.Request, filename, checksumType string) {
+	telemetry.SetEndpoint(r, "root-file-checksum")
+	telemetry.SetCacheResult(r, telemetry.CacheBypass)
+
 	ctx := r.Context()
 	logger := h.logger.With("filename", filename, "checksumType", checksumType, "endpoint", "root-file-checksum")
 
@@ -258,12 +265,15 @@ func (h *Handler) handleRootFileChecksum(w http.ResponseWriter, r *http.Request,
 
 // handleMetadata handles maven-metadata.xml requests.
 func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request, groupID, artifactID string) {
+	telemetry.SetEndpoint(r, "metadata")
+
 	ctx := r.Context()
 	logger := h.logger.With("groupId", groupID, "artifactId", artifactID, "endpoint", "metadata")
 
 	// Try cache first
 	cached, err := h.index.GetCachedMetadata(ctx, groupID, artifactID)
 	if err == nil && !h.index.IsMetadataExpired(cached, h.metadataTTL) {
+		telemetry.SetCacheResult(r, telemetry.CacheHit)
 		logger.Debug("cache hit")
 		w.Header().Set("Content-Type", "application/xml")
 		if r.Method != http.MethodHead {
@@ -278,6 +288,7 @@ func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request, groupID
 	}
 
 	// Fetch from upstream
+	telemetry.SetCacheResult(r, telemetry.CacheMiss)
 	logger.Debug("cache miss, fetching from upstream")
 	rawMeta, err := h.upstream.FetchMetadataRaw(ctx, groupID, artifactID)
 	if err != nil {
@@ -318,12 +329,15 @@ func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request, groupID
 
 // handleMetadataChecksum handles maven-metadata.xml checksum requests.
 func (h *Handler) handleMetadataChecksum(w http.ResponseWriter, r *http.Request, groupID, artifactID, checksumType string) {
+	telemetry.SetEndpoint(r, "metadata-checksum")
+
 	ctx := r.Context()
 	logger := h.logger.With("groupId", groupID, "artifactId", artifactID, "checksumType", checksumType, "endpoint", "metadata-checksum")
 
 	// Try to get cached metadata and compute checksum
 	cached, err := h.index.GetCachedMetadata(ctx, groupID, artifactID)
 	if err == nil && !h.index.IsMetadataExpired(cached, h.metadataTTL) {
+		telemetry.SetCacheResult(r, telemetry.CacheHit)
 		checksum := computeChecksum(cached.Metadata, checksumType)
 		logger.Debug("computed checksum from cache")
 		w.Header().Set("Content-Type", "text/plain")
@@ -337,6 +351,7 @@ func (h *Handler) handleMetadataChecksum(w http.ResponseWriter, r *http.Request,
 
 	// Fetch checksum from upstream - try to get the checksum file directly first
 	// If that fails, fall back to computing from metadata
+	telemetry.SetCacheResult(r, telemetry.CacheMiss)
 	logger.Debug("fetching metadata for checksum")
 	rawMeta, err := h.upstream.FetchMetadataRaw(ctx, groupID, artifactID)
 	if err != nil {
@@ -360,6 +375,8 @@ func (h *Handler) handleMetadataChecksum(w http.ResponseWriter, r *http.Request,
 
 // handleArtifact handles artifact file requests (JAR, POM, etc.).
 func (h *Handler) handleArtifact(w http.ResponseWriter, r *http.Request, coord ArtifactCoordinate) {
+	telemetry.SetEndpoint(r, "artifact")
+
 	ctx := r.Context()
 	logger := h.logger.With(
 		"groupId", coord.GroupID,
@@ -375,6 +392,7 @@ func (h *Handler) handleArtifact(w http.ResponseWriter, r *http.Request, coord A
 	if err == nil && !cached.Hash.IsZero() {
 		rc, err := h.store.Get(ctx, cached.Hash)
 		if err == nil {
+			telemetry.SetCacheResult(r, telemetry.CacheHit)
 			logger.Debug("cache hit")
 			defer func() { _ = rc.Close() }()
 			w.Header().Set("Content-Type", contentTypeForExtension(coord.Extension))
@@ -398,6 +416,7 @@ func (h *Handler) handleArtifact(w http.ResponseWriter, r *http.Request, coord A
 	sha1Checksum, _ := h.upstream.FetchChecksum(ctx, coord, ChecksumSHA1)
 
 	// Fetch from upstream
+	telemetry.SetCacheResult(r, telemetry.CacheMiss)
 	logger.Debug("cache miss, fetching from upstream")
 	rc, _, err := h.upstream.FetchArtifact(ctx, coord)
 	if err != nil {
@@ -492,6 +511,8 @@ func (h *Handler) handleArtifact(w http.ResponseWriter, r *http.Request, coord A
 
 // handleArtifactChecksum handles artifact checksum requests.
 func (h *Handler) handleArtifactChecksum(w http.ResponseWriter, r *http.Request, coord ArtifactCoordinate, checksumType string) {
+	telemetry.SetEndpoint(r, "artifact-checksum")
+
 	ctx := r.Context()
 	logger := h.logger.With(
 		"groupId", coord.GroupID,
@@ -516,6 +537,7 @@ func (h *Handler) handleArtifactChecksum(w http.ResponseWriter, r *http.Request,
 			checksum = cached.Checksums.SHA512
 		}
 		if checksum != "" {
+			telemetry.SetCacheResult(r, telemetry.CacheHit)
 			logger.Debug("cache hit for checksum")
 			w.Header().Set("Content-Type", "text/plain")
 			if r.Method != http.MethodHead {
@@ -528,6 +550,7 @@ func (h *Handler) handleArtifactChecksum(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Fetch from upstream
+	telemetry.SetCacheResult(r, telemetry.CacheMiss)
 	logger.Debug("cache miss, fetching checksum from upstream")
 	checksum, err := h.upstream.FetchChecksum(ctx, coord, checksumType)
 	if err != nil {

@@ -17,6 +17,7 @@ import (
 	"github.com/wolfeidau/content-cache/protocol/oci"
 	"github.com/wolfeidau/content-cache/protocol/pypi"
 	"github.com/wolfeidau/content-cache/store"
+	"github.com/wolfeidau/content-cache/telemetry"
 )
 
 // Config holds server configuration.
@@ -260,6 +261,11 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Cache stats
 	mux.HandleFunc("GET /stats", s.handleStats)
 
+	// Prometheus metrics endpoint (if enabled)
+	if promHandler := telemetry.PrometheusHandler(); promHandler != nil {
+		mux.Handle("GET /metrics", promHandler)
+	}
+
 	// NPM registry endpoints
 	// The npm handler handles all paths under /npm/
 	mux.Handle("GET /npm/", http.StripPrefix("/npm", s.npm))
@@ -318,7 +324,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	)
 }
 
-// loggingMiddleware logs HTTP requests.
+// loggingMiddleware logs HTTP requests with structured fields for analysis.
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -328,23 +334,62 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 			requestID = uuid.NewString()
 		}
 
-		networkProtocolVersion := fmt.Sprintf("%d.%d", r.ProtoMajor, r.ProtoMinor)
+		// Inject request tags so handlers can set cache_result, endpoint, etc.
+		r = telemetry.InjectTags(r)
+		tags := telemetry.GetTags(r)
 
-		// Wrap response writer to capture status
+		// Derive protocol from path (simple prefix matching)
+		protocol := deriveProtocol(r.URL.Path)
+
+		// Wrap response writer to capture status and bytes
 		wrapped := &responseWriter{ResponseWriter: w, status: http.StatusOK}
 
 		next.ServeHTTP(wrapped, r)
 
-		s.logger.Info("http request",
+		duration := time.Since(start)
+
+		// Build log attributes
+		attrs := []any{
+			// Request identification
+			"request_id", requestID,
 			"method", r.Method,
 			"path", r.URL.Path,
+
+			// Protocol classification (for filtering/grouping)
+			"protocol", protocol,
+
+			// Response details
 			"status", wrapped.status,
-			"duration", time.Since(start).String(),
-			"remote", r.RemoteAddr,
-			"request_id", requestID,
+			"status_class", statusClass(wrapped.status),
+			"bytes_sent", wrapped.bytesWritten,
+
+			// Timing
+			"duration_ms", duration.Milliseconds(),
+			"duration", duration.String(),
+
+			// Client info
+			"remote_addr", r.RemoteAddr,
 			"user_agent", r.UserAgent(),
-			"network_protocol_version", networkProtocolVersion,
-		)
+			"http_version", fmt.Sprintf("%d.%d", r.ProtoMajor, r.ProtoMinor),
+		}
+
+		// Add handler-set tags
+		if tags.Endpoint != "" {
+			attrs = append(attrs, "endpoint", tags.Endpoint)
+		}
+		if tags.CacheResult != "" {
+			attrs = append(attrs, "cache_result", string(tags.CacheResult))
+		}
+
+		// Add content type if present
+		if ct := wrapped.Header().Get("Content-Type"); ct != "" {
+			attrs = append(attrs, "content_type", ct)
+		}
+
+		s.logger.Info("http request", attrs...)
+
+		// Record OTel metrics
+		telemetry.RecordHTTP(r.Context(), r, protocol, wrapped.status, wrapped.bytesWritten, duration)
 	})
 }
 
@@ -383,13 +428,58 @@ func (s *Server) Address() string {
 	return s.config.Address
 }
 
-// responseWriter wraps http.ResponseWriter to capture the status code.
+// responseWriter wraps http.ResponseWriter to capture the status code and bytes written.
 type responseWriter struct {
 	http.ResponseWriter
-	status int
+	status       int
+	bytesWritten int64
 }
 
 func (rw *responseWriter) WriteHeader(code int) {
 	rw.status = code
 	rw.ResponseWriter.WriteHeader(code)
+}
+
+func (rw *responseWriter) Write(b []byte) (int, error) {
+	n, err := rw.ResponseWriter.Write(b)
+	rw.bytesWritten += int64(n)
+	return n, err
+}
+
+// deriveProtocol extracts the protocol name from the request path.
+func deriveProtocol(path string) string {
+	switch {
+	case len(path) >= 5 && path[:5] == "/npm/":
+		return "npm"
+	case len(path) >= 6 && path[:6] == "/pypi/":
+		return "pypi"
+	case len(path) >= 7 && path[:7] == "/maven/":
+		return "maven"
+	case len(path) >= 9 && path[:9] == "/goproxy/":
+		return "goproxy"
+	case len(path) >= 3 && path[:3] == "/v2":
+		return "oci"
+	default:
+		// Root paths are goproxy (GOPROXY=http://localhost:8080)
+		if len(path) > 1 && path[0] == '/' {
+			return "goproxy"
+		}
+		return "unknown"
+	}
+}
+
+// statusClass returns the HTTP status class (2xx, 3xx, 4xx, 5xx).
+func statusClass(status int) string {
+	switch {
+	case status >= 200 && status < 300:
+		return "2xx"
+	case status >= 300 && status < 400:
+		return "3xx"
+	case status >= 400 && status < 500:
+		return "4xx"
+	case status >= 500:
+		return "5xx"
+	default:
+		return "unknown"
+	}
 }

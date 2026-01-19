@@ -18,6 +18,7 @@ import (
 
 	contentcache "github.com/wolfeidau/content-cache"
 	"github.com/wolfeidau/content-cache/store"
+	"github.com/wolfeidau/content-cache/telemetry"
 )
 
 const (
@@ -120,6 +121,9 @@ func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request, name st
 	ctx := r.Context()
 	logger := h.logger.With("package", name, "endpoint", "metadata")
 
+	// Tag request for logging
+	telemetry.SetEndpoint(r, "metadata")
+
 	// Check Accept header for abbreviated metadata
 	acceptHeader := r.Header.Get("Accept")
 	abbreviated := strings.Contains(acceptHeader, "application/vnd.npm.install-v1+json")
@@ -128,6 +132,7 @@ func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request, name st
 	cachedMeta, err := h.index.GetPackageMetadata(ctx, name)
 	if err == nil {
 		logger.Debug("cache hit")
+		telemetry.SetCacheResult(r, telemetry.CacheHit)
 		h.writeMetadataResponse(w, r, name, cachedMeta, abbreviated, logger)
 		return
 	}
@@ -137,6 +142,7 @@ func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request, name st
 
 	// Fetch from upstream
 	logger.Debug("cache miss, fetching from upstream")
+	telemetry.SetCacheResult(r, telemetry.CacheMiss)
 	rawMeta, err := h.upstream.FetchPackageMetadataRaw(ctx, name)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -284,6 +290,9 @@ func (h *Handler) handleTarball(w http.ResponseWriter, r *http.Request, packageN
 	ctx := r.Context()
 	logger := h.logger.With("package", packageName, "tarball", tarballName, "endpoint", "tarball")
 
+	// Tag request for logging
+	telemetry.SetEndpoint(r, "tarball")
+
 	// Extract version from tarball name
 	// e.g., "lodash-4.17.21" from "lodash-4.17.21.tgz"
 	version := extractVersionFromTarball(packageName, tarballName)
@@ -295,6 +304,7 @@ func (h *Handler) handleTarball(w http.ResponseWriter, r *http.Request, packageN
 			rc, err := h.store.Get(ctx, hash)
 			if err == nil {
 				logger.Debug("cache hit", "version", version)
+				telemetry.SetCacheResult(r, telemetry.CacheHit)
 				defer func() { _ = rc.Close() }()
 				w.Header().Set("Content-Type", "application/octet-stream")
 				if _, err := io.Copy(w, rc); err != nil {
@@ -323,6 +333,7 @@ func (h *Handler) handleTarball(w http.ResponseWriter, r *http.Request, packageN
 
 	// Fetch from upstream
 	logger.Debug("cache miss, fetching from upstream", "version", version)
+	telemetry.SetCacheResult(r, telemetry.CacheMiss)
 	tarballURL := h.upstream.TarballURL(packageName, version)
 
 	rc, err := h.upstream.FetchTarball(ctx, tarballURL)
