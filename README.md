@@ -1,6 +1,6 @@
 # content-cache
 
-A content-addressable caching proxy for Go modules, NPM packages, PyPI packages, and OCI registries. Reduces build times and network bandwidth by caching package downloads locally with automatic deduplication and expiration policies.
+A content-addressable caching proxy for Go modules, NPM packages, PyPI packages, Maven artifacts, and OCI registries. Reduces build times and network bandwidth by caching package downloads locally with automatic deduplication and expiration policies.
 
 ## Problem
 
@@ -47,6 +47,25 @@ pip install --index-url http://localhost:8080/pypi/simple/ requests
 # Python packages are now cached
 pip install requests  # First request: fetches from upstream
 pip install requests  # Second request: served from cache
+
+# Configure Maven to use the cache
+# Create ~/.m2/settings.xml with:
+#
+# <?xml version="1.0" encoding="UTF-8"?>
+# <settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"
+#           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+#           xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0 https://maven.apache.org/xsd/settings-1.2.0.xsd">
+#   <mirrors>
+#     <mirror>
+#       <id>content-cache</id>
+#       <mirrorOf>central</mirrorOf>
+#       <url>http://localhost:8080/maven</url>
+#     </mirror>
+#   </mirrors>
+# </settings>
+
+# Maven artifacts are now cached
+mvn dependency:get -Dartifact=org.apache.commons:commons-lang3:3.12.0
 ```
 
 ## Performance
@@ -62,6 +81,7 @@ pip install requests  # Second request: served from cache
 - **GOPROXY Protocol**: Full support for Go module proxy protocol (`/@v/list`, `.info`, `.mod`, `.zip`)
 - **NPM Registry Protocol**: Complete NPM registry support with tarball caching and integrity verification
 - **PyPI Simple API**: Full support for PEP 503/691 Simple Repository API with wheel and sdist caching
+- **Maven Repository**: Full support for Maven Central with JAR, POM, and checksum caching
 - **OCI Distribution v2**: Read-through cache for container registries with tag-to-digest resolution
 - **Content-Addressable Storage**: BLAKE3 hashing with automatic deduplication
 - **Filesystem Backend**: Atomic writes with sharded directory structure
@@ -83,11 +103,13 @@ graph TD
     A --> C[NPM Handler]
     A --> D[OCI Handler]
     A --> G[PyPI Handler]
+    A --> H[Maven Handler]
 
     B --> E[Content-Addressable Store]
     C --> E
     D --> E
     G --> E
+    H --> E
 
     E --> F[Storage Backend]
 
@@ -95,7 +117,8 @@ graph TD
     A -.-> A2["/npm/*"]
     A -.-> A3["/v2/*"]
     A -.-> A4["/pypi/*"]
-    A -.-> A5["/health, /stats"]
+    A -.-> A5["/maven/*"]
+    A -.-> A6["/health, /stats"]
 
     E -.-> E1["blobs/{hash[0:2]}/{hash}"]
     E -.-> E2["TTL + LRU Expiration"]
@@ -124,6 +147,7 @@ All configuration options are provided via command-line flags:
 -npm-upstream ""            # Upstream NPM registry URL (default: registry.npmjs.org)
 -oci-upstream ""            # Upstream OCI registry URL (default: registry-1.docker.io)
 -pypi-upstream ""           # Upstream PyPI Simple API URL (default: pypi.org/simple/)
+-maven-upstream ""          # Upstream Maven repository URL (default: repo.maven.apache.org/maven2)
 ```
 
 ### OCI Authentication
@@ -136,6 +160,12 @@ All configuration options are provided via command-line flags:
 ### PyPI Options
 ```bash
 -pypi-metadata-ttl 5m       # TTL for PyPI project metadata cache
+```
+
+### Maven Options
+```bash
+-maven-upstream ""          # Upstream Maven repository URL (default: repo.maven.apache.org/maven2)
+-maven-metadata-ttl 5m      # TTL for maven-metadata.xml cache
 ```
 
 ### Cache Management
@@ -165,6 +195,8 @@ All configuration options are provided via command-line flags:
   -oci-tag-ttl 10m \
   -pypi-upstream https://pypi.org/simple/ \
   -pypi-metadata-ttl 10m \
+  -maven-upstream https://repo.maven.apache.org/maven2 \
+  -maven-metadata-ttl 10m \
   -cache-ttl 336h \
   -cache-max-size 21474836480 \
   -expiry-check-interval 30m \
@@ -197,6 +229,16 @@ All configuration options are provided via command-line flags:
 │   └── projects/
 │       └── requests/
 │           └── metadata.json  # Project files and hashes
+├── maven/                   # Maven artifact index
+│   ├── metadata/
+│   │   └── org/apache/commons/
+│   │       └── commons-lang3/
+│   │           └── metadata.json  # maven-metadata.xml cache
+│   └── artifacts/
+│       └── org/apache/commons/
+│           └── commons-lang3/
+│               └── 3.12.0/
+│                   └── commons-lang3-3.12.0.jar.json  # Artifact reference
 └── oci/                     # OCI image index
     └── library/
         └── alpine/
@@ -223,6 +265,9 @@ curl http://localhost:8080/npm/express
 
 # Test the PyPI Simple API endpoint
 curl http://localhost:8080/pypi/simple/requests/
+
+# Test the Maven repository endpoint
+curl http://localhost:8080/maven/org/apache/commons/commons-lang3/maven-metadata.xml
 
 # Test the OCI registry endpoint
 curl http://localhost:8080/v2/
