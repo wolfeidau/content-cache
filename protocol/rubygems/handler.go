@@ -3,6 +3,7 @@ package rubygems
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -21,6 +22,11 @@ import (
 
 const (
 	cacheTimeout = 5 * time.Minute
+
+	// maxMetadataSize limits the size of metadata responses (versions, info, specs)
+	// to protect against DoS attacks via extremely large responses.
+	// 100MB should be sufficient for even the largest metadata files.
+	maxMetadataSize = 100 * 1024 * 1024
 )
 
 // Handler implements the RubyGems registry API as an HTTP handler.
@@ -101,6 +107,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleNames(w, r)
 	case strings.HasPrefix(path, "/info/"):
 		gemName := strings.TrimPrefix(path, "/info/")
+		if !IsValidGemName(gemName) {
+			http.Error(w, "invalid gem name", http.StatusBadRequest)
+			return
+		}
 		h.handleInfo(w, r, gemName)
 
 	// Legacy Specs API
@@ -177,7 +187,7 @@ func (h *Handler) handleVersions(w http.ResponseWriter, r *http.Request) {
 
 	case http.StatusPartialContent:
 		// Append to existing content
-		appendData, err := io.ReadAll(resp.Body)
+		appendData, err := io.ReadAll(io.LimitReader(resp.Body, maxMetadataSize))
 		if err != nil {
 			logger.Error("failed to read partial response", "error", err)
 			http.Error(w, "upstream error", http.StatusBadGateway)
@@ -186,6 +196,22 @@ func (h *Handler) handleVersions(w http.ResponseWriter, r *http.Request) {
 		newContent := make([]byte, len(content)+len(appendData))
 		copy(newContent, content)
 		copy(newContent[len(content):], appendData)
+
+		// Validate Repr-Digest if available
+		if resp.ReprDigest != "" {
+			computed := sha256.Sum256(newContent)
+			computedB64 := base64.StdEncoding.EncodeToString(computed[:])
+			if computedB64 != resp.ReprDigest {
+				logger.Error("repr-digest mismatch after append",
+					"expected", resp.ReprDigest,
+					"computed", computedB64,
+				)
+				// Refetch full file by returning error
+				http.Error(w, "integrity check failed", http.StatusBadGateway)
+				return
+			}
+		}
+
 		newMeta := &CachedVersions{
 			ETag:       resp.ETag,
 			ReprDigest: resp.ReprDigest,
@@ -205,7 +231,7 @@ func (h *Handler) handleVersions(w http.ResponseWriter, r *http.Request) {
 
 	case http.StatusOK:
 		// Full response
-		newContent, err := io.ReadAll(resp.Body)
+		newContent, err := io.ReadAll(io.LimitReader(resp.Body, maxMetadataSize))
 		if err != nil {
 			logger.Error("failed to read response", "error", err)
 			http.Error(w, "upstream error", http.StatusBadGateway)
@@ -278,7 +304,7 @@ func (h *Handler) handleInfo(w http.ResponseWriter, r *http.Request, gem string)
 		return
 
 	case http.StatusPartialContent:
-		appendData, err := io.ReadAll(resp.Body)
+		appendData, err := io.ReadAll(io.LimitReader(resp.Body, maxMetadataSize))
 		if err != nil {
 			logger.Error("failed to read partial response", "error", err)
 			http.Error(w, "upstream error", http.StatusBadGateway)
@@ -287,6 +313,21 @@ func (h *Handler) handleInfo(w http.ResponseWriter, r *http.Request, gem string)
 		newContent := make([]byte, len(content)+len(appendData))
 		copy(newContent, content)
 		copy(newContent[len(content):], appendData)
+
+		// Validate Repr-Digest if available
+		if resp.ReprDigest != "" {
+			computed := sha256.Sum256(newContent)
+			computedB64 := base64.StdEncoding.EncodeToString(computed[:])
+			if computedB64 != resp.ReprDigest {
+				logger.Error("repr-digest mismatch after append",
+					"expected", resp.ReprDigest,
+					"computed", computedB64,
+				)
+				http.Error(w, "integrity check failed", http.StatusBadGateway)
+				return
+			}
+		}
+
 		checksums := ParseInfoChecksums(newContent)
 		newMeta := &CachedGemInfo{
 			Name:       gem,
@@ -307,7 +348,7 @@ func (h *Handler) handleInfo(w http.ResponseWriter, r *http.Request, gem string)
 		return
 
 	case http.StatusOK:
-		newContent, err := io.ReadAll(resp.Body)
+		newContent, err := io.ReadAll(io.LimitReader(resp.Body, maxMetadataSize))
 		if err != nil {
 			logger.Error("failed to read response", "error", err)
 			http.Error(w, "upstream error", http.StatusBadGateway)
@@ -414,7 +455,7 @@ func (h *Handler) handleSpecs(w http.ResponseWriter, r *http.Request, specsType 
 		return
 
 	case http.StatusOK:
-		newContent, err := io.ReadAll(resp.Body)
+		newContent, err := io.ReadAll(io.LimitReader(resp.Body, maxMetadataSize))
 		if err != nil {
 			logger.Error("failed to read response", "error", err)
 			http.Error(w, "upstream error", http.StatusBadGateway)
@@ -509,11 +550,19 @@ func (h *Handler) handleGemspec(w http.ResponseWriter, r *http.Request) {
 	}
 	tmpPath := tmpFile.Name()
 
+	// cleanupNeeded tracks whether this function should cleanup the temp file.
+	// Set to false when responsibility is handed to the async caching goroutine.
+	cleanupNeeded := true
+	defer func() {
+		if cleanupNeeded {
+			_ = tmpFile.Close()
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
 	hr := contentcache.NewHashingReader(body)
 	written, err := io.Copy(tmpFile, hr)
 	if err != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpPath)
 		logger.Error("failed to read gemspec", "error", err)
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		return
@@ -522,8 +571,6 @@ func (h *Handler) handleGemspec(w http.ResponseWriter, r *http.Request) {
 
 	// Seek to beginning for sending to client
 	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpPath)
 		logger.Error("failed to seek temp file", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -541,7 +588,8 @@ func (h *Handler) handleGemspec(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = tmpFile.Close()
 
-	// Cache asynchronously
+	// Hand off cleanup responsibility to goroutine
+	cleanupNeeded = false
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
@@ -626,14 +674,22 @@ func (h *Handler) handleGem(w http.ResponseWriter, r *http.Request) {
 	}
 	tmpPath := tmpFile.Name()
 
+	// cleanupNeeded tracks whether this function should cleanup the temp file.
+	// Set to false when responsibility is handed to the async caching goroutine.
+	cleanupNeeded := true
+	defer func() {
+		if cleanupNeeded {
+			_ = tmpFile.Close()
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
 	hr := contentcache.NewHashingReader(body)
 	sha256Hash := sha256.New()
 	teeReader := io.TeeReader(hr, sha256Hash)
 
 	written, err := io.Copy(tmpFile, teeReader)
 	if err != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpPath)
 		logger.Error("failed to read gem", "error", err)
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		return
@@ -643,8 +699,6 @@ func (h *Handler) handleGem(w http.ResponseWriter, r *http.Request) {
 
 	// Verify integrity if we have expected checksum
 	if expectedSHA256 != "" && computedSHA256 != expectedSHA256 {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpPath)
 		logger.Error("integrity check failed",
 			"expected_sha256", expectedSHA256,
 			"computed_sha256", computedSHA256,
@@ -659,8 +713,6 @@ func (h *Handler) handleGem(w http.ResponseWriter, r *http.Request) {
 
 	// Seek to beginning for sending to client
 	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpPath)
 		logger.Error("failed to seek temp file", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -676,7 +728,8 @@ func (h *Handler) handleGem(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = tmpFile.Close()
 
-	// Cache asynchronously
+	// Hand off cleanup responsibility to goroutine
+	cleanupNeeded = false
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()

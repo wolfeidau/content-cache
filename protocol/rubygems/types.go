@@ -79,6 +79,24 @@ type ParsedGemFilename struct {
 // versionStartRegex matches the start of a version number (digit, optionally preceded by hyphen).
 var versionStartRegex = regexp.MustCompile(`-(\d)`)
 
+// gemNameRegex matches valid RubyGems gem names.
+// Gem names can contain: a-z, A-Z, 0-9, -, _
+var gemNameRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// IsValidGemName validates a gem name to prevent path traversal and invalid characters.
+// Gem names must contain only alphanumeric characters, hyphens, and underscores.
+func IsValidGemName(name string) bool {
+	if name == "" {
+		return false
+	}
+	// Check for path traversal attempts
+	if strings.Contains(name, "..") || strings.Contains(name, "/") || strings.Contains(name, "\\") {
+		return false
+	}
+	// Check for valid gem name characters
+	return gemNameRegex.MatchString(name)
+}
+
 // ParseGemFilename parses a gem filename into name, version, and platform.
 // Gem filenames have the format: {name}-{version}[-{platform}].gem
 // This is non-trivial because gem names can contain hyphens.

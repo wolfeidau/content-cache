@@ -135,6 +135,82 @@ func TestParseGemFilename(t *testing.T) {
 	}
 }
 
+func TestIsValidGemName(t *testing.T) {
+	tests := []struct {
+		name    string
+		gemName string
+		valid   bool
+	}{
+		{
+			name:    "simple name",
+			gemName: "rails",
+			valid:   true,
+		},
+		{
+			name:    "hyphenated name",
+			gemName: "aws-sdk-s3",
+			valid:   true,
+		},
+		{
+			name:    "underscore name",
+			gemName: "net_http",
+			valid:   true,
+		},
+		{
+			name:    "mixed case",
+			gemName: "ActionCable",
+			valid:   true,
+		},
+		{
+			name:    "numbers",
+			gemName: "oauth2",
+			valid:   true,
+		},
+		{
+			name:    "empty name",
+			gemName: "",
+			valid:   false,
+		},
+		{
+			name:    "path traversal double dot",
+			gemName: "../etc/passwd",
+			valid:   false,
+		},
+		{
+			name:    "path traversal forward slash",
+			gemName: "foo/bar",
+			valid:   false,
+		},
+		{
+			name:    "path traversal backslash",
+			gemName: "foo\\bar",
+			valid:   false,
+		},
+		{
+			name:    "double dot in middle",
+			gemName: "foo..bar",
+			valid:   false,
+		},
+		{
+			name:    "special characters",
+			gemName: "foo@bar",
+			valid:   false,
+		},
+		{
+			name:    "space",
+			gemName: "foo bar",
+			valid:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsValidGemName(tt.gemName)
+			require.Equal(t, tt.valid, got)
+		})
+	}
+}
+
 func TestParsedGemFilename_VersionPlatformKey(t *testing.T) {
 	tests := []struct {
 		name     string
