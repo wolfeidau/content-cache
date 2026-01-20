@@ -18,6 +18,7 @@ import (
 	"github.com/wolfeidau/content-cache/protocol/npm"
 	"github.com/wolfeidau/content-cache/protocol/oci"
 	"github.com/wolfeidau/content-cache/protocol/pypi"
+	"github.com/wolfeidau/content-cache/protocol/rubygems"
 	"github.com/wolfeidau/content-cache/store"
 	"github.com/wolfeidau/content-cache/telemetry"
 )
@@ -63,6 +64,13 @@ type Config struct {
 	// Default: 5 minutes (new versions may be published)
 	MavenMetadataTTL time.Duration
 
+	// UpstreamRubyGems is the upstream RubyGems registry URL
+	UpstreamRubyGems string
+
+	// RubyGemsMetadataTTL is how long to cache versions/info/specs files.
+	// Default: 5 minutes (new versions may be published)
+	RubyGemsMetadataTTL time.Duration
+
 	// CacheTTL is the time-to-live for cached content.
 	// Content not accessed within this duration is expired.
 	// Zero disables TTL-based expiration.
@@ -88,20 +96,22 @@ type Server struct {
 	logger     *slog.Logger
 
 	// Components
-	backend    backend.Backend
-	store      store.Store
-	index      *goproxy.Index
-	goproxy    *goproxy.Handler
-	npmIndex   *npm.Index
-	npm        *npm.Handler
-	ociIndex   *oci.Index
-	oci        *oci.Handler
-	pypiIndex  *pypi.Index
-	pypi       *pypi.Handler
-	mavenIndex *maven.Index
-	maven      *maven.Handler
-	metadata   *expiry.MetadataStore
-	expiryMgr  *expiry.Manager
+	backend       backend.Backend
+	store         store.Store
+	index         *goproxy.Index
+	goproxy       *goproxy.Handler
+	npmIndex      *npm.Index
+	npm           *npm.Handler
+	ociIndex      *oci.Index
+	oci           *oci.Handler
+	pypiIndex     *pypi.Index
+	pypi          *pypi.Handler
+	mavenIndex    *maven.Index
+	maven         *maven.Handler
+	rubygemsIndex *rubygems.Index
+	rubygems      *rubygems.Handler
+	metadata      *expiry.MetadataStore
+	expiryMgr     *expiry.Manager
 }
 
 // New creates a new server with the given configuration.
@@ -221,23 +231,41 @@ func New(cfg Config) (*Server, error) {
 	}
 	mavenHandler := maven.NewHandler(mavenIndex, cafsStore, mavenHandlerOpts...)
 
+	// Initialize RubyGems components
+	rubygemsIndex := rubygems.NewIndex(fsBackend)
+	rubygemsUpstreamOpts := []rubygems.UpstreamOption{}
+	if cfg.UpstreamRubyGems != "" {
+		rubygemsUpstreamOpts = append(rubygemsUpstreamOpts, rubygems.WithRegistryURL(cfg.UpstreamRubyGems))
+	}
+	rubygemsUpstream := rubygems.NewUpstream(rubygemsUpstreamOpts...)
+	rubygemsHandlerOpts := []rubygems.HandlerOption{
+		rubygems.WithUpstream(rubygemsUpstream),
+		rubygems.WithLogger(cfg.Logger.With("component", "rubygems")),
+	}
+	if cfg.RubyGemsMetadataTTL > 0 {
+		rubygemsHandlerOpts = append(rubygemsHandlerOpts, rubygems.WithMetadataTTL(cfg.RubyGemsMetadataTTL))
+	}
+	rubygemsHandler := rubygems.NewHandler(rubygemsIndex, cafsStore, rubygemsHandlerOpts...)
+
 	s := &Server{
-		config:     cfg,
-		logger:     cfg.Logger,
-		backend:    fsBackend,
-		store:      cafsStore,
-		index:      goIndex,
-		goproxy:    goHandler,
-		npmIndex:   npmIndex,
-		npm:        npmHandler,
-		ociIndex:   ociIndex,
-		oci:        ociHandler,
-		pypiIndex:  pypiIndex,
-		pypi:       pypiHandler,
-		mavenIndex: mavenIndex,
-		maven:      mavenHandler,
-		metadata:   metadataStore,
-		expiryMgr:  expiryMgr,
+		config:        cfg,
+		logger:        cfg.Logger,
+		backend:       fsBackend,
+		store:         cafsStore,
+		index:         goIndex,
+		goproxy:       goHandler,
+		npmIndex:      npmIndex,
+		npm:           npmHandler,
+		ociIndex:      ociIndex,
+		oci:           ociHandler,
+		pypiIndex:     pypiIndex,
+		pypi:          pypiHandler,
+		mavenIndex:    mavenIndex,
+		maven:         mavenHandler,
+		rubygemsIndex: rubygemsIndex,
+		rubygems:      rubygemsHandler,
+		metadata:      metadataStore,
+		expiryMgr:     expiryMgr,
 	}
 
 	// Build HTTP server
@@ -285,6 +313,11 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// The maven handler handles all paths under /maven/
 	mux.Handle("GET /maven/", http.StripPrefix("/maven", s.maven))
 	mux.Handle("HEAD /maven/", http.StripPrefix("/maven", s.maven))
+
+	// RubyGems registry endpoints
+	// The rubygems handler handles all paths under /rubygems/
+	mux.Handle("GET /rubygems/", http.StripPrefix("/rubygems", s.rubygems))
+	mux.Handle("HEAD /rubygems/", http.StripPrefix("/rubygems", s.rubygems))
 
 	// GOPROXY endpoints
 	// The goproxy handler handles all paths under /goproxy/
@@ -478,6 +511,8 @@ func deriveProtocol(path string) string {
 		return "pypi"
 	case len(path) >= 7 && path[:7] == "/maven/":
 		return "maven"
+	case len(path) >= 10 && path[:10] == "/rubygems/":
+		return "rubygems"
 	case len(path) >= 9 && path[:9] == "/goproxy/":
 		return "goproxy"
 	case len(path) >= 3 && path[:3] == "/v2":

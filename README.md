@@ -1,6 +1,6 @@
 # content-cache
 
-A content-addressable caching proxy for Go modules, NPM packages, PyPI packages, Maven artifacts, and OCI registries. Reduces build times and network bandwidth by caching package downloads locally with automatic deduplication and expiration policies.
+A content-addressable caching proxy for Go modules, NPM packages, PyPI packages, Maven artifacts, RubyGems, and OCI registries. Reduces build times and network bandwidth by caching package downloads locally with automatic deduplication and expiration policies.
 
 ## Problem
 
@@ -76,6 +76,17 @@ mvn dependency:get -Dartifact=org.apache.commons:commons-lang3:3.12.0
 
 # Gradle uses the same Maven repository protocol - no separate handler needed
 ./gradlew build  # Dependencies are cached through the Maven endpoint
+
+# Configure Bundler to use the cache (global mirror)
+bundle config set --global mirror.https://rubygems.org http://localhost:8080/rubygems/
+
+# Or configure gem command directly
+gem sources --add http://localhost:8080/rubygems/
+gem sources --remove https://rubygems.org/
+
+# Ruby gems are now cached
+bundle install   # First request: fetches from upstream
+bundle install   # Second request: served from cache
 ```
 
 ## Performance
@@ -92,6 +103,7 @@ mvn dependency:get -Dartifact=org.apache.commons:commons-lang3:3.12.0
 - **NPM Registry Protocol**: Complete NPM registry support with tarball caching and integrity verification
 - **PyPI Simple API**: Full support for PEP 503/691 Simple Repository API with wheel and sdist caching
 - **Maven Repository**: Full support for Maven Central with JAR, POM, and checksum caching
+- **RubyGems Registry**: Full support for Compact Index and legacy specs API with gem caching and SHA256 verification
 - **OCI Distribution v2**: Read-through cache for container registries with tag-to-digest resolution
 - **Content-Addressable Storage**: BLAKE3 hashing with automatic deduplication
 - **Filesystem Backend**: Atomic writes with sharded directory structure
@@ -117,12 +129,14 @@ graph TD
     A --> D[OCI Handler]
     A --> G[PyPI Handler]
     A --> H[Maven Handler]
+    A --> I[RubyGems Handler]
 
     B --> E[Content-Addressable Store]
     C --> E
     D --> E
     G --> E
     H --> E
+    I --> E
 
     E --> F[Storage Backend]
 
@@ -131,7 +145,8 @@ graph TD
     A -.-> A3["/v2/*"]
     A -.-> A4["/pypi/*"]
     A -.-> A5["/maven/*"]
-    A -.-> A6["/health, /stats"]
+    A -.-> A6["/rubygems/*"]
+    A -.-> A7["/health, /stats"]
 
     E -.-> E1["blobs/{hash[0:2]}/{hash}"]
     E -.-> E2["TTL + LRU Expiration"]
@@ -161,6 +176,7 @@ All configuration options are provided via command-line flags:
 -oci-upstream ""            # Upstream OCI registry URL (default: registry-1.docker.io)
 -pypi-upstream ""           # Upstream PyPI Simple API URL (default: pypi.org/simple/)
 -maven-upstream ""          # Upstream Maven repository URL (default: repo.maven.apache.org/maven2)
+-rubygems-upstream ""       # Upstream RubyGems registry URL (default: rubygems.org)
 ```
 
 ### OCI Authentication
@@ -179,6 +195,12 @@ All configuration options are provided via command-line flags:
 ```bash
 -maven-upstream ""          # Upstream Maven repository URL (default: repo.maven.apache.org/maven2)
 -maven-metadata-ttl 5m      # TTL for maven-metadata.xml cache
+```
+
+### RubyGems Options
+```bash
+-rubygems-upstream ""       # Upstream RubyGems registry URL (default: rubygems.org)
+-rubygems-metadata-ttl 5m   # TTL for RubyGems metadata cache (versions, info, specs)
 ```
 
 ### Cache Management
@@ -217,6 +239,8 @@ All configuration options are provided via command-line flags:
   -pypi-metadata-ttl 10m \
   -maven-upstream https://repo.maven.apache.org/maven2 \
   -maven-metadata-ttl 10m \
+  -rubygems-upstream https://rubygems.org \
+  -rubygems-metadata-ttl 10m \
   -cache-ttl 336h \
   -cache-max-size 21474836480 \
   -expiry-check-interval 30m \
@@ -261,6 +285,15 @@ All configuration options are provided via command-line flags:
 │           └── commons-lang3/
 │               └── 3.12.0/
 │                   └── commons-lang3-3.12.0.jar.json  # Artifact reference
+├── rubygems/                # RubyGems index
+│   ├── versions.json        # Cached /versions metadata
+│   ├── versions             # Raw /versions file content
+│   ├── info/
+│   │   └── rails.json       # Per-gem metadata with checksums
+│   ├── specs/
+│   │   └── specs.4.8.gz     # Legacy specs files
+│   └── gems/
+│       └── rails-7.1.0.gem.json  # Gem file references
 └── oci/                     # OCI image index
     └── library/
         └── alpine/
@@ -291,6 +324,10 @@ curl http://localhost:8080/pypi/simple/requests/
 # Test the Maven repository endpoint
 curl http://localhost:8080/maven/org/apache/commons/commons-lang3/maven-metadata.xml
 
+# Test the RubyGems registry endpoint (Compact Index)
+curl http://localhost:8080/rubygems/versions
+curl http://localhost:8080/rubygems/info/rails
+
 # Test the OCI registry endpoint
 curl http://localhost:8080/v2/
 
@@ -318,7 +355,7 @@ content-cache exports OpenTelemetry metrics for monitoring cache effectiveness.
 
 ### Labels
 
-- `protocol`: npm, pypi, goproxy, maven, oci
+- `protocol`: npm, pypi, goproxy, maven, rubygems, oci
 - `endpoint`: metadata, tarball, artifact, blob, manifest, etc.
 - `cache_result`: hit, miss, bypass
 - `status_class`: 2xx, 3xx, 4xx, 5xx
