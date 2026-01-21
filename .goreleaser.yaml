@@ -1,0 +1,93 @@
+# This is an example .goreleaser.yml file with some sensible defaults.
+# Make sure to check the documentation at https://goreleaser.com
+
+# The lines below are called `modelines`. See `:help modeline`
+# Feel free to remove those if you don't want/need to use them.
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+# vim: set ts=2 sw=2 tw=0 fo=cnqoj
+
+version: 2
+
+before:
+  hooks:
+    # You may remove this if you don't use go modules.
+    - go mod tidy
+    # you may remove this if you don't need go generate
+    - go generate ./...
+
+builds:
+  - id: content-cache
+    main: ./cmd/content-cache
+    binary: content-cache
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    goamd64:
+      - v2
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    flags:
+      - -trimpath
+
+kos:
+  - id: content-cache
+    repositories:
+      - ghcr.io/wolfeidau/content-cache
+    build: content-cache
+    main: ./cmd/content-cache
+    creation_time: "{{.CommitTimestamp}}"
+    base_image: 'cgr.dev/chainguard/static:latest'
+    tags:
+      - '{{.Version}}'
+      - latest
+    labels:
+      org.opencontainers.image.authors: Mark Wolfe https://wolfe.id.au
+      org.opencontainers.image.source: https://github.com/wolfeidau/content-cache
+      org.opencontainers.image.created: "{{.Date}}"
+      org.opencontainers.image.title: "{{.ProjectName}}"
+      org.opencontainers.image.revision: "{{.FullCommit}}"
+      org.opencontainers.image.version: "{{.Version}}"
+    bare: true
+    preserve_import_paths: false
+    # FIXME: We use GOOS and -split in our pipeline which is causing issues with the ko integration
+    # so we disable it here when the GOOS is set to something other than linux. This avoids
+    # the ko build to fail when running on macos or windows.
+    disable: '{{ and (isEnvSet "GOOS") (ne .Env.GOOS "linux") }}'
+    platforms:
+      - linux/amd64
+      - linux/arm64
+
+archives:
+  - formats: ["tar.gz"]
+    # this name template makes the OS and Arch compatible with the results of `uname`.
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    # use zip for windows archives
+    format_overrides:
+      - goos: windows
+        formats: ["zip"]
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+release:
+  footer: >-
+
+    ---
+
+    Released by [GoReleaser](https://github.com/goreleaser/goreleaser).

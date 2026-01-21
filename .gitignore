@@ -1,2 +1,4 @@
 /cache
 /content-cache
+# Added by goreleaser init:
+dist/

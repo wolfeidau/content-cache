@@ -15,6 +15,8 @@ import (
 	"github.com/wolfeidau/content-cache/telemetry"
 )
 
+var version = "dev"
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -25,6 +27,7 @@ func main() {
 func run() error {
 	// Parse flags
 	var (
+		showVersion         = flag.Bool("version", false, "Print version and exit")
 		address             = flag.String("address", ":8080", "Address to listen on")
 		storage             = flag.String("storage", "./cache", "Storage directory path")
 		goUpstream          = flag.String("go-upstream", "", "Upstream Go module proxy URL (default: proxy.golang.org)")
@@ -51,6 +54,11 @@ func run() error {
 		metricsInterval   = flag.Duration("metrics-interval", 10*time.Second, "Metrics export interval")
 	)
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version)
+		return nil
+	}
 
 	// Setup logger
 	var level slog.Level
