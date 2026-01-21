@@ -19,7 +19,7 @@ content-cache acts as a local caching proxy that:
 ```bash
 # Build and run the cache server
 go build -o content-cache ./cmd/content-cache
-./content-cache -address :8080 -storage ./cache
+./content-cache serve --listen :8080 --storage ./cache
 
 # Configure Go to use the cache (option 1: with /goproxy prefix)
 export GOPROXY=http://localhost:8080/goproxy,direct
@@ -161,93 +161,129 @@ graph TD
 
 ## Configuration
 
-All configuration options are provided via command-line flags:
+Configuration is available via command-line flags or environment variables. Environment variables take precedence over defaults but are overridden by explicit flags.
 
 ### Server Options
-```bash
--address :8080              # HTTP server listen address
--storage ./cache            # Local storage directory path
-```
+
+| Flag | Environment Variable | Default | Description |
+|------|---------------------|---------|-------------|
+| `--listen` | `LISTEN_ADDRESS` | `:8080` | HTTP server listen address |
+| `--storage` | `CACHE_STORAGE` | `./cache` | Local storage directory path |
 
 ### Upstream Registry Options
-```bash
--go-upstream ""             # Upstream Go module proxy URL (default: proxy.golang.org)
--npm-upstream ""            # Upstream NPM registry URL (default: registry.npmjs.org)
--oci-upstream ""            # Upstream OCI registry URL (default: registry-1.docker.io)
--pypi-upstream ""           # Upstream PyPI Simple API URL (default: pypi.org/simple/)
--maven-upstream ""          # Upstream Maven repository URL (default: repo.maven.apache.org/maven2)
--rubygems-upstream ""       # Upstream RubyGems registry URL (default: rubygems.org)
-```
+
+| Flag | Environment Variable | Default | Description |
+|------|---------------------|---------|-------------|
+| `--go-upstream` | `GO_UPSTREAM` | `proxy.golang.org` | Upstream Go module proxy URL |
+| `--npm-upstream` | `NPM_UPSTREAM` | `registry.npmjs.org` | Upstream NPM registry URL |
+| `--oci-upstream` | `OCI_UPSTREAM` | `registry-1.docker.io` | Upstream OCI registry URL |
+| `--pypi-upstream` | `PYPI_UPSTREAM` | `pypi.org/simple/` | Upstream PyPI Simple API URL |
+| `--maven-upstream` | `MAVEN_UPSTREAM` | `repo.maven.apache.org/maven2` | Upstream Maven repository URL |
+| `--rubygems-upstream` | `RUBYGEMS_UPSTREAM` | `rubygems.org` | Upstream RubyGems registry URL |
 
 ### OCI Authentication
-```bash
--oci-username ""            # OCI registry username for authentication
--oci-password ""            # OCI registry password for authentication
--oci-tag-ttl 5m             # TTL for OCI tag->digest cache mappings
-```
 
-### PyPI Options
-```bash
--pypi-metadata-ttl 5m       # TTL for PyPI project metadata cache
-```
+| Flag | Environment Variable | Default | Description |
+|------|---------------------|---------|-------------|
+| `--oci-username` | `OCI_USERNAME` | | OCI registry username |
+| `--oci-password` | `OCI_PASSWORD` | | OCI registry password |
+| `--oci-password-file` | `OCI_PASSWORD_FILE` | | Path to file containing OCI password (for k8s secrets) |
+| `--oci-tag-ttl` | `OCI_TAG_TTL` | `5m` | TTL for OCI tag→digest cache mappings |
 
-### Maven Options
-```bash
--maven-upstream ""          # Upstream Maven repository URL (default: repo.maven.apache.org/maven2)
--maven-metadata-ttl 5m      # TTL for maven-metadata.xml cache
-```
+### Metadata TTL Options
 
-### RubyGems Options
-```bash
--rubygems-upstream ""       # Upstream RubyGems registry URL (default: rubygems.org)
--rubygems-metadata-ttl 5m   # TTL for RubyGems metadata cache (versions, info, specs)
-```
+| Flag | Environment Variable | Default | Description |
+|------|---------------------|---------|-------------|
+| `--pypi-metadata-ttl` | `PYPI_METADATA_TTL` | `5m` | TTL for PyPI project metadata cache |
+| `--maven-metadata-ttl` | `MAVEN_METADATA_TTL` | `5m` | TTL for maven-metadata.xml cache |
+| `--rubygems-metadata-ttl` | `RUBYGEMS_METADATA_TTL` | `5m` | TTL for RubyGems metadata cache |
 
 ### Cache Management
-```bash
--cache-ttl 168h             # Cache TTL (e.g., 168h for 7 days, 0 to disable)
--cache-max-size 10737418240 # Maximum cache size in bytes (default: 10GB, 0 to disable)
--expiry-check-interval 1h   # How often to check for expired content
-```
+
+| Flag | Environment Variable | Default | Description |
+|------|---------------------|---------|-------------|
+| `--cache-ttl` | `CACHE_TTL` | `168h` | Cache TTL (0 to disable) |
+| `--cache-max-size` | `CACHE_MAX_SIZE` | `10737418240` | Maximum cache size in bytes (10GB, 0 to disable) |
+| `--expiry-check-interval` | `EXPIRY_CHECK_INTERVAL` | `1h` | How often to check for expired content |
 
 ### Logging Options
-```bash
--log-level info             # Log level: debug, info, warn, error
--log-format text            # Log format: text, json
-```
+
+| Flag | Environment Variable | Default | Description |
+|------|---------------------|---------|-------------|
+| `--log-level` | `LOG_LEVEL` | `info` | Log level: `debug`, `info`, `warn`, `error` |
+| `--log-format` | `LOG_FORMAT` | `text` | Log format: `text`, `json` |
 
 ### Metrics Options
+
+| Flag | Environment Variable | Default | Description |
+|------|---------------------|---------|-------------|
+| `--metrics-otlp-endpoint` | `METRICS_OTLP_ENDPOINT` | | OTLP gRPC endpoint (e.g., `localhost:4317`) |
+| `--metrics-prometheus` | `METRICS_PROMETHEUS` | `false` | Enable Prometheus `/metrics` endpoint |
+| `--metrics-interval` | `METRICS_INTERVAL` | `10s` | Metrics export interval |
+
+### Example: Command Line
+
 ```bash
--metrics-otlp-endpoint ""   # OTLP gRPC endpoint for metrics export (e.g., localhost:4317)
--metrics-prometheus         # Enable Prometheus /metrics endpoint
--metrics-interval 10s       # Metrics export interval
+./content-cache serve \
+  --listen :8080 \
+  --storage /var/cache/content-cache \
+  --oci-username myuser \
+  --oci-password-file /run/secrets/oci-password \
+  --cache-ttl 336h \
+  --log-level debug \
+  --log-format json \
+  --metrics-prometheus
 ```
 
-### Example: Full Configuration
+### Example: Container Deployment
 
-```bash
-./content-cache \
-  -address :8080 \
-  -storage /var/cache/content-cache \
-  -go-upstream https://proxy.golang.org \
-  -npm-upstream https://registry.npmjs.org \
-  -oci-upstream https://registry-1.docker.io \
-  -oci-username myuser \
-  -oci-password mypassword \
-  -oci-tag-ttl 10m \
-  -pypi-upstream https://pypi.org/simple/ \
-  -pypi-metadata-ttl 10m \
-  -maven-upstream https://repo.maven.apache.org/maven2 \
-  -maven-metadata-ttl 10m \
-  -rubygems-upstream https://rubygems.org \
-  -rubygems-metadata-ttl 10m \
-  -cache-ttl 336h \
-  -cache-max-size 21474836480 \
-  -expiry-check-interval 30m \
-  -log-level debug \
-  -log-format json \
-  -metrics-prometheus \
-  -metrics-otlp-endpoint otel-collector:4317
+```yaml
+# docker-compose.yml
+services:
+  content-cache:
+    image: content-cache:latest
+    command: ["serve"]
+    ports:
+      - "8080:8080"
+    volumes:
+      - cache-data:/data
+      - ./secrets/oci-password:/run/secrets/oci-password:ro
+    environment:
+      LISTEN_ADDRESS: ":8080"
+      CACHE_STORAGE: "/data"
+      CACHE_TTL: "336h"
+      CACHE_MAX_SIZE: "21474836480"
+      LOG_LEVEL: "info"
+      LOG_FORMAT: "json"
+      METRICS_PROMETHEUS: "true"
+      OCI_USERNAME: "myuser"
+      OCI_PASSWORD_FILE: "/run/secrets/oci-password"
+
+volumes:
+  cache-data:
+```
+
+```yaml
+# Kubernetes ConfigMap + Secret
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: content-cache-config
+data:
+  LISTEN_ADDRESS: ":8080"
+  CACHE_STORAGE: "/data"
+  CACHE_TTL: "168h"
+  LOG_LEVEL: "info"
+  LOG_FORMAT: "json"
+  METRICS_PROMETHEUS: "true"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: content-cache-secrets
+type: Opaque
+stringData:
+  oci-password: "my-registry-password"
 ```
 
 ## Storage Layout
