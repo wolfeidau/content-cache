@@ -78,16 +78,13 @@ func (h *Handler) Close() {
 
 // startBackgroundCache starts a background caching operation with proper lifecycle management.
 func (h *Handler) startBackgroundCache(modulePath, version string, logger *slog.Logger) {
-	h.wg.Add(1)
-	go func() {
-		defer h.wg.Done()
-
+	h.wg.Go(func() {
 		// Create a context with timeout, derived from handler's context
 		ctx, cancel := context.WithTimeout(h.ctx, cacheTimeout)
 		defer cancel()
 
 		h.cacheModuleVersion(ctx, modulePath, version, logger)
-	}()
+	})
 }
 
 // ServeHTTP implements http.Handler.

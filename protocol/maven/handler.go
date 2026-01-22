@@ -277,7 +277,7 @@ func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request, groupID
 		logger.Debug("cache hit")
 		w.Header().Set("Content-Type", "application/xml")
 		if r.Method != http.MethodHead {
-			if _, err := w.Write(cached.Metadata); err != nil {
+			if _, err = w.Write(cached.Metadata); err != nil {
 				logger.Error("failed to write response", "error", err)
 			}
 		}
@@ -302,9 +302,7 @@ func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request, groupID
 	}
 
 	// Cache metadata asynchronously
-	h.wg.Add(1)
-	go func() {
-		defer h.wg.Done()
+	h.wg.Go(func() {
 		cacheCtx, cancel := context.WithTimeout(h.ctx, cacheTimeout)
 		defer cancel()
 		meta := &CachedMetadata{
@@ -317,7 +315,7 @@ func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request, groupID
 		} else {
 			logger.Debug("cached metadata")
 		}
-	}()
+	})
 
 	w.Header().Set("Content-Type", "application/xml")
 	if r.Method != http.MethodHead {
@@ -573,15 +571,12 @@ func (h *Handler) handleArtifactChecksum(w http.ResponseWriter, r *http.Request,
 
 // startBackgroundCache starts a background caching operation.
 func (h *Handler) startBackgroundCache(coord ArtifactCoordinate, hash contentcache.Hash, size int64, tmpPath string, checksums Checksums, logger *slog.Logger) {
-	h.wg.Add(1)
-	go func() {
-		defer h.wg.Done()
-
+	h.wg.Go(func() {
 		ctx, cancel := context.WithTimeout(h.ctx, cacheTimeout)
 		defer cancel()
 
 		h.cacheArtifact(ctx, coord, hash, size, tmpPath, checksums, logger)
-	}()
+	})
 }
 
 // cacheArtifact stores an artifact in the cache from a temp file.
