@@ -3,7 +3,9 @@ module github.com/wolfeidau/content-cache
 go 1.25.5
 
 require (
+	github.com/alecthomas/kong v1.13.0
 	github.com/google/uuid v1.6.0
+	github.com/lmittmann/tint v1.1.2
 	github.com/prometheus/client_golang v1.23.2
 	github.com/stretchr/testify v1.11.1
 	github.com/zeebo/blake3 v0.2.4
@@ -17,7 +19,6 @@ require (
 )
 
 require (
-	github.com/alecthomas/kong v1.13.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect

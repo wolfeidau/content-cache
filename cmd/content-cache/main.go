@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
+	"github.com/lmittmann/tint"
 	"github.com/wolfeidau/content-cache/server"
 	"github.com/wolfeidau/content-cache/telemetry"
 )
@@ -108,7 +109,9 @@ func (cmd *ServeCmd) Run() error {
 	opts := &slog.HandlerOptions{Level: level}
 	switch cmd.LogFormat {
 	case "text":
-		handler = slog.NewTextHandler(os.Stdout, opts)
+		handler = tint.NewHandler(os.Stderr, &tint.Options{
+			Level: level,
+		})
 	case "json":
 		handler = slog.NewJSONHandler(os.Stdout, opts)
 	}
