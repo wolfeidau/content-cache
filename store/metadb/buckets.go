@@ -1,0 +1,103 @@
+package metadb
+
+import (
+	"encoding/binary"
+	"time"
+)
+
+// Bucket names for bbolt storage.
+var (
+	// Protocol metadata buckets - nested structure: protocol -> key -> data
+	bucketMeta = []byte("meta")
+
+	// Blob tracking buckets
+	bucketBlobsByHash   = []byte("blobs_by_hash")   // hash -> BlobEntry JSON
+	bucketBlobsByAccess = []byte("blobs_by_access") // timestamp+hash -> hash (LRU index)
+
+	// Protocol metadata expiry index
+	bucketMetaByExpiry = []byte("meta_by_expiry") // timestamp+protocol+key -> protocol+key
+)
+
+// encodeTimestamp converts a time.Time to a fixed-width big-endian byte slice.
+// This ensures correct lexicographic ordering for time-based indexes.
+// Uses an offset to handle negative nanosecond values (pre-1970 dates).
+func encodeTimestamp(t time.Time) []byte {
+	buf := make([]byte, 8)
+	ns := t.UnixNano()
+	// Offset by math.MinInt64 to convert signed to unsigned while preserving order.
+	// The conversion is safe: we shift the range [MinInt64, MaxInt64] to [0, MaxUint64].
+	binary.BigEndian.PutUint64(buf, uint64(ns-(-1<<63))) //nolint:gosec // intentional signed->unsigned shift
+	return buf
+}
+
+// decodeTimestamp converts a big-endian byte slice back to time.Time.
+func decodeTimestamp(b []byte) time.Time {
+	if len(b) < 8 {
+		return time.Time{}
+	}
+	u := binary.BigEndian.Uint64(b[:8])
+	// Reverse the offset to get back the original nanoseconds.
+	// The conversion is safe: we reverse the shift from [0, MaxUint64] back to [MinInt64, MaxInt64].
+	ns := int64(u) + (-1 << 63) //nolint:gosec // intentional unsigned->signed shift
+	return time.Unix(0, ns)
+}
+
+// makeBlobAccessKey creates a key for the blobs_by_access index.
+// Format: [8-byte timestamp][hash string]
+func makeBlobAccessKey(accessTime time.Time, hash string) []byte {
+	ts := encodeTimestamp(accessTime)
+	key := make([]byte, 8+len(hash))
+	copy(key[:8], ts)
+	copy(key[8:], hash)
+	return key
+}
+
+// makeMetaExpiryKey creates a key for the meta_by_expiry index.
+// Format: [8-byte timestamp][protocol][separator][key]
+func makeMetaExpiryKey(expiresAt time.Time, protocol, key string) []byte {
+	ts := encodeTimestamp(expiresAt)
+	result := make([]byte, 8+len(protocol)+1+len(key))
+	copy(result[:8], ts)
+	copy(result[8:], protocol)
+	result[8+len(protocol)] = 0 // null separator
+	copy(result[8+len(protocol)+1:], key)
+	return result
+}
+
+// parseMetaExpiryKey extracts protocol and key from a meta_by_expiry index key.
+func parseMetaExpiryKey(data []byte) (expiresAt time.Time, protocol, key string) {
+	if len(data) < 9 {
+		return time.Time{}, "", ""
+	}
+	expiresAt = decodeTimestamp(data[:8])
+
+	rest := data[8:]
+	for i, b := range rest {
+		if b == 0 {
+			protocol = string(rest[:i])
+			key = string(rest[i+1:])
+			return
+		}
+	}
+	return expiresAt, string(rest), ""
+}
+
+// makeProtocolKey creates a compound key for protocol metadata.
+// Format: [protocol][separator][key]
+func makeProtocolKey(protocol, key string) []byte {
+	result := make([]byte, len(protocol)+1+len(key))
+	copy(result, protocol)
+	result[len(protocol)] = 0 // null separator
+	copy(result[len(protocol)+1:], key)
+	return result
+}
+
+// parseProtocolKey extracts protocol and key from a compound key.
+func parseProtocolKey(data []byte) (protocol, key string) {
+	for i, b := range data {
+		if b == 0 {
+			return string(data[:i]), string(data[i+1:])
+		}
+	}
+	return string(data), ""
+}

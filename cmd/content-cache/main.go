@@ -48,6 +48,8 @@ type ServeCmd struct {
 	CacheTTL            time.Duration `kong:"name='cache-ttl',default='168h',env='CACHE_TTL',help='Cache TTL (e.g., 168h for 7 days, 0 to disable)',group='Cache'"`
 	CacheMaxSize        int64         `kong:"name='cache-max-size',default='10737418240',env='CACHE_MAX_SIZE',help='Maximum cache size in bytes (default: 10GB, 0 to disable)',group='Cache'"`
 	ExpiryCheckInterval time.Duration `kong:"name='expiry-check-interval',default='1h',env='EXPIRY_CHECK_INTERVAL',help='How often to check for expired content',group='Cache'"`
+	GCInterval          time.Duration `kong:"name='gc-interval',default='1h',env='GC_INTERVAL',help='How often to run garbage collection',group='Cache'"`
+	GCStartupDelay      time.Duration `kong:"name='gc-startup-delay',default='5m',env='GC_STARTUP_DELAY',help='Delay before first GC run after startup',group='Cache'"`
 
 	LogLevel  string `kong:"name='log-level',default='info',env='LOG_LEVEL',enum='debug,info,warn,error',help='Log level',group='Logging'"`
 	LogFormat string `kong:"name='log-format',default='text',env='LOG_FORMAT',enum='text,json',help='Log format',group='Logging'"`
@@ -155,6 +157,8 @@ func (cmd *ServeCmd) Run() error {
 		CacheTTL:            cmd.CacheTTL,
 		CacheMaxSize:        cmd.CacheMaxSize,
 		ExpiryCheckInterval: cmd.ExpiryCheckInterval,
+		GCInterval:          cmd.GCInterval,
+		GCStartupDelay:      cmd.GCStartupDelay,
 		Logger:              logger,
 	}
 

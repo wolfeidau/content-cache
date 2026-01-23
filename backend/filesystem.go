@@ -259,9 +259,87 @@ func (w *atomicWriter) Abort() error {
 	return os.Remove(w.tmpPath)
 }
 
+// WriteFramed stores framed content (header + body) at the given key.
+func (fs *Filesystem) WriteFramed(ctx context.Context, key string, header *BlobHeader, body io.Reader) error {
+	path := fs.keyToPath(key)
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("creating directory %s: %w", dir, err)
+	}
+
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return fmt.Errorf("creating temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+
+	success := false
+	defer func() {
+		if !success {
+			_ = tmp.Close()
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if err := WriteFramed(tmp, header, body); err != nil {
+		return fmt.Errorf("writing framed content: %w", err)
+	}
+
+	if err := tmp.Sync(); err != nil {
+		return fmt.Errorf("syncing file: %w", err)
+	}
+
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing temp file: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("renaming temp file: %w", err)
+	}
+
+	success = true
+	return nil
+}
+
+// ReadFramed retrieves framed content at the given key.
+func (fs *Filesystem) ReadFramed(ctx context.Context, key string) (*BlobHeader, io.ReadCloser, error) {
+	path := fs.keyToPath(key)
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil, ErrNotFound
+		}
+		return nil, nil, fmt.Errorf("opening file: %w", err)
+	}
+
+	header, bodyReader, err := ReadFramed(f)
+	if err != nil {
+		_ = f.Close()
+		return nil, nil, fmt.Errorf("reading framed content: %w", err)
+	}
+
+	return header, &framedReadCloser{file: f, body: bodyReader}, nil
+}
+
+// framedReadCloser wraps the underlying file and body reader for framed content.
+type framedReadCloser struct {
+	file *os.File
+	body io.Reader
+}
+
+func (r *framedReadCloser) Read(p []byte) (int, error) {
+	return r.body.Read(p)
+}
+
+func (r *framedReadCloser) Close() error {
+	return r.file.Close()
+}
+
 // Compile-time interface checks
 var (
 	_ Backend          = (*Filesystem)(nil)
 	_ WriterBackend    = (*Filesystem)(nil)
 	_ SizeAwareBackend = (*Filesystem)(nil)
+	_ FramedBackend    = (*Filesystem)(nil)
 )
