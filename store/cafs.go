@@ -8,9 +8,11 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	contentcache "github.com/wolfeidau/content-cache"
 	"github.com/wolfeidau/content-cache/backend"
+	"github.com/wolfeidau/content-cache/store/metadb"
 )
 
 const (
@@ -32,7 +34,8 @@ type MetadataTracker interface {
 // Content is stored in a sharded directory structure based on hash.
 type CAFS struct {
 	backend  backend.Backend
-	metadata MetadataTracker
+	metadata MetadataTracker // Legacy tracker (keep for backwards compat)
+	metaDB   metadb.MetaDB   // New MetaDB for blob tracking
 }
 
 // CAFSOption configures a CAFS instance.
@@ -42,6 +45,13 @@ type CAFSOption func(*CAFS)
 func WithMetadataTracker(tracker MetadataTracker) CAFSOption {
 	return func(c *CAFS) {
 		c.metadata = tracker
+	}
+}
+
+// WithMetaDB sets a MetaDB for blob tracking.
+func WithMetaDB(db metadb.MetaDB) CAFSOption {
+	return func(c *CAFS) {
+		c.metaDB = db
 	}
 }
 
@@ -91,8 +101,10 @@ func (c *CAFS) PutWithResult(ctx context.Context, r io.Reader) (*PutResult, erro
 	}
 
 	if exists {
-		// Update access time if tracking metadata (best effort, don't fail the operation)
-		if c.metadata != nil {
+		// Update access time (best effort, don't fail the operation)
+		if c.metaDB != nil {
+			_ = c.metaDB.TouchBlob(ctx, hash.String())
+		} else if c.metadata != nil {
 			_ = c.metadata.Touch(ctx, hash)
 		}
 		return &PutResult{
@@ -113,7 +125,16 @@ func (c *CAFS) PutWithResult(ctx context.Context, r io.Reader) (*PutResult, erro
 	}
 
 	// Track metadata for new blob (best effort, don't fail the operation)
-	if c.metadata != nil {
+	if c.metaDB != nil {
+		entry := &metadb.BlobEntry{
+			Hash:       hash.String(),
+			Size:       size,
+			CachedAt:   time.Now(),
+			LastAccess: time.Now(),
+			RefCount:   0,
+		}
+		_ = c.metaDB.PutBlob(ctx, entry)
+	} else if c.metadata != nil {
 		_ = c.metadata.Create(ctx, hash, size)
 	}
 
@@ -141,7 +162,9 @@ func (c *CAFS) Get(ctx context.Context, h contentcache.Hash) (io.ReadCloser, err
 	}
 
 	// Update access time asynchronously (best effort)
-	if c.metadata != nil {
+	if c.metaDB != nil {
+		go func() { _ = c.metaDB.TouchBlob(context.Background(), h.String()) }()
+	} else if c.metadata != nil {
 		go func() { _ = c.metadata.Touch(context.Background(), h) }()
 	}
 
@@ -177,7 +200,9 @@ func (c *CAFS) Delete(ctx context.Context, h contentcache.Hash) error {
 	}
 
 	// Clean up metadata (best effort)
-	if c.metadata != nil {
+	if c.metaDB != nil {
+		_ = c.metaDB.DeleteBlob(ctx, h.String())
+	} else if c.metadata != nil {
 		_ = c.metadata.Delete(ctx, h)
 	}
 
@@ -251,6 +276,92 @@ func (c *CAFS) keyToHash(key string) (contentcache.Hash, error) {
 		return contentcache.Hash{}, fmt.Errorf("invalid key format: %s", key)
 	}
 	return contentcache.ParseHash(parts[2])
+}
+
+// PutFramed stores content with headers and returns its hash.
+func (c *CAFS) PutFramed(ctx context.Context, header *backend.BlobHeader, body io.Reader) (contentcache.Hash, error) {
+	tmpFile, err := os.CreateTemp("", "cafs-upload-*")
+	if err != nil {
+		return contentcache.Hash{}, fmt.Errorf("creating temp file: %w", err)
+	}
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
+	defer func() { _ = tmpFile.Close() }()
+
+	hr := contentcache.NewHashingReader(body)
+	if _, err := io.Copy(tmpFile, hr); err != nil {
+		return contentcache.Hash{}, fmt.Errorf("reading content: %w", err)
+	}
+
+	hash := hr.Sum()
+	size := hr.BytesRead()
+	key := c.hashToKey(hash)
+
+	exists, err := c.backend.Exists(ctx, key)
+	if err != nil {
+		return contentcache.Hash{}, fmt.Errorf("checking existence: %w", err)
+	}
+
+	if exists {
+		if c.metaDB != nil {
+			_ = c.metaDB.TouchBlob(ctx, hash.String())
+		}
+		return hash, nil
+	}
+
+	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+		return contentcache.Hash{}, fmt.Errorf("seeking temp file: %w", err)
+	}
+
+	header.ContentLength = size
+	header.ContentHash = hash.String()
+	if header.CachedAt == "" {
+		header.CachedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+
+	fb, ok := c.backend.(backend.FramedBackend)
+	if !ok {
+		return contentcache.Hash{}, fmt.Errorf("backend does not support framed writes")
+	}
+
+	if err := fb.WriteFramed(ctx, key, header, tmpFile); err != nil {
+		return contentcache.Hash{}, fmt.Errorf("writing framed content: %w", err)
+	}
+
+	if c.metaDB != nil {
+		entry := &metadb.BlobEntry{
+			Hash:       hash.String(),
+			Size:       size,
+			CachedAt:   time.Now(),
+			LastAccess: time.Now(),
+			RefCount:   0,
+		}
+		_ = c.metaDB.PutBlob(ctx, entry)
+	}
+
+	return hash, nil
+}
+
+// GetFramed retrieves content with its headers.
+func (c *CAFS) GetFramed(ctx context.Context, h contentcache.Hash) (*backend.BlobHeader, io.ReadCloser, error) {
+	fb, ok := c.backend.(backend.FramedBackend)
+	if !ok {
+		return nil, nil, fmt.Errorf("backend does not support framed reads")
+	}
+
+	key := c.hashToKey(h)
+	header, rc, err := fb.ReadFramed(ctx, key)
+	if err != nil {
+		if errors.Is(err, backend.ErrNotFound) {
+			return nil, nil, backend.ErrNotFound
+		}
+		return nil, nil, fmt.Errorf("reading framed content: %w", err)
+	}
+
+	if c.metaDB != nil {
+		go func() { _ = c.metaDB.TouchBlob(context.Background(), h.String()) }()
+	}
+
+	return header, rc, nil
 }
 
 // Compile-time interface checks

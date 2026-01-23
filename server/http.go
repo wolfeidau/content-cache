@@ -4,15 +4,16 @@ package server
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"path"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/wolfeidau/content-cache/backend"
-	"github.com/wolfeidau/content-cache/expiry"
 	"github.com/wolfeidau/content-cache/protocol/goproxy"
 	"github.com/wolfeidau/content-cache/protocol/maven"
 	"github.com/wolfeidau/content-cache/protocol/npm"
@@ -20,7 +21,10 @@ import (
 	"github.com/wolfeidau/content-cache/protocol/pypi"
 	"github.com/wolfeidau/content-cache/protocol/rubygems"
 	"github.com/wolfeidau/content-cache/store"
+	"github.com/wolfeidau/content-cache/store/gc"
+	"github.com/wolfeidau/content-cache/store/metadb"
 	"github.com/wolfeidau/content-cache/telemetry"
+	"go.opentelemetry.io/otel"
 )
 
 // Config holds server configuration.
@@ -85,6 +89,12 @@ type Config struct {
 	// Default is 1 hour.
 	ExpiryCheckInterval time.Duration
 
+	// GCInterval is how often to run garbage collection.
+	GCInterval time.Duration
+
+	// GCStartupDelay is the delay before first GC run.
+	GCStartupDelay time.Duration
+
 	// Logger for the server
 	Logger *slog.Logger
 }
@@ -110,8 +120,8 @@ type Server struct {
 	maven         *maven.Handler
 	rubygemsIndex *rubygems.Index
 	rubygems      *rubygems.Handler
-	metadata      *expiry.MetadataStore
-	expiryMgr     *expiry.Manager
+	metaDB        metadb.MetaDB
+	gcManager     *gc.Manager
 }
 
 // New creates a new server with the given configuration.
@@ -135,26 +145,38 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("creating filesystem backend: %w", err)
 	}
 
-	// Initialize metadata store for expiration tracking
-	metadataStore := expiry.NewMetadataStore(fsBackend)
-
-	// Initialize CAFS store with metadata tracking
-	cafsStore := store.NewCAFS(fsBackend, store.WithMetadataTracker(metadataStore))
-
-	// Initialize expiry manager if TTL or MaxSize is configured
-	var expiryMgr *expiry.Manager
-	if cfg.CacheTTL > 0 || cfg.CacheMaxSize > 0 {
-		expiryCfg := expiry.Config{
-			TTL:           cfg.CacheTTL,
-			MaxSize:       cfg.CacheMaxSize,
-			CheckInterval: cfg.ExpiryCheckInterval,
-			Logger:        cfg.Logger.With("component", "expiry"),
-		}
-		if expiryCfg.CheckInterval == 0 {
-			expiryCfg.CheckInterval = 1 * time.Hour
-		}
-		expiryMgr = expiry.NewManager(metadataStore, fsBackend, expiryCfg)
+	// Initialize metadata database
+	metaDB := metadb.New()
+	if err := metaDB.Open(path.Join(cfg.StoragePath, "metadata.db")); err != nil {
+		return nil, fmt.Errorf("opening metadata database: %w", err)
 	}
+
+	// Initialize GC manager
+	var gcManager *gc.Manager
+	if cfg.CacheMaxSize > 0 {
+		gcInterval := cfg.GCInterval
+		if gcInterval == 0 {
+			gcInterval = 1 * time.Hour
+		}
+		gcStartupDelay := cfg.GCStartupDelay
+		if gcStartupDelay == 0 {
+			gcStartupDelay = 5 * time.Minute
+		}
+		gcMetrics, err := gc.NewMetrics(otel.Meter("github.com/wolfeidau/content-cache"))
+		if err != nil {
+			return nil, fmt.Errorf("creating gc metrics: %w", err)
+		}
+		gcConfig := gc.Config{
+			Interval:      gcInterval,
+			StartupDelay:  gcStartupDelay,
+			MaxCacheBytes: cfg.CacheMaxSize,
+			BatchSize:     1000,
+		}
+		gcManager = gc.New(metaDB, fsBackend, gcConfig, gcMetrics, cfg.Logger.With("component", "gc"))
+	}
+
+	// Initialize CAFS store with MetaDB tracking
+	cafsStore := store.NewCAFS(fsBackend, store.WithMetaDB(metaDB))
 
 	// Initialize goproxy components
 	goIndex := goproxy.NewIndex(fsBackend)
@@ -264,8 +286,8 @@ func New(cfg Config) (*Server, error) {
 		maven:         mavenHandler,
 		rubygemsIndex: rubygemsIndex,
 		rubygems:      rubygemsHandler,
-		metadata:      metadataStore,
-		expiryMgr:     expiryMgr,
+		metaDB:        metaDB,
+		gcManager:     gcManager,
 	}
 
 	// Build HTTP server
@@ -293,6 +315,10 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 
 	// Prometheus metrics endpoint (returns 404 if not enabled)
 	mux.Handle("GET /metrics", telemetry.PrometheusHandler())
+
+	// Admin endpoints
+	mux.HandleFunc("POST /admin/gc", s.handleGCTrigger)
+	mux.HandleFunc("GET /admin/gc/status", s.handleGCStatus)
 
 	// NPM registry endpoints
 	// The npm handler handles all paths under /npm/
@@ -336,25 +362,44 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // handleStats handles cache statistics requests.
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	if s.expiryMgr == nil {
+	if s.metaDB == nil {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"error":"expiry not enabled"}`))
+		_, _ = w.Write([]byte(`{"error":"metadb not enabled"}`))
 		return
 	}
 
-	stats, err := s.expiryMgr.GetStats(r.Context())
+	totalSize, err := s.metaDB.TotalBlobSize(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = fmt.Fprintf(w, `{"total_blobs":%d,"total_size":%d,"oldest_access":"%s","newest_access":"%s"}`,
-		stats.TotalBlobs,
-		stats.TotalSize,
-		stats.OldestBlob.Format(time.RFC3339),
-		stats.NewestBlob.Format(time.RFC3339),
-	)
+	_, _ = fmt.Fprintf(w, `{"total_size":%d}`, totalSize)
+}
+
+func (s *Server) handleGCTrigger(w http.ResponseWriter, r *http.Request) {
+	if s.gcManager == nil {
+		http.Error(w, "GC not enabled", http.StatusServiceUnavailable)
+		return
+	}
+	result, err := s.gcManager.RunNow(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(result)
+}
+
+func (s *Server) handleGCStatus(w http.ResponseWriter, r *http.Request) {
+	if s.gcManager == nil {
+		http.Error(w, "GC not enabled", http.StatusServiceUnavailable)
+		return
+	}
+	status := s.gcManager.Status()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(status)
 }
 
 // loggingMiddleware logs HTTP requests with structured fields for analysis.
@@ -428,16 +473,12 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 
 // Start starts the server.
 func (s *Server) Start() error {
-	// Start expiry manager if configured
-	if s.expiryMgr != nil {
-		s.logger.Info("starting expiry manager",
-			"ttl", s.config.CacheTTL,
+	if s.gcManager != nil {
+		s.logger.Info("starting GC manager",
+			"interval", s.config.GCInterval,
 			"max_size", s.config.CacheMaxSize,
-			"check_interval", s.config.ExpiryCheckInterval,
 		)
-		if err := s.expiryMgr.Start(context.Background()); err != nil {
-			return fmt.Errorf("starting expiry manager: %w", err)
-		}
+		s.gcManager.Start(context.Background())
 	}
 
 	s.logger.Info("starting server", "address", s.config.Address)
@@ -448,9 +489,11 @@ func (s *Server) Start() error {
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.logger.Info("shutting down server")
 
-	// Stop expiry manager
-	if s.expiryMgr != nil {
-		s.expiryMgr.Stop()
+	// Stop GC manager
+	if s.gcManager != nil {
+		if err := s.gcManager.Stop(ctx); err != nil {
+			s.logger.Error("GC manager shutdown error", "error", err)
+		}
 	}
 
 	return s.httpServer.Shutdown(ctx)
@@ -501,25 +544,27 @@ func (rw *responseWriter) Unwrap() http.ResponseWriter {
 }
 
 // deriveProtocol extracts the protocol name from the request path.
-func deriveProtocol(path string) string {
+func deriveProtocol(p string) string {
 	switch {
-	case path == "/health" || path == "/stats" || path == "/metrics":
+	case p == "/health" || p == "/stats" || p == "/metrics":
 		return "internal"
-	case len(path) >= 5 && path[:5] == "/npm/":
+	case len(p) >= 7 && p[:7] == "/admin/":
+		return "admin"
+	case len(p) >= 5 && p[:5] == "/npm/":
 		return "npm"
-	case len(path) >= 6 && path[:6] == "/pypi/":
+	case len(p) >= 6 && p[:6] == "/pypi/":
 		return "pypi"
-	case len(path) >= 7 && path[:7] == "/maven/":
+	case len(p) >= 7 && p[:7] == "/maven/":
 		return "maven"
-	case len(path) >= 10 && path[:10] == "/rubygems/":
+	case len(p) >= 10 && p[:10] == "/rubygems/":
 		return "rubygems"
-	case len(path) >= 9 && path[:9] == "/goproxy/":
+	case len(p) >= 9 && p[:9] == "/goproxy/":
 		return "goproxy"
-	case len(path) >= 3 && path[:3] == "/v2":
+	case len(p) >= 3 && p[:3] == "/v2":
 		return "oci"
 	default:
 		// Root paths are goproxy (GOPROXY=http://localhost:8080)
-		if len(path) > 1 && path[0] == '/' {
+		if len(p) > 1 && p[0] == '/' {
 			return "goproxy"
 		}
 		return "unknown"
