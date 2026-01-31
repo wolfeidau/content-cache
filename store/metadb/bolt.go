@@ -73,6 +73,7 @@ func (b *BoltDB) createBuckets() error {
 			bucketBlobsByHash,
 			bucketBlobsByAccess,
 			bucketMetaByExpiry,
+			bucketMetaExpiryByKey,
 		}
 		for _, name := range buckets {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
@@ -141,10 +142,19 @@ func (b *BoltDB) PutMeta(_ context.Context, protocol, key string, data []byte, t
 
 		// Add expiry index entry
 		if ttl > 0 {
+			reverseIndexBucket := tx.Bucket(bucketMetaExpiryByKey)
+			if reverseIndexBucket == nil {
+				return fmt.Errorf("meta expiry reverse index bucket not found")
+			}
+
 			expiresAt := b.now().Add(ttl)
 			expiryKey := makeMetaExpiryKey(expiresAt, protocol, key)
 			if err := expiryBucket.Put(expiryKey, compoundKey); err != nil {
 				return fmt.Errorf("putting expiry index: %w", err)
+			}
+			// Store reverse index for O(1) deletion
+			if err := reverseIndexBucket.Put(compoundKey, encodeTimestamp(expiresAt)); err != nil {
+				return fmt.Errorf("putting expiry reverse index: %w", err)
 			}
 		}
 
@@ -158,7 +168,25 @@ func (b *BoltDB) removeMetaExpiryIndex(tx *bbolt.Tx, protocol, key string) error
 		return nil
 	}
 
+	reverseIndexBucket := tx.Bucket(bucketMetaExpiryByKey)
 	compoundKey := makeProtocolKey(protocol, key)
+
+	// Try O(1) lookup via reverse index first
+	if reverseIndexBucket != nil {
+		if tsBytes := reverseIndexBucket.Get(compoundKey); tsBytes != nil {
+			expiresAt := decodeTimestamp(tsBytes)
+			expiryKey := makeMetaExpiryKey(expiresAt, protocol, key)
+			if err := expiryBucket.Delete(expiryKey); err != nil {
+				return fmt.Errorf("deleting old expiry index: %w", err)
+			}
+			if err := reverseIndexBucket.Delete(compoundKey); err != nil {
+				return fmt.Errorf("deleting reverse index: %w", err)
+			}
+			return nil
+		}
+	}
+
+	// Fallback: scan for legacy entries without reverse index (self-healing migration)
 	cursor := expiryBucket.Cursor()
 	for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
 		if bytes.Equal(v, compoundKey) {
@@ -277,7 +305,24 @@ func (b *BoltDB) removeBlobAccessIndex(tx *bbolt.Tx, hash string) error {
 		return nil
 	}
 
+	hashBucket := tx.Bucket(bucketBlobsByHash)
 	hashBytes := []byte(hash)
+
+	// Try O(1) lookup via existing entry's LastAccess
+	if hashBucket != nil {
+		if val := hashBucket.Get(hashBytes); val != nil {
+			var entry BlobEntry
+			if err := json.Unmarshal(val, &entry); err == nil && !entry.LastAccess.IsZero() {
+				accessKey := makeBlobAccessKey(entry.LastAccess, hash)
+				if err := accessBucket.Delete(accessKey); err != nil {
+					return fmt.Errorf("deleting old access index: %w", err)
+				}
+				return nil
+			}
+		}
+	}
+
+	// Fallback: scan for legacy entries (self-healing)
 	cursor := accessBucket.Cursor()
 	for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
 		if bytes.Equal(v, hashBytes) {

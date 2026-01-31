@@ -15,7 +15,8 @@ var (
 	bucketBlobsByAccess = []byte("blobs_by_access") // timestamp+hash -> hash (LRU index)
 
 	// Protocol metadata expiry index
-	bucketMetaByExpiry = []byte("meta_by_expiry") // timestamp+protocol+key -> protocol+key
+	bucketMetaByExpiry    = []byte("meta_by_expiry")     // timestamp+protocol+key -> protocol+key
+	bucketMetaExpiryByKey = []byte("meta_expiry_by_key") // protocol+key -> 8-byte timestamp (reverse index for O(1) delete)
 )
 
 // encodeTimestamp converts a time.Time to a fixed-width big-endian byte slice.
