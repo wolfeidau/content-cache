@@ -23,6 +23,12 @@ var (
 
 	// Meta blob refs bucket - tracks which blobs are referenced by each meta key
 	bucketMetaBlobRefs = []byte("meta_blob_refs") // protocol+key -> JSON array of hashes
+
+	// Envelope storage buckets (new 3-part key format: protocol|kind|key)
+	bucketEnvelopes           = []byte("envelopes")              // protocol|kind|key -> protobuf MetadataEnvelope
+	bucketEnvelopeByExpiry    = []byte("envelope_by_expiry")     // timestamp|protocol|kind|key -> protocol|kind|key
+	bucketEnvelopeExpiryByKey = []byte("envelope_expiry_by_key") // protocol|kind|key -> 8-byte timestamp (reverse index)
+	bucketEnvelopeBlobRefs    = []byte("envelope_blob_refs")     // protocol|kind|key -> JSON array of hashes
 )
 
 // encodeTimestamp converts a time.Time to a fixed-width big-endian byte slice.
@@ -89,7 +95,7 @@ func parseMetaExpiryKey(data []byte) (expiresAt time.Time, protocol, key string)
 	return expiresAt, string(rest), ""
 }
 
-// makeProtocolKey creates a compound key for protocol metadata.
+// makeProtocolKey creates a compound key for protocol metadata (legacy 2-part format).
 // Format: [protocol][separator][key]
 func makeProtocolKey(protocol, key string) []byte {
 	result := make([]byte, len(protocol)+1+len(key))
@@ -99,7 +105,7 @@ func makeProtocolKey(protocol, key string) []byte {
 	return result
 }
 
-// parseProtocolKey extracts protocol and key from a compound key.
+// parseProtocolKey extracts protocol and key from a compound key (legacy 2-part format).
 func parseProtocolKey(data []byte) (protocol, key string) {
 	for i, b := range data {
 		if b == 0 {
@@ -107,4 +113,71 @@ func parseProtocolKey(data []byte) (protocol, key string) {
 		}
 	}
 	return string(data), ""
+}
+
+// makeEnvelopeKey creates a compound key for envelope metadata (new 3-part format).
+// Format: [protocol][separator][kind][separator][key]
+func makeEnvelopeKey(protocol, kind, key string) []byte {
+	result := make([]byte, len(protocol)+1+len(kind)+1+len(key))
+	offset := 0
+	copy(result[offset:], protocol)
+	offset += len(protocol)
+	result[offset] = 0 // null separator
+	offset++
+	copy(result[offset:], kind)
+	offset += len(kind)
+	result[offset] = 0 // null separator
+	offset++
+	copy(result[offset:], key)
+	return result
+}
+
+// parseEnvelopeKey extracts protocol, kind, and key from a compound key (new 3-part format).
+func parseEnvelopeKey(data []byte) (protocol, kind, key string) {
+	separators := 0
+	start := 0
+	for i, b := range data {
+		if b == 0 {
+			switch separators {
+			case 0:
+				protocol = string(data[start:i])
+			case 1:
+				kind = string(data[start:i])
+				key = string(data[i+1:])
+				return
+			}
+			separators++
+			start = i + 1
+		}
+	}
+	return string(data), "", ""
+}
+
+// makeEnvelopeExpiryKey creates a key for the envelope expiry index.
+// Format: [8-byte timestamp][protocol][separator][kind][separator][key]
+func makeEnvelopeExpiryKey(expiresAt time.Time, protocol, kind, key string) []byte {
+	ts := encodeTimestamp(expiresAt)
+	result := make([]byte, 8+len(protocol)+1+len(kind)+1+len(key))
+	copy(result[:8], ts)
+	offset := 8
+	copy(result[offset:], protocol)
+	offset += len(protocol)
+	result[offset] = 0
+	offset++
+	copy(result[offset:], kind)
+	offset += len(kind)
+	result[offset] = 0
+	offset++
+	copy(result[offset:], key)
+	return result
+}
+
+// parseEnvelopeExpiryKey extracts expiry time and key parts from an envelope expiry key.
+func parseEnvelopeExpiryKey(data []byte) (expiresAt time.Time, protocol, kind, key string) {
+	if len(data) < 9 {
+		return time.Time{}, "", "", ""
+	}
+	expiresAt = decodeTimestamp(data[:8])
+	protocol, kind, key = parseEnvelopeKey(data[8:])
+	return
 }

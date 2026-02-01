@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.etcd.io/bbolt"
+	"google.golang.org/protobuf/proto"
 )
 
 // BoltDB implements MetaDB using bbolt.
@@ -87,6 +88,11 @@ func (b *BoltDB) createBuckets() error {
 			bucketMetaExpiryByKey,
 			bucketBlobAccessByHash,
 			bucketMetaBlobRefs,
+			// New envelope buckets
+			bucketEnvelopes,
+			bucketEnvelopeByExpiry,
+			bucketEnvelopeExpiryByKey,
+			bucketEnvelopeBlobRefs,
 		}
 		for _, name := range buckets {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
@@ -902,3 +908,429 @@ func (b *BoltDB) UpdateJSON(_ context.Context, protocol, key string, ttl time.Du
 
 // Compile-time interface check
 var _ MetaDB = (*BoltDB)(nil)
+
+// =============================================================================
+// Envelope APIs (new protocol|kind|key format with protobuf envelopes)
+// =============================================================================
+
+// PutEnvelope stores a metadata envelope with blob reference tracking.
+// Handles transactional ref updates: computes diff between old and new refs,
+// increments new refs, decrements removed refs.
+func (b *BoltDB) PutEnvelope(_ context.Context, protocol, kind, key string, env *MetadataEnvelope) error {
+	if err := ValidateEnvelope(env); err != nil {
+		return fmt.Errorf("validating envelope: %w", err)
+	}
+
+	// Canonicalize refs before storage
+	env.BlobRefs = CanonicalizeRefs(env.BlobRefs)
+
+	// Marshal envelope to protobuf
+	data, err := proto.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("marshaling envelope: %w", err)
+	}
+
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		envBucket := tx.Bucket(bucketEnvelopes)
+		if envBucket == nil {
+			return fmt.Errorf("envelopes bucket not found")
+		}
+
+		refsBucket := tx.Bucket(bucketEnvelopeBlobRefs)
+		if refsBucket == nil {
+			return fmt.Errorf("envelope_blob_refs bucket not found")
+		}
+
+		blobsBucket := tx.Bucket(bucketBlobsByHash)
+		if blobsBucket == nil {
+			return fmt.Errorf("blobs_by_hash bucket not found")
+		}
+
+		compoundKey := makeEnvelopeKey(protocol, kind, key)
+
+		// Get old refs for this key
+		oldRefs := b.getEnvelopeBlobRefs(refsBucket, compoundKey)
+
+		// Compute diff
+		added, removed := DiffRefs(oldRefs, env.BlobRefs)
+
+		// Update blob refcounts
+		for _, hash := range added {
+			if err := b.incrementBlobRefInTx(blobsBucket, hash); err != nil {
+				return fmt.Errorf("incrementing ref for %s: %w", hash, err)
+			}
+		}
+		for _, hash := range removed {
+			if err := b.decrementBlobRefInTx(blobsBucket, hash); err != nil {
+				return fmt.Errorf("decrementing ref for %s: %w", hash, err)
+			}
+		}
+
+		// Store the new refs
+		refsData, err := json.Marshal(env.BlobRefs)
+		if err != nil {
+			return fmt.Errorf("marshaling refs: %w", err)
+		}
+		if err := refsBucket.Put(compoundKey, refsData); err != nil {
+			return fmt.Errorf("putting refs: %w", err)
+		}
+
+		// Store the envelope
+		if err := envBucket.Put(compoundKey, data); err != nil {
+			return fmt.Errorf("putting envelope: %w", err)
+		}
+
+		// Update expiry index
+		if err := b.updateEnvelopeExpiryIndex(tx, protocol, kind, key, env.ExpiresAtUnixMs); err != nil {
+			return err
+		}
+
+		return nil
+	})
+}
+
+// GetEnvelope retrieves a metadata envelope.
+// Returns ErrNotFound if the key doesn't exist.
+func (b *BoltDB) GetEnvelope(_ context.Context, protocol, kind, key string) (*MetadataEnvelope, error) {
+	var env MetadataEnvelope
+	err := b.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket(bucketEnvelopes)
+		if bucket == nil {
+			return ErrNotFound
+		}
+
+		compoundKey := makeEnvelopeKey(protocol, kind, key)
+		val := bucket.Get(compoundKey)
+		if val == nil {
+			return ErrNotFound
+		}
+
+		return proto.Unmarshal(val, &env)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &env, nil
+}
+
+// DeleteEnvelope removes a metadata envelope and decrements all associated blob refs.
+func (b *BoltDB) DeleteEnvelope(_ context.Context, protocol, kind, key string) error {
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		envBucket := tx.Bucket(bucketEnvelopes)
+		if envBucket == nil {
+			return nil
+		}
+
+		refsBucket := tx.Bucket(bucketEnvelopeBlobRefs)
+		blobsBucket := tx.Bucket(bucketBlobsByHash)
+
+		compoundKey := makeEnvelopeKey(protocol, kind, key)
+
+		// Get refs for this key and decrement all
+		if refsBucket != nil && blobsBucket != nil {
+			refs := b.getEnvelopeBlobRefs(refsBucket, compoundKey)
+			for _, hash := range refs {
+				if err := b.decrementBlobRefInTx(blobsBucket, hash); err != nil {
+					b.logger.Warn("failed to decrement blob ref during envelope delete",
+						"protocol", protocol,
+						"kind", kind,
+						"key", key,
+						"hash", hash,
+						"error", err)
+				}
+			}
+			if err := refsBucket.Delete(compoundKey); err != nil {
+				return fmt.Errorf("deleting refs: %w", err)
+			}
+		}
+
+		// Remove expiry index
+		if err := b.removeEnvelopeExpiryIndex(tx, protocol, kind, key); err != nil {
+			return err
+		}
+
+		return envBucket.Delete(compoundKey)
+	})
+}
+
+// ListEnvelopeKeys returns all keys for a protocol/kind combination.
+func (b *BoltDB) ListEnvelopeKeys(_ context.Context, protocol, kind string) ([]string, error) {
+	var keys []string
+	prefix := makeEnvelopeKey(protocol, kind, "")
+
+	err := b.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket(bucketEnvelopes)
+		if bucket == nil {
+			return nil
+		}
+
+		cursor := bucket.Cursor()
+		for k, _ := cursor.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = cursor.Next() {
+			_, _, keyPart := parseEnvelopeKey(k)
+			keys = append(keys, keyPart)
+		}
+		return nil
+	})
+	return keys, err
+}
+
+// UpdateEnvelope performs read-modify-write in a single transaction.
+// The callback receives the current envelope (or nil if not found).
+// If the callback returns a non-nil envelope, it is stored.
+// If the callback returns nil, the entry is deleted.
+func (b *BoltDB) UpdateEnvelope(ctx context.Context, protocol, kind, key string, fn func(*MetadataEnvelope) (*MetadataEnvelope, error)) error {
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		envBucket := tx.Bucket(bucketEnvelopes)
+		if envBucket == nil {
+			return fmt.Errorf("envelopes bucket not found")
+		}
+
+		refsBucket := tx.Bucket(bucketEnvelopeBlobRefs)
+		if refsBucket == nil {
+			return fmt.Errorf("envelope_blob_refs bucket not found")
+		}
+
+		blobsBucket := tx.Bucket(bucketBlobsByHash)
+		if blobsBucket == nil {
+			return fmt.Errorf("blobs_by_hash bucket not found")
+		}
+
+		compoundKey := makeEnvelopeKey(protocol, kind, key)
+
+		// Read existing envelope
+		var existing *MetadataEnvelope
+		val := envBucket.Get(compoundKey)
+		if val != nil {
+			existing = &MetadataEnvelope{}
+			if err := proto.Unmarshal(val, existing); err != nil {
+				return fmt.Errorf("unmarshaling existing envelope: %w", err)
+			}
+		}
+
+		// Get old refs
+		oldRefs := b.getEnvelopeBlobRefs(refsBucket, compoundKey)
+
+		// Apply modification
+		newEnv, err := fn(existing)
+		if err != nil {
+			return err
+		}
+
+		// If callback returns nil, delete the entry
+		if newEnv == nil {
+			// Decrement all old refs
+			for _, hash := range oldRefs {
+				if err := b.decrementBlobRefInTx(blobsBucket, hash); err != nil {
+					b.logger.Warn("failed to decrement blob ref during update delete",
+						"hash", hash, "error", err)
+				}
+			}
+			if err := refsBucket.Delete(compoundKey); err != nil {
+				return fmt.Errorf("deleting refs: %w", err)
+			}
+			if err := b.removeEnvelopeExpiryIndex(tx, protocol, kind, key); err != nil {
+				return err
+			}
+			return envBucket.Delete(compoundKey)
+		}
+
+		// Validate and canonicalize
+		if err := ValidateEnvelope(newEnv); err != nil {
+			return fmt.Errorf("validating envelope: %w", err)
+		}
+		newEnv.BlobRefs = CanonicalizeRefs(newEnv.BlobRefs)
+
+		// Compute ref diff
+		added, removed := DiffRefs(oldRefs, newEnv.BlobRefs)
+
+		// Update blob refcounts
+		for _, hash := range added {
+			if err := b.incrementBlobRefInTx(blobsBucket, hash); err != nil {
+				return fmt.Errorf("incrementing ref for %s: %w", hash, err)
+			}
+		}
+		for _, hash := range removed {
+			if err := b.decrementBlobRefInTx(blobsBucket, hash); err != nil {
+				return fmt.Errorf("decrementing ref for %s: %w", hash, err)
+			}
+		}
+
+		// Store new refs
+		refsData, err := json.Marshal(newEnv.BlobRefs)
+		if err != nil {
+			return fmt.Errorf("marshaling refs: %w", err)
+		}
+		if err := refsBucket.Put(compoundKey, refsData); err != nil {
+			return fmt.Errorf("putting refs: %w", err)
+		}
+
+		// Marshal and store envelope
+		data, err := proto.Marshal(newEnv)
+		if err != nil {
+			return fmt.Errorf("marshaling envelope: %w", err)
+		}
+		if err := envBucket.Put(compoundKey, data); err != nil {
+			return fmt.Errorf("putting envelope: %w", err)
+		}
+
+		// Update expiry index
+		return b.updateEnvelopeExpiryIndex(tx, protocol, kind, key, newEnv.ExpiresAtUnixMs)
+	})
+}
+
+// GetEnvelopeBlobRefs returns the blob refs for an envelope key.
+func (b *BoltDB) GetEnvelopeBlobRefs(_ context.Context, protocol, kind, key string) ([]string, error) {
+	var refs []string
+	err := b.db.View(func(tx *bbolt.Tx) error {
+		refsBucket := tx.Bucket(bucketEnvelopeBlobRefs)
+		if refsBucket == nil {
+			return nil
+		}
+		compoundKey := makeEnvelopeKey(protocol, kind, key)
+		refs = b.getEnvelopeBlobRefs(refsBucket, compoundKey)
+		return nil
+	})
+	return refs, err
+}
+
+// getEnvelopeBlobRefs retrieves blob refs from the refs bucket.
+func (b *BoltDB) getEnvelopeBlobRefs(refsBucket *bbolt.Bucket, compoundKey []byte) []string {
+	val := refsBucket.Get(compoundKey)
+	if val == nil {
+		return nil
+	}
+	var refs []string
+	if err := json.Unmarshal(val, &refs); err != nil {
+		return nil
+	}
+	return refs
+}
+
+// updateEnvelopeExpiryIndex updates the envelope expiry forward+reverse indexes.
+func (b *BoltDB) updateEnvelopeExpiryIndex(tx *bbolt.Tx, protocol, kind, key string, expiresAtUnixMs int64) error {
+	expiryBucket := tx.Bucket(bucketEnvelopeByExpiry)
+	if expiryBucket == nil {
+		return nil
+	}
+
+	reverseIndexBucket := tx.Bucket(bucketEnvelopeExpiryByKey)
+	if reverseIndexBucket == nil {
+		return nil
+	}
+
+	compoundKey := makeEnvelopeKey(protocol, kind, key)
+
+	// Delete old index entries via reverse index lookup (O(1))
+	if tsBytes := reverseIndexBucket.Get(compoundKey); tsBytes != nil {
+		oldExpiresAt := decodeTimestamp(tsBytes)
+		expiryKey := makeEnvelopeExpiryKey(oldExpiresAt, protocol, kind, key)
+		if err := expiryBucket.Delete(expiryKey); err != nil {
+			return fmt.Errorf("deleting old expiry index: %w", err)
+		}
+		if err := reverseIndexBucket.Delete(compoundKey); err != nil {
+			return fmt.Errorf("deleting reverse index: %w", err)
+		}
+	}
+
+	// If new expiry is set, write new index entries
+	if expiresAtUnixMs > 0 {
+		expiresAt := time.UnixMilli(expiresAtUnixMs)
+		expiryKey := makeEnvelopeExpiryKey(expiresAt, protocol, kind, key)
+		if err := expiryBucket.Put(expiryKey, compoundKey); err != nil {
+			return fmt.Errorf("putting expiry index: %w", err)
+		}
+		if err := reverseIndexBucket.Put(compoundKey, encodeTimestamp(expiresAt)); err != nil {
+			return fmt.Errorf("putting expiry reverse index: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// removeEnvelopeExpiryIndex removes envelope expiry index entries.
+func (b *BoltDB) removeEnvelopeExpiryIndex(tx *bbolt.Tx, protocol, kind, key string) error {
+	return b.updateEnvelopeExpiryIndex(tx, protocol, kind, key, 0)
+}
+
+// GetExpiredEnvelopes returns expired envelope entries for reaping.
+func (b *BoltDB) GetExpiredEnvelopes(_ context.Context, before time.Time, limit int) ([]EnvelopeExpiryEntry, error) {
+	var entries []EnvelopeExpiryEntry
+	beforeBytes := encodeTimestamp(before)
+
+	err := b.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket(bucketEnvelopeByExpiry)
+		if bucket == nil {
+			return nil
+		}
+
+		cursor := bucket.Cursor()
+		for k, v := cursor.First(); k != nil && len(entries) < limit; k, v = cursor.Next() {
+			// Stop if we've passed the cutoff time
+			if bytes.Compare(k[:8], beforeBytes) >= 0 {
+				break
+			}
+
+			expiresAt, protocol, kind, key := parseEnvelopeExpiryKey(k)
+			_ = v // value is the compound key, we already parsed it from k
+
+			entries = append(entries, EnvelopeExpiryEntry{
+				Protocol:  protocol,
+				Kind:      kind,
+				Key:       key,
+				ExpiresAt: expiresAt,
+			})
+		}
+		return nil
+	})
+	return entries, err
+}
+
+// DeleteExpiredEnvelopes batch-deletes expired envelopes in a single transaction.
+func (b *BoltDB) DeleteExpiredEnvelopes(ctx context.Context, entries []EnvelopeExpiryEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		envBucket := tx.Bucket(bucketEnvelopes)
+		refsBucket := tx.Bucket(bucketEnvelopeBlobRefs)
+		blobsBucket := tx.Bucket(bucketBlobsByHash)
+		expiryBucket := tx.Bucket(bucketEnvelopeByExpiry)
+		reverseIndexBucket := tx.Bucket(bucketEnvelopeExpiryByKey)
+
+		for _, entry := range entries {
+			compoundKey := makeEnvelopeKey(entry.Protocol, entry.Kind, entry.Key)
+
+			// Decrement blob refs
+			if refsBucket != nil && blobsBucket != nil {
+				refs := b.getEnvelopeBlobRefs(refsBucket, compoundKey)
+				for _, hash := range refs {
+					if err := b.decrementBlobRefInTx(blobsBucket, hash); err != nil {
+						b.logger.Warn("failed to decrement blob ref during expiry delete",
+							"protocol", entry.Protocol,
+							"kind", entry.Kind,
+							"key", entry.Key,
+							"hash", hash,
+							"error", err)
+					}
+				}
+				_ = refsBucket.Delete(compoundKey)
+			}
+
+			// Delete expiry indexes
+			if expiryBucket != nil {
+				expiryKey := makeEnvelopeExpiryKey(entry.ExpiresAt, entry.Protocol, entry.Kind, entry.Key)
+				_ = expiryBucket.Delete(expiryKey)
+			}
+			if reverseIndexBucket != nil {
+				_ = reverseIndexBucket.Delete(compoundKey)
+			}
+
+			// Delete envelope
+			if envBucket != nil {
+				_ = envBucket.Delete(compoundKey)
+			}
+		}
+		return nil
+	})
+}
