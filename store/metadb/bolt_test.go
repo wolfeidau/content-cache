@@ -15,6 +15,8 @@ func newTestBoltDB(t *testing.T, opts ...BoltDBOption) *BoltDB {
 	t.Helper()
 	db := NewBoltDB(opts...)
 	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	t.Logf("dbPath: %s", dbPath)
 	require.NoError(t, db.Open(dbPath))
 	t.Cleanup(func() { _ = db.Close() })
 	return db
@@ -290,7 +292,7 @@ func TestBoltDB_LRUQueries(t *testing.T) {
 
 func TestBoltDB_ConcurrentAccess(t *testing.T) {
 	ctx := context.Background()
-	db := newTestBoltDB(t)
+	db := newTestBoltDB(t) // Toggle: newTestBoltDB(t, WithNoSync(true)) to disable fsync
 
 	const numGoroutines = 10
 	const numOps = 50
@@ -330,4 +332,6 @@ func TestBoltDB_ConcurrentAccess(t *testing.T) {
 	total, err := db.TotalBlobSize(ctx)
 	require.NoError(t, err)
 	assert.Positive(t, total)
+
+	t.Logf("total: %v, keys: %v", total, len(keys))
 }

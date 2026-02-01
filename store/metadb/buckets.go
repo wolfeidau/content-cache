@@ -17,6 +17,9 @@ var (
 	// Protocol metadata expiry index
 	bucketMetaByExpiry    = []byte("meta_by_expiry")     // timestamp+protocol+key -> protocol+key
 	bucketMetaExpiryByKey = []byte("meta_expiry_by_key") // protocol+key -> 8-byte timestamp (reverse index for O(1) delete)
+
+	// Blob access reverse index
+	bucketBlobAccessByHash = []byte("blob_access_by_hash") // hash -> 8-byte timestamp (reverse index for O(1) delete)
 )
 
 // encodeTimestamp converts a time.Time to a fixed-width big-endian byte slice.
@@ -40,7 +43,7 @@ func decodeTimestamp(b []byte) time.Time {
 	// Reverse the offset to get back the original nanoseconds.
 	// The conversion is safe: we reverse the shift from [0, MaxUint64] back to [MinInt64, MaxInt64].
 	ns := int64(u) + (-1 << 63) //nolint:gosec // intentional unsigned->signed shift
-	return time.Unix(0, ns)
+	return time.Unix(0, ns).UTC()
 }
 
 // makeBlobAccessKey creates a key for the blobs_by_access index.

@@ -16,6 +16,7 @@ type BoltDB struct {
 	db     *bbolt.DB
 	logger *slog.Logger
 	now    func() time.Time
+	noSync bool // disables fsync per transaction (for testing only)
 }
 
 // BoltDBOption configures a BoltDB instance.
@@ -35,6 +36,15 @@ func WithNow(now func() time.Time) BoltDBOption {
 	}
 }
 
+// WithNoSync disables fsync per transaction.
+// WARNING: This improves write performance but risks data loss on crash.
+// Use only for testing or benchmarking, never in production.
+func WithNoSync(noSync bool) BoltDBOption {
+	return func(b *BoltDB) {
+		b.noSync = noSync
+	}
+}
+
 // NewBoltDB creates a new BoltDB instance with options.
 func NewBoltDB(opts ...BoltDBOption) *BoltDB {
 	b := &BoltDB{
@@ -51,6 +61,7 @@ func NewBoltDB(opts ...BoltDBOption) *BoltDB {
 func (b *BoltDB) Open(path string) error {
 	db, err := bbolt.Open(path, 0o600, &bbolt.Options{
 		Timeout: 1 * time.Second,
+		NoSync:  b.noSync,
 	})
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
@@ -62,7 +73,7 @@ func (b *BoltDB) Open(path string) error {
 		return err
 	}
 
-	b.logger.Debug("opened metadb", "path", path)
+	b.logger.Debug("opened metadb", "path", path, "noSync", b.noSync)
 	return nil
 }
 
@@ -74,6 +85,7 @@ func (b *BoltDB) createBuckets() error {
 			bucketBlobsByAccess,
 			bucketMetaByExpiry,
 			bucketMetaExpiryByKey,
+			bucketBlobAccessByHash,
 		}
 		for _, name := range buckets {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
@@ -123,39 +135,21 @@ func (b *BoltDB) PutMeta(_ context.Context, protocol, key string, data []byte, t
 			return fmt.Errorf("meta bucket not found")
 		}
 
-		expiryBucket := tx.Bucket(bucketMetaByExpiry)
-		if expiryBucket == nil {
-			return fmt.Errorf("expiry bucket not found")
-		}
-
 		compoundKey := makeProtocolKey(protocol, key)
-
-		// Remove old expiry index entry if exists
-		if err := b.removeMetaExpiryIndex(tx, protocol, key); err != nil {
-			return err
-		}
 
 		// Store the data
 		if err := metaBucket.Put(compoundKey, data); err != nil {
 			return fmt.Errorf("putting meta: %w", err)
 		}
 
-		// Add expiry index entry
+		// Update expiry index (removes old entry, adds new if ttl > 0)
+		var expiresAt *time.Time
 		if ttl > 0 {
-			reverseIndexBucket := tx.Bucket(bucketMetaExpiryByKey)
-			if reverseIndexBucket == nil {
-				return fmt.Errorf("meta expiry reverse index bucket not found")
-			}
-
-			expiresAt := b.now().Add(ttl)
-			expiryKey := makeMetaExpiryKey(expiresAt, protocol, key)
-			if err := expiryBucket.Put(expiryKey, compoundKey); err != nil {
-				return fmt.Errorf("putting expiry index: %w", err)
-			}
-			// Store reverse index for O(1) deletion
-			if err := reverseIndexBucket.Put(compoundKey, encodeTimestamp(expiresAt)); err != nil {
-				return fmt.Errorf("putting expiry reverse index: %w", err)
-			}
+			t := b.now().Add(ttl)
+			expiresAt = &t
+		}
+		if err := b.updateMetaExpiryIndex(tx, protocol, key, expiresAt); err != nil {
+			return err
 		}
 
 		return nil
@@ -163,39 +157,58 @@ func (b *BoltDB) PutMeta(_ context.Context, protocol, key string, data []byte, t
 }
 
 func (b *BoltDB) removeMetaExpiryIndex(tx *bbolt.Tx, protocol, key string) error {
+	return b.updateMetaExpiryIndex(tx, protocol, key, nil)
+}
+
+// updateMetaExpiryIndex updates the meta expiry forward+reverse indexes.
+// If expiresAt is nil, only deletes existing index entries.
+func (b *BoltDB) updateMetaExpiryIndex(tx *bbolt.Tx, protocol, key string, expiresAt *time.Time) error {
 	expiryBucket := tx.Bucket(bucketMetaByExpiry)
 	if expiryBucket == nil {
 		return nil
 	}
 
 	reverseIndexBucket := tx.Bucket(bucketMetaExpiryByKey)
+	if reverseIndexBucket == nil {
+		return nil
+	}
+
 	compoundKey := makeProtocolKey(protocol, key)
 
-	// Try O(1) lookup via reverse index first
-	if reverseIndexBucket != nil {
-		if tsBytes := reverseIndexBucket.Get(compoundKey); tsBytes != nil {
-			expiresAt := decodeTimestamp(tsBytes)
-			expiryKey := makeMetaExpiryKey(expiresAt, protocol, key)
-			if err := expiryBucket.Delete(expiryKey); err != nil {
-				return fmt.Errorf("deleting old expiry index: %w", err)
+	// Step 1-2: Delete old forward index entry via reverse index lookup (O(1)), then delete reverse index
+	if tsBytes := reverseIndexBucket.Get(compoundKey); tsBytes != nil {
+		oldExpiresAt := decodeTimestamp(tsBytes)
+		expiryKey := makeMetaExpiryKey(oldExpiresAt, protocol, key)
+		if err := expiryBucket.Delete(expiryKey); err != nil {
+			return fmt.Errorf("deleting old expiry index: %w", err)
+		}
+		if err := reverseIndexBucket.Delete(compoundKey); err != nil {
+			return fmt.Errorf("deleting reverse index: %w", err)
+		}
+	} else {
+		// Fallback: scan for legacy entries without reverse index (self-healing migration)
+		cursor := expiryBucket.Cursor()
+		for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
+			if bytes.Equal(v, compoundKey) {
+				if err := cursor.Delete(); err != nil {
+					return fmt.Errorf("deleting old expiry index: %w", err)
+				}
+				break
 			}
-			if err := reverseIndexBucket.Delete(compoundKey); err != nil {
-				return fmt.Errorf("deleting reverse index: %w", err)
-			}
-			return nil
 		}
 	}
 
-	// Fallback: scan for legacy entries without reverse index (self-healing migration)
-	cursor := expiryBucket.Cursor()
-	for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
-		if bytes.Equal(v, compoundKey) {
-			if err := cursor.Delete(); err != nil {
-				return fmt.Errorf("deleting old expiry index: %w", err)
-			}
-			break
+	// Step 3-4: If new value provided, write new forward and reverse index entries
+	if expiresAt != nil {
+		expiryKey := makeMetaExpiryKey(*expiresAt, protocol, key)
+		if err := expiryBucket.Put(expiryKey, compoundKey); err != nil {
+			return fmt.Errorf("putting expiry index: %w", err)
+		}
+		if err := reverseIndexBucket.Put(compoundKey, encodeTimestamp(*expiresAt)); err != nil {
+			return fmt.Errorf("putting expiry reverse index: %w", err)
 		}
 	}
+
 	return nil
 }
 
@@ -269,16 +282,6 @@ func (b *BoltDB) PutBlob(_ context.Context, entry *BlobEntry) error {
 			return fmt.Errorf("blobs_by_hash bucket not found")
 		}
 
-		accessBucket := tx.Bucket(bucketBlobsByAccess)
-		if accessBucket == nil {
-			return fmt.Errorf("blobs_by_access bucket not found")
-		}
-
-		// Remove old access index entry if exists
-		if err := b.removeBlobAccessIndex(tx, entry.Hash); err != nil {
-			return err
-		}
-
 		// Store blob entry
 		data, err := json.Marshal(entry)
 		if err != nil {
@@ -289,40 +292,41 @@ func (b *BoltDB) PutBlob(_ context.Context, entry *BlobEntry) error {
 			return fmt.Errorf("putting blob: %w", err)
 		}
 
-		// Add access index entry
-		accessKey := makeBlobAccessKey(entry.LastAccess, entry.Hash)
-		if err := accessBucket.Put(accessKey, []byte(entry.Hash)); err != nil {
-			return fmt.Errorf("putting access index: %w", err)
+		// Update access index (removes old entry, adds new)
+		if err := b.updateBlobAccessIndex(tx, entry.Hash, entry.LastAccess); err != nil {
+			return err
 		}
 
 		return nil
 	})
 }
 
-func (b *BoltDB) removeBlobAccessIndex(tx *bbolt.Tx, hash string) error {
+// deleteBlobAccessIndex removes blob access index entries for a hash.
+func (b *BoltDB) deleteBlobAccessIndex(tx *bbolt.Tx, hash string) error {
 	accessBucket := tx.Bucket(bucketBlobsByAccess)
 	if accessBucket == nil {
 		return nil
 	}
 
-	hashBucket := tx.Bucket(bucketBlobsByHash)
+	reverseIndexBucket := tx.Bucket(bucketBlobAccessByHash)
 	hashBytes := []byte(hash)
 
-	// Try O(1) lookup via existing entry's LastAccess
-	if hashBucket != nil {
-		if val := hashBucket.Get(hashBytes); val != nil {
-			var entry BlobEntry
-			if err := json.Unmarshal(val, &entry); err == nil && !entry.LastAccess.IsZero() {
-				accessKey := makeBlobAccessKey(entry.LastAccess, hash)
-				if err := accessBucket.Delete(accessKey); err != nil {
-					return fmt.Errorf("deleting old access index: %w", err)
-				}
-				return nil
+	// Step 1-2: Delete old forward index entry via reverse index lookup (O(1)), then delete reverse index
+	if reverseIndexBucket != nil {
+		if tsBytes := reverseIndexBucket.Get(hashBytes); tsBytes != nil {
+			lastAccess := decodeTimestamp(tsBytes)
+			accessKey := makeBlobAccessKey(lastAccess, hash)
+			if err := accessBucket.Delete(accessKey); err != nil {
+				return fmt.Errorf("deleting old access index: %w", err)
 			}
+			if err := reverseIndexBucket.Delete(hashBytes); err != nil {
+				return fmt.Errorf("deleting access reverse index: %w", err)
+			}
+			return nil
 		}
 	}
 
-	// Fallback: scan for legacy entries (self-healing)
+	// Fallback: scan for legacy entries without reverse index (self-healing migration)
 	cursor := accessBucket.Cursor()
 	for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
 		if bytes.Equal(v, hashBytes) {
@@ -335,6 +339,56 @@ func (b *BoltDB) removeBlobAccessIndex(tx *bbolt.Tx, hash string) error {
 	return nil
 }
 
+// updateBlobAccessIndex updates the blob access forward+reverse indexes.
+// Must be called after the base blob entry is written (needs LastAccess from entry).
+func (b *BoltDB) updateBlobAccessIndex(tx *bbolt.Tx, hash string, lastAccess time.Time) error {
+	accessBucket := tx.Bucket(bucketBlobsByAccess)
+	if accessBucket == nil {
+		return fmt.Errorf("blobs_by_access bucket not found")
+	}
+
+	reverseIndexBucket := tx.Bucket(bucketBlobAccessByHash)
+	if reverseIndexBucket == nil {
+		return fmt.Errorf("blob_access_by_hash bucket not found")
+	}
+
+	hashBytes := []byte(hash)
+
+	// Step 1-2: Delete old forward index entry via reverse index lookup (O(1)), then delete reverse index
+	if tsBytes := reverseIndexBucket.Get(hashBytes); tsBytes != nil {
+		oldLastAccess := decodeTimestamp(tsBytes)
+		accessKey := makeBlobAccessKey(oldLastAccess, hash)
+		if err := accessBucket.Delete(accessKey); err != nil {
+			return fmt.Errorf("deleting old access index: %w", err)
+		}
+		if err := reverseIndexBucket.Delete(hashBytes); err != nil {
+			return fmt.Errorf("deleting access reverse index: %w", err)
+		}
+	} else {
+		// Fallback: scan for legacy entries without reverse index (self-healing migration)
+		cursor := accessBucket.Cursor()
+		for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
+			if bytes.Equal(v, hashBytes) {
+				if err := cursor.Delete(); err != nil {
+					return fmt.Errorf("deleting old access index: %w", err)
+				}
+				break
+			}
+		}
+	}
+
+	// Step 3-4: Write new forward and reverse index entries
+	accessKey := makeBlobAccessKey(lastAccess, hash)
+	if err := accessBucket.Put(accessKey, hashBytes); err != nil {
+		return fmt.Errorf("putting access index: %w", err)
+	}
+	if err := reverseIndexBucket.Put(hashBytes, encodeTimestamp(lastAccess)); err != nil {
+		return fmt.Errorf("putting access reverse index: %w", err)
+	}
+
+	return nil
+}
+
 // DeleteBlob removes blob metadata.
 func (b *BoltDB) DeleteBlob(_ context.Context, hash string) error {
 	return b.db.Update(func(tx *bbolt.Tx) error {
@@ -344,7 +398,7 @@ func (b *BoltDB) DeleteBlob(_ context.Context, hash string) error {
 		}
 
 		// Remove access index
-		if err := b.removeBlobAccessIndex(tx, hash); err != nil {
+		if err := b.deleteBlobAccessIndex(tx, hash); err != nil {
 			return err
 		}
 
@@ -420,11 +474,6 @@ func (b *BoltDB) TouchBlob(_ context.Context, hash string) error {
 			return ErrNotFound
 		}
 
-		accessBucket := tx.Bucket(bucketBlobsByAccess)
-		if accessBucket == nil {
-			return ErrNotFound
-		}
-
 		val := hashBucket.Get([]byte(hash))
 		if val == nil {
 			return ErrNotFound
@@ -433,11 +482,6 @@ func (b *BoltDB) TouchBlob(_ context.Context, hash string) error {
 		var entry BlobEntry
 		if err := json.Unmarshal(val, &entry); err != nil {
 			return fmt.Errorf("unmarshaling blob entry: %w", err)
-		}
-
-		// Remove old access index
-		if err := b.removeBlobAccessIndex(tx, hash); err != nil {
-			return err
 		}
 
 		// Update access time
@@ -452,10 +496,9 @@ func (b *BoltDB) TouchBlob(_ context.Context, hash string) error {
 			return fmt.Errorf("putting blob: %w", err)
 		}
 
-		// Add new access index
-		accessKey := makeBlobAccessKey(entry.LastAccess, entry.Hash)
-		if err := accessBucket.Put(accessKey, []byte(hash)); err != nil {
-			return fmt.Errorf("putting access index: %w", err)
+		// Update access index (removes old entry, adds new)
+		if err := b.updateBlobAccessIndex(tx, hash, entry.LastAccess); err != nil {
+			return err
 		}
 
 		return nil
