@@ -2,36 +2,31 @@ package npm
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"path"
-	"strings"
 	"sync"
 	"time"
 
 	contentcache "github.com/wolfeidau/content-cache"
-	"github.com/wolfeidau/content-cache/backend"
+	"github.com/wolfeidau/content-cache/store/metadb"
 )
 
 const (
-	// npmPrefix is the storage prefix for NPM package data.
-	npmPrefix = "npm"
+	// Key prefixes for npm metadata in metadb
+	prefixMetadata = "metadata/" // Raw JSON metadata from upstream
+	prefixCache    = "cache/"    // CachedPackage with tarball hashes
 )
 
-// Index manages the NPM package index.
+// Index manages the NPM package index using metadb.
 type Index struct {
-	backend backend.Backend
-	mu      sync.RWMutex
-	now     func() time.Time
+	db  *metadb.Index
+	mu  sync.RWMutex
+	now func() time.Time
 }
 
 // NewIndex creates a new NPM package index.
-func NewIndex(b backend.Backend) *Index {
+func NewIndex(db *metadb.Index) *Index {
 	return &Index{
-		backend: b,
-		now:     time.Now,
+		db:  db,
+		now: time.Now,
 	}
 }
 
@@ -40,17 +35,15 @@ func (idx *Index) GetPackageMetadata(ctx context.Context, name string) ([]byte, 
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	key := idx.metadataKey(name)
-	rc, err := idx.backend.Read(ctx, key)
+	key := prefixMetadata + encodePackageName(name)
+	data, err := idx.db.Get(ctx, key)
 	if err != nil {
-		if errors.Is(err, backend.ErrNotFound) {
+		if err == metadb.ErrNotFound {
 			return nil, ErrNotFound
 		}
-		return nil, fmt.Errorf("reading metadata: %w", err)
+		return nil, err
 	}
-	defer func() { _ = rc.Close() }()
-
-	return io.ReadAll(rc)
+	return data, nil
 }
 
 // PutPackageMetadata stores package metadata.
@@ -58,12 +51,8 @@ func (idx *Index) PutPackageMetadata(ctx context.Context, name string, metadata 
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	key := idx.metadataKey(name)
-	if err := idx.backend.Write(ctx, key, strings.NewReader(string(metadata))); err != nil {
-		return fmt.Errorf("writing metadata: %w", err)
-	}
-
-	return nil
+	key := prefixMetadata + encodePackageName(name)
+	return idx.db.Put(ctx, key, metadata)
 }
 
 // GetCachedPackage retrieves the cached package info including tarball hashes.
@@ -71,25 +60,18 @@ func (idx *Index) GetCachedPackage(ctx context.Context, name string) (*CachedPac
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	key := idx.cacheKey(name)
-	rc, err := idx.backend.Read(ctx, key)
-	if err != nil {
-		if errors.Is(err, backend.ErrNotFound) {
+	key := prefixCache + encodePackageName(name)
+	var cached CachedPackage
+	if err := idx.db.GetJSON(ctx, key, &cached); err != nil {
+		if err == metadb.ErrNotFound {
 			return nil, ErrNotFound
 		}
-		return nil, fmt.Errorf("reading cache info: %w", err)
+		return nil, err
 	}
-	defer func() { _ = rc.Close() }()
-
-	var cached CachedPackage
-	if err := json.NewDecoder(rc).Decode(&cached); err != nil {
-		return nil, fmt.Errorf("decoding cache info: %w", err)
-	}
-
 	return &cached, nil
 }
 
-// PutCachedPackage stores cached package info.
+// PutCachedPackage stores cached package info with blob references.
 func (idx *Index) PutCachedPackage(ctx context.Context, pkg *CachedPackage) error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
@@ -99,17 +81,12 @@ func (idx *Index) PutCachedPackage(ctx context.Context, pkg *CachedPackage) erro
 		pkg.CachedAt = pkg.UpdatedAt
 	}
 
-	key := idx.cacheKey(pkg.Name)
-	data, err := json.Marshal(pkg)
-	if err != nil {
-		return fmt.Errorf("encoding cache info: %w", err)
-	}
+	key := prefixCache + encodePackageName(pkg.Name)
 
-	if err := idx.backend.Write(ctx, key, strings.NewReader(string(data))); err != nil {
-		return fmt.Errorf("writing cache info: %w", err)
-	}
+	// Collect all blob refs from cached versions
+	refs := collectBlobRefs(pkg)
 
-	return nil
+	return idx.db.PutJSONWithRefs(ctx, key, pkg, refs)
 }
 
 // GetVersionTarballHash retrieves the tarball hash for a specific version.
@@ -132,15 +109,11 @@ func (idx *Index) SetVersionTarballHash(ctx context.Context, name, version strin
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	// Get or create cached package
-	key := idx.cacheKey(name)
-	var cached CachedPackage
+	key := prefixCache + encodePackageName(name)
 
-	rc, err := idx.backend.Read(ctx, key)
-	if err == nil {
-		_ = json.NewDecoder(rc).Decode(&cached)
-		_ = rc.Close()
-	}
+	// Get or create cached package
+	var cached CachedPackage
+	_ = idx.db.GetJSON(ctx, key, &cached) // Ignore not found
 
 	if cached.Name == "" {
 		cached.Name = name
@@ -160,16 +133,10 @@ func (idx *Index) SetVersionTarballHash(ctx context.Context, name, version strin
 	}
 	cached.UpdatedAt = idx.now()
 
-	data, err := json.Marshal(&cached)
-	if err != nil {
-		return fmt.Errorf("encoding cache info: %w", err)
-	}
+	// Collect all blob refs
+	refs := collectBlobRefs(&cached)
 
-	if err := idx.backend.Write(ctx, key, strings.NewReader(string(data))); err != nil {
-		return fmt.Errorf("writing cache info: %w", err)
-	}
-
-	return nil
+	return idx.db.PutJSONWithRefs(ctx, key, &cached, refs)
 }
 
 // DeletePackage removes all cached data for a package.
@@ -177,14 +144,16 @@ func (idx *Index) DeletePackage(ctx context.Context, name string) error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
+	encodedName := encodePackageName(name)
+
 	// Delete metadata
-	if err := idx.backend.Delete(ctx, idx.metadataKey(name)); err != nil && !errors.Is(err, backend.ErrNotFound) {
-		return fmt.Errorf("deleting metadata: %w", err)
+	if err := idx.db.Delete(ctx, prefixMetadata+encodedName); err != nil && err != metadb.ErrNotFound {
+		return err
 	}
 
-	// Delete cache info
-	if err := idx.backend.Delete(ctx, idx.cacheKey(name)); err != nil && !errors.Is(err, backend.ErrNotFound) {
-		return fmt.Errorf("deleting cache info: %w", err)
+	// Delete cache info (with blob refs cleanup)
+	if err := idx.db.DeleteWithRefs(ctx, prefixCache+encodedName); err != nil && err != metadb.ErrNotFound {
+		return err
 	}
 
 	return nil
@@ -195,31 +164,36 @@ func (idx *Index) ListPackages(ctx context.Context) ([]string, error) {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	keys, err := idx.backend.List(ctx, path.Join(npmPrefix, "cache"))
+	keys, err := idx.db.List(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("listing packages: %w", err)
+		return nil, err
 	}
 
 	var names []string
 	for _, key := range keys {
-		// Extract package name from key
-		// Key format: npm/cache/{encoded-name}.json
-		name := strings.TrimPrefix(key, path.Join(npmPrefix, "cache")+"/")
-		name = strings.TrimSuffix(name, ".json")
-		if decoded, err := decodePackageName(name); err == nil {
-			names = append(names, decoded)
+		// Only include cache keys (not metadata keys)
+		if len(key) > len(prefixCache) && key[:len(prefixCache)] == prefixCache {
+			encodedName := key[len(prefixCache):]
+			if decoded, err := decodePackageName(encodedName); err == nil {
+				names = append(names, decoded)
+			}
 		}
 	}
 
 	return names, nil
 }
 
-// Key generation helpers
+// collectBlobRefs extracts all blob hashes from a CachedPackage.
+func collectBlobRefs(pkg *CachedPackage) []string {
+	if pkg == nil || pkg.Versions == nil {
+		return nil
+	}
 
-func (idx *Index) metadataKey(name string) string {
-	return path.Join(npmPrefix, "metadata", encodePackageName(name)+".json")
-}
-
-func (idx *Index) cacheKey(name string) string {
-	return path.Join(npmPrefix, "cache", encodePackageName(name)+".json")
+	refs := make([]string, 0, len(pkg.Versions))
+	for _, ver := range pkg.Versions {
+		if ver != nil && !ver.TarballHash.IsZero() {
+			refs = append(refs, ver.TarballHash.String())
+		}
+	}
+	return refs
 }

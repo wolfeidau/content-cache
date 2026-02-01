@@ -86,6 +86,7 @@ func (b *BoltDB) createBuckets() error {
 			bucketMetaByExpiry,
 			bucketMetaExpiryByKey,
 			bucketBlobAccessByHash,
+			bucketMetaBlobRefs,
 		}
 		for _, name := range buckets {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
@@ -637,6 +638,266 @@ func (b *BoltDB) GetUnreferencedBlobs(_ context.Context, limit int) ([]string, e
 		})
 	})
 	return hashes, err
+}
+
+// PutMetaWithRefs stores metadata and updates blob references atomically.
+// It computes the diff between old and new refs:
+// - added = newRefs - oldRefs → increment blob refcounts
+// - removed = oldRefs - newRefs → decrement blob refcounts
+// This is safe for overwrites and idempotent for repeated calls with the same refs.
+func (b *BoltDB) PutMetaWithRefs(_ context.Context, protocol, key string, data []byte, ttl time.Duration, refs []string) error {
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		metaBucket := tx.Bucket(bucketMeta)
+		if metaBucket == nil {
+			return fmt.Errorf("meta bucket not found")
+		}
+
+		refsBucket := tx.Bucket(bucketMetaBlobRefs)
+		if refsBucket == nil {
+			return fmt.Errorf("meta_blob_refs bucket not found")
+		}
+
+		blobsBucket := tx.Bucket(bucketBlobsByHash)
+		if blobsBucket == nil {
+			return fmt.Errorf("blobs_by_hash bucket not found")
+		}
+
+		compoundKey := makeProtocolKey(protocol, key)
+
+		// Get old refs for this meta key
+		oldRefs := b.getMetaBlobRefs(refsBucket, compoundKey)
+
+		// Compute diff
+		added, removed := diffRefs(oldRefs, refs)
+
+		// Update blob refcounts
+		for _, hash := range added {
+			if err := b.incrementBlobRefInTx(blobsBucket, hash); err != nil {
+				return fmt.Errorf("incrementing ref for %s: %w", hash, err)
+			}
+		}
+		for _, hash := range removed {
+			if err := b.decrementBlobRefInTx(blobsBucket, hash); err != nil {
+				return fmt.Errorf("decrementing ref for %s: %w", hash, err)
+			}
+		}
+
+		// Store the new refs
+		refsData, err := json.Marshal(refs)
+		if err != nil {
+			return fmt.Errorf("marshaling refs: %w", err)
+		}
+		if err := refsBucket.Put(compoundKey, refsData); err != nil {
+			return fmt.Errorf("putting refs: %w", err)
+		}
+
+		// Store the metadata
+		if err := metaBucket.Put(compoundKey, data); err != nil {
+			return fmt.Errorf("putting meta: %w", err)
+		}
+
+		// Update expiry index
+		var expiresAt *time.Time
+		if ttl > 0 {
+			t := b.now().Add(ttl)
+			expiresAt = &t
+		}
+		if err := b.updateMetaExpiryIndex(tx, protocol, key, expiresAt); err != nil {
+			return err
+		}
+
+		return nil
+	})
+}
+
+// DeleteMetaWithRefs removes metadata and decrements all associated blob refs.
+func (b *BoltDB) DeleteMetaWithRefs(_ context.Context, protocol, key string) error {
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		metaBucket := tx.Bucket(bucketMeta)
+		if metaBucket == nil {
+			return nil
+		}
+
+		refsBucket := tx.Bucket(bucketMetaBlobRefs)
+		blobsBucket := tx.Bucket(bucketBlobsByHash)
+
+		compoundKey := makeProtocolKey(protocol, key)
+
+		// Get refs for this meta key and decrement all
+		if refsBucket != nil && blobsBucket != nil {
+			refs := b.getMetaBlobRefs(refsBucket, compoundKey)
+			for _, hash := range refs {
+				if err := b.decrementBlobRefInTx(blobsBucket, hash); err != nil {
+					// Log but don't fail - ref may already be gone
+					b.logger.Warn("failed to decrement blob ref during delete",
+						"protocol", protocol,
+						"key", key,
+						"hash", hash,
+						"error", err)
+				}
+			}
+			// Delete the refs entry
+			if err := refsBucket.Delete(compoundKey); err != nil {
+				return fmt.Errorf("deleting refs: %w", err)
+			}
+		}
+
+		// Remove expiry index
+		if err := b.removeMetaExpiryIndex(tx, protocol, key); err != nil {
+			return err
+		}
+
+		return metaBucket.Delete(compoundKey)
+	})
+}
+
+// getMetaBlobRefs retrieves the blob refs for a meta key.
+func (b *BoltDB) getMetaBlobRefs(refsBucket *bbolt.Bucket, compoundKey []byte) []string {
+	val := refsBucket.Get(compoundKey)
+	if val == nil {
+		return nil
+	}
+	var refs []string
+	if err := json.Unmarshal(val, &refs); err != nil {
+		return nil
+	}
+	return refs
+}
+
+// incrementBlobRefInTx increments blob refcount within a transaction.
+func (b *BoltDB) incrementBlobRefInTx(bucket *bbolt.Bucket, hash string) error {
+	val := bucket.Get([]byte(hash))
+	if val == nil {
+		// Blob doesn't exist yet - this is OK, ref will be set when blob is stored
+		return nil
+	}
+
+	var entry BlobEntry
+	if err := json.Unmarshal(val, &entry); err != nil {
+		return fmt.Errorf("unmarshaling blob entry: %w", err)
+	}
+
+	entry.RefCount++
+
+	data, err := json.Marshal(&entry)
+	if err != nil {
+		return fmt.Errorf("marshaling blob entry: %w", err)
+	}
+
+	return bucket.Put([]byte(hash), data)
+}
+
+// decrementBlobRefInTx decrements blob refcount within a transaction.
+func (b *BoltDB) decrementBlobRefInTx(bucket *bbolt.Bucket, hash string) error {
+	val := bucket.Get([]byte(hash))
+	if val == nil {
+		return nil // Blob already deleted
+	}
+
+	var entry BlobEntry
+	if err := json.Unmarshal(val, &entry); err != nil {
+		return fmt.Errorf("unmarshaling blob entry: %w", err)
+	}
+
+	if entry.RefCount > 0 {
+		entry.RefCount--
+	}
+
+	data, err := json.Marshal(&entry)
+	if err != nil {
+		return fmt.Errorf("marshaling blob entry: %w", err)
+	}
+
+	return bucket.Put([]byte(hash), data)
+}
+
+// diffRefs computes added and removed refs between old and new sets.
+// added = newRefs - oldRefs (refs that were added)
+// removed = oldRefs - newRefs (refs that were removed)
+func diffRefs(oldRefs, newRefs []string) (added, removed []string) {
+	oldSet := make(map[string]struct{}, len(oldRefs))
+	newSet := make(map[string]struct{}, len(newRefs))
+
+	for _, r := range oldRefs {
+		oldSet[r] = struct{}{}
+	}
+	for _, r := range newRefs {
+		newSet[r] = struct{}{}
+	}
+
+	for _, r := range newRefs {
+		if _, ok := oldSet[r]; !ok {
+			added = append(added, r)
+		}
+	}
+	for _, r := range oldRefs {
+		if _, ok := newSet[r]; !ok {
+			removed = append(removed, r)
+		}
+	}
+
+	return added, removed
+}
+
+// GetMetaBlobRefs returns the blob refs for a meta key.
+// This is useful for testing and debugging.
+func (b *BoltDB) GetMetaBlobRefs(_ context.Context, protocol, key string) ([]string, error) {
+	var refs []string
+	err := b.db.View(func(tx *bbolt.Tx) error {
+		refsBucket := tx.Bucket(bucketMetaBlobRefs)
+		if refsBucket == nil {
+			return nil
+		}
+		compoundKey := makeProtocolKey(protocol, key)
+		refs = b.getMetaBlobRefs(refsBucket, compoundKey)
+		return nil
+	})
+	return refs, err
+}
+
+// UpdateJSON performs read-modify-write in a single Bolt transaction.
+// The function fn receives the current value (or zero value if not found)
+// and should modify it in place. The modified value is then stored.
+// This prevents lost updates from concurrent requests.
+func (b *BoltDB) UpdateJSON(_ context.Context, protocol, key string, ttl time.Duration, fn func(v any) error, v any) error {
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		metaBucket := tx.Bucket(bucketMeta)
+		if metaBucket == nil {
+			return fmt.Errorf("meta bucket not found")
+		}
+
+		compoundKey := makeProtocolKey(protocol, key)
+
+		// Read existing value
+		val := metaBucket.Get(compoundKey)
+		if val != nil {
+			if err := json.Unmarshal(val, v); err != nil {
+				return fmt.Errorf("unmarshaling existing value: %w", err)
+			}
+		}
+
+		// Apply modification
+		if err := fn(v); err != nil {
+			return err
+		}
+
+		// Marshal and store
+		data, err := json.Marshal(v)
+		if err != nil {
+			return fmt.Errorf("marshaling value: %w", err)
+		}
+		if err := metaBucket.Put(compoundKey, data); err != nil {
+			return fmt.Errorf("putting meta: %w", err)
+		}
+
+		// Update expiry index
+		var expiresAt *time.Time
+		if ttl > 0 {
+			t := b.now().Add(ttl)
+			expiresAt = &t
+		}
+		return b.updateMetaExpiryIndex(tx, protocol, key, expiresAt)
+	})
 }
 
 // Compile-time interface check

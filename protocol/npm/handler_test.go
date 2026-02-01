@@ -4,12 +4,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/wolfeidau/content-cache/backend"
 	"github.com/wolfeidau/content-cache/store"
+	"github.com/wolfeidau/content-cache/store/metadb"
 )
 
 func newTestHandler(t *testing.T, upstreamServer *httptest.Server) (*Handler, func()) {
@@ -20,7 +23,12 @@ func newTestHandler(t *testing.T, upstreamServer *httptest.Server) (*Handler, fu
 	b, err := backend.NewFilesystem(tmpDir)
 	require.NoError(t, err)
 	cafs := store.NewCAFS(b)
-	idx := NewIndex(b)
+
+	// Create metadb for index
+	db := metadb.NewBoltDB()
+	require.NoError(t, db.Open(filepath.Join(tmpDir, "meta.db")))
+	metaIdx := metadb.NewIndex(db, "npm", 24*time.Hour)
+	idx := NewIndex(metaIdx)
 
 	opts := []UpstreamOption{}
 	if upstreamServer != nil {
@@ -32,6 +40,7 @@ func newTestHandler(t *testing.T, upstreamServer *httptest.Server) (*Handler, fu
 	return h, func() {
 		// Wait for background goroutines to complete before cleanup
 		h.Close()
+		_ = db.Close()
 		_ = os.RemoveAll(tmpDir)
 	}
 }

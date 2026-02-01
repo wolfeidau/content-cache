@@ -20,6 +20,9 @@ var (
 
 	// Blob access reverse index
 	bucketBlobAccessByHash = []byte("blob_access_by_hash") // hash -> 8-byte timestamp (reverse index for O(1) delete)
+
+	// Meta blob refs bucket - tracks which blobs are referenced by each meta key
+	bucketMetaBlobRefs = []byte("meta_blob_refs") // protocol+key -> JSON array of hashes
 )
 
 // encodeTimestamp converts a time.Time to a fixed-width big-endian byte slice.

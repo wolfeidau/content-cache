@@ -2,3 +2,4 @@
 /content-cache
 # Added by goreleaser init:
 dist/
+.envrc
