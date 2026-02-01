@@ -188,8 +188,9 @@ func New(cfg Config) (*Server, error) {
 		goproxy.WithLogger(cfg.Logger.With("component", "goproxy")),
 	)
 
-	// Initialize npm components
-	npmIndex := npm.NewIndex(fsBackend)
+	// Initialize npm components using metadb
+	npmMetaIndex := metadb.NewIndex(metaDB, "npm", 24*time.Hour)
+	npmIndex := npm.NewIndex(npmMetaIndex)
 	npmUpstreamOpts := []npm.UpstreamOption{}
 	if cfg.UpstreamNPMRegistry != "" {
 		npmUpstreamOpts = append(npmUpstreamOpts, npm.WithRegistryURL(cfg.UpstreamNPMRegistry))

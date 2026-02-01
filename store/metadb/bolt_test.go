@@ -2,6 +2,7 @@ package metadb
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -334,4 +335,282 @@ func TestBoltDB_ConcurrentAccess(t *testing.T) {
 	assert.Positive(t, total)
 
 	t.Logf("total: %v, keys: %v", total, len(keys))
+}
+
+func TestBoltDB_PutMetaWithRefs(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("increments refs for new key", func(t *testing.T) {
+		db := newTestBoltDB(t)
+		now := time.Now()
+
+		// Create blobs first
+		require.NoError(t, db.PutBlob(ctx, &BlobEntry{Hash: "hash1", Size: 100, CachedAt: now, LastAccess: now, RefCount: 0}))
+		require.NoError(t, db.PutBlob(ctx, &BlobEntry{Hash: "hash2", Size: 200, CachedAt: now, LastAccess: now, RefCount: 0}))
+
+		// Put meta with refs
+		err := db.PutMetaWithRefs(ctx, "npm", "pkg1", []byte(`{"name":"pkg1"}`), time.Hour, []string{"hash1", "hash2"})
+		require.NoError(t, err)
+
+		// Check refs were incremented
+		blob1, err := db.GetBlob(ctx, "hash1")
+		require.NoError(t, err)
+		assert.Equal(t, 1, blob1.RefCount)
+
+		blob2, err := db.GetBlob(ctx, "hash2")
+		require.NoError(t, err)
+		assert.Equal(t, 1, blob2.RefCount)
+
+		// Check refs are stored
+		refs, err := db.GetMetaBlobRefs(ctx, "npm", "pkg1")
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{"hash1", "hash2"}, refs)
+	})
+
+	t.Run("computes diff on overwrite", func(t *testing.T) {
+		db := newTestBoltDB(t)
+		now := time.Now()
+
+		// Create blobs
+		require.NoError(t, db.PutBlob(ctx, &BlobEntry{Hash: "hash1", Size: 100, CachedAt: now, LastAccess: now, RefCount: 0}))
+		require.NoError(t, db.PutBlob(ctx, &BlobEntry{Hash: "hash2", Size: 200, CachedAt: now, LastAccess: now, RefCount: 0}))
+		require.NoError(t, db.PutBlob(ctx, &BlobEntry{Hash: "hash3", Size: 300, CachedAt: now, LastAccess: now, RefCount: 0}))
+
+		// First put: refs = [hash1, hash2]
+		err := db.PutMetaWithRefs(ctx, "npm", "pkg1", []byte(`{"v":1}`), time.Hour, []string{"hash1", "hash2"})
+		require.NoError(t, err)
+
+		// Second put: refs = [hash2, hash3] (hash1 removed, hash3 added)
+		err = db.PutMetaWithRefs(ctx, "npm", "pkg1", []byte(`{"v":2}`), time.Hour, []string{"hash2", "hash3"})
+		require.NoError(t, err)
+
+		// hash1: was 1, now 0 (decremented)
+		blob1, err := db.GetBlob(ctx, "hash1")
+		require.NoError(t, err)
+		assert.Equal(t, 0, blob1.RefCount)
+
+		// hash2: was 1, still 1 (no change)
+		blob2, err := db.GetBlob(ctx, "hash2")
+		require.NoError(t, err)
+		assert.Equal(t, 1, blob2.RefCount)
+
+		// hash3: was 0, now 1 (incremented)
+		blob3, err := db.GetBlob(ctx, "hash3")
+		require.NoError(t, err)
+		assert.Equal(t, 1, blob3.RefCount)
+	})
+
+	t.Run("is idempotent with same refs", func(t *testing.T) {
+		db := newTestBoltDB(t)
+		now := time.Now()
+
+		require.NoError(t, db.PutBlob(ctx, &BlobEntry{Hash: "hash1", Size: 100, CachedAt: now, LastAccess: now, RefCount: 0}))
+
+		// Put twice with same refs
+		err := db.PutMetaWithRefs(ctx, "npm", "pkg1", []byte(`{"v":1}`), time.Hour, []string{"hash1"})
+		require.NoError(t, err)
+
+		err = db.PutMetaWithRefs(ctx, "npm", "pkg1", []byte(`{"v":2}`), time.Hour, []string{"hash1"})
+		require.NoError(t, err)
+
+		// RefCount should still be 1 (not 2)
+		blob1, err := db.GetBlob(ctx, "hash1")
+		require.NoError(t, err)
+		assert.Equal(t, 1, blob1.RefCount)
+	})
+
+	t.Run("handles refs to nonexistent blobs gracefully", func(t *testing.T) {
+		db := newTestBoltDB(t)
+
+		// Put meta with ref to blob that doesn't exist yet
+		err := db.PutMetaWithRefs(ctx, "npm", "pkg1", []byte(`{"v":1}`), time.Hour, []string{"future-hash"})
+		require.NoError(t, err)
+
+		// Refs are still tracked
+		refs, err := db.GetMetaBlobRefs(ctx, "npm", "pkg1")
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{"future-hash"}, refs)
+	})
+}
+
+func TestBoltDB_DeleteMetaWithRefs(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("decrements all refs on delete", func(t *testing.T) {
+		db := newTestBoltDB(t)
+		now := time.Now()
+
+		require.NoError(t, db.PutBlob(ctx, &BlobEntry{Hash: "hash1", Size: 100, CachedAt: now, LastAccess: now, RefCount: 0}))
+		require.NoError(t, db.PutBlob(ctx, &BlobEntry{Hash: "hash2", Size: 200, CachedAt: now, LastAccess: now, RefCount: 0}))
+
+		// Put meta with refs
+		err := db.PutMetaWithRefs(ctx, "npm", "pkg1", []byte(`{"v":1}`), time.Hour, []string{"hash1", "hash2"})
+		require.NoError(t, err)
+
+		// Delete meta
+		err = db.DeleteMetaWithRefs(ctx, "npm", "pkg1")
+		require.NoError(t, err)
+
+		// Both refs should be decremented
+		blob1, err := db.GetBlob(ctx, "hash1")
+		require.NoError(t, err)
+		assert.Equal(t, 0, blob1.RefCount)
+
+		blob2, err := db.GetBlob(ctx, "hash2")
+		require.NoError(t, err)
+		assert.Equal(t, 0, blob2.RefCount)
+
+		// Meta should be gone
+		_, err = db.GetMeta(ctx, "npm", "pkg1")
+		require.ErrorIs(t, err, ErrNotFound)
+
+		// Refs should be gone
+		refs, err := db.GetMetaBlobRefs(ctx, "npm", "pkg1")
+		require.NoError(t, err)
+		assert.Empty(t, refs)
+	})
+}
+
+func TestBoltDB_UpdateJSON(t *testing.T) {
+	ctx := context.Background()
+
+	type Counter struct {
+		Value int `json:"value"`
+	}
+
+	t.Run("read-modify-write is atomic", func(t *testing.T) {
+		db := newTestBoltDB(t)
+
+		// Initial put
+		err := db.PutMeta(ctx, "test", "counter", []byte(`{"value":0}`), time.Hour)
+		require.NoError(t, err)
+
+		// Update atomically
+		var counter Counter
+		err = db.UpdateJSON(ctx, "test", "counter", time.Hour, func(v any) error {
+			c := v.(*Counter)
+			c.Value++
+			return nil
+		}, &counter)
+		require.NoError(t, err)
+		assert.Equal(t, 1, counter.Value)
+
+		// Verify persisted
+		var got Counter
+		data, err := db.GetMeta(ctx, "test", "counter")
+		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal(data, &got))
+		assert.Equal(t, 1, got.Value)
+	})
+
+	t.Run("creates new entry if not found", func(t *testing.T) {
+		db := newTestBoltDB(t)
+
+		var counter Counter
+		err := db.UpdateJSON(ctx, "test", "new-counter", time.Hour, func(v any) error {
+			c := v.(*Counter)
+			c.Value = 42
+			return nil
+		}, &counter)
+		require.NoError(t, err)
+		assert.Equal(t, 42, counter.Value)
+
+		// Verify persisted
+		data, err := db.GetMeta(ctx, "test", "new-counter")
+		require.NoError(t, err)
+		var got Counter
+		require.NoError(t, json.Unmarshal(data, &got))
+		assert.Equal(t, 42, got.Value)
+	})
+
+	t.Run("concurrent updates don't lose data", func(t *testing.T) {
+		db := newTestBoltDB(t)
+
+		// Initialize counter
+		err := db.PutMeta(ctx, "test", "counter", []byte(`{"value":0}`), time.Hour)
+		require.NoError(t, err)
+
+		const numGoroutines = 10
+		const numOps = 20
+
+		var wg sync.WaitGroup
+		wg.Add(numGoroutines)
+
+		for i := 0; i < numGoroutines; i++ {
+			go func() {
+				defer wg.Done()
+				for j := 0; j < numOps; j++ {
+					var counter Counter
+					_ = db.UpdateJSON(ctx, "test", "counter", time.Hour, func(v any) error {
+						c := v.(*Counter)
+						c.Value++
+						return nil
+					}, &counter)
+				}
+			}()
+		}
+
+		wg.Wait()
+
+		// Should have exactly numGoroutines * numOps increments
+		data, err := db.GetMeta(ctx, "test", "counter")
+		require.NoError(t, err)
+		var final Counter
+		require.NoError(t, json.Unmarshal(data, &final))
+		assert.Equal(t, numGoroutines*numOps, final.Value)
+	})
+}
+
+func TestDiffRefs(t *testing.T) {
+	tests := []struct {
+		name        string
+		oldRefs     []string
+		newRefs     []string
+		wantAdded   []string
+		wantRemoved []string
+	}{
+		{
+			name:        "empty to some",
+			oldRefs:     nil,
+			newRefs:     []string{"a", "b"},
+			wantAdded:   []string{"a", "b"},
+			wantRemoved: nil,
+		},
+		{
+			name:        "some to empty",
+			oldRefs:     []string{"a", "b"},
+			newRefs:     nil,
+			wantAdded:   nil,
+			wantRemoved: []string{"a", "b"},
+		},
+		{
+			name:        "partial overlap",
+			oldRefs:     []string{"a", "b"},
+			newRefs:     []string{"b", "c"},
+			wantAdded:   []string{"c"},
+			wantRemoved: []string{"a"},
+		},
+		{
+			name:        "same refs",
+			oldRefs:     []string{"a", "b"},
+			newRefs:     []string{"a", "b"},
+			wantAdded:   nil,
+			wantRemoved: nil,
+		},
+		{
+			name:        "complete replacement",
+			oldRefs:     []string{"a", "b"},
+			newRefs:     []string{"c", "d"},
+			wantAdded:   []string{"c", "d"},
+			wantRemoved: []string{"a", "b"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			added, removed := diffRefs(tt.oldRefs, tt.newRefs)
+			assert.ElementsMatch(t, tt.wantAdded, added)
+			assert.ElementsMatch(t, tt.wantRemoved, removed)
+		})
+	}
 }
