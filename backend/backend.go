@@ -54,3 +54,16 @@ type SizeAwareBackend interface {
 	// Returns ErrNotFound if the key does not exist.
 	Size(ctx context.Context, key string) (int64, error)
 }
+
+// FramedBackend extends Backend with framed blob support.
+type FramedBackend interface {
+	Backend
+
+	// WriteFramed stores framed content (header + body) at the given key.
+	WriteFramed(ctx context.Context, key string, header *BlobHeader, body io.Reader) error
+
+	// ReadFramed retrieves framed content at the given key.
+	// Returns the parsed header and a reader for the body.
+	// The caller must close the returned ReadCloser.
+	ReadFramed(ctx context.Context, key string) (*BlobHeader, io.ReadCloser, error)
+}
