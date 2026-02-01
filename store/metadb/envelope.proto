@@ -1,0 +1,54 @@
+syntax = "proto3";
+package metadb.v1;
+option go_package = "github.com/wolfeidau/content-cache/store/metadb";
+
+// MetadataEnvelope wraps all stored metadata with cache control and integrity fields.
+// Note: The storage key (protocol + kind + key) is NOT stored in the envelope.
+// It is passed explicitly to APIs and used as the BoltDB key.
+message MetadataEnvelope {
+  // Schema version for future evolution (start at 1)
+  uint32 envelope_version = 1;
+
+  // Payload description
+  ContentType content_type = 2;
+  ContentEncoding content_encoding = 3;
+  bytes payload = 4;              // raw or compressed bytes
+
+  // Integrity (of decoded payload)
+  string payload_digest = 5;      // "sha256:<hex>" of uncompressed bytes (canonical format)
+  uint64 payload_size = 6;        // uncompressed size in bytes
+
+  // Cache control
+  int64 fetched_at_unix_ms = 10;
+  int64 expires_at_unix_ms = 11;  // 0 = no expiry
+  int64 ttl_seconds = 12;         // original TTL (for debugging/revalidation)
+  string etag = 13;
+  int64 last_modified_unix_ms = 14;
+
+  // Provenance
+  string upstream = 15;           // upstream registry host (no secrets, no full URLs)
+  uint32 upstream_status = 16;    // HTTP status from upstream (200, 404, 5xx, etc.)
+
+  // Blob references (hashes of cached artifacts this metadata refers to)
+  // Must be deduplicated and in canonical format: "sha256:<hex>" or "blake3:<hex>"
+  repeated string blob_refs = 20;
+
+  // Extensibility escape hatch (use sparingly)
+  // Max 10 keys, max 1KB total size enforced at write time
+  map<string, bytes> attributes = 30;
+}
+
+// Closed set of content types to prevent drift
+enum ContentType {
+  CONTENT_TYPE_UNSPECIFIED = 0;
+  CONTENT_TYPE_JSON = 1;          // application/json
+  CONTENT_TYPE_XML = 2;           // application/xml
+  CONTENT_TYPE_TEXT = 3;          // text/plain
+  CONTENT_TYPE_OCTET_STREAM = 4;  // application/octet-stream
+}
+
+// Closed set of encodings
+enum ContentEncoding {
+  CONTENT_ENCODING_IDENTITY = 0;  // no compression
+  CONTENT_ENCODING_ZSTD = 1;      // zstandard compression
+}

@@ -20,3 +20,11 @@ type ExpiryEntry struct {
 	LastAccess time.Time `json:"last_access"`
 	Size       int64     `json:"size"`
 }
+
+// EnvelopeExpiryEntry contains metadata about envelope entries for expiration tracking.
+type EnvelopeExpiryEntry struct {
+	Protocol  string    `json:"protocol"`
+	Kind      string    `json:"kind"`
+	Key       string    `json:"key"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
