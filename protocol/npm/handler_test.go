@@ -15,6 +15,20 @@ import (
 	"github.com/wolfeidau/content-cache/store/metadb"
 )
 
+// setupMetaDB creates a BoltDB with EnvelopeIndex instances for testing.
+// Returns the database, index, and a cleanup function that closes the database.
+func setupMetaDB(t *testing.T, tmpDir string) (*metadb.BoltDB, *Index, func()) {
+	t.Helper()
+	db := metadb.NewBoltDB()
+	require.NoError(t, db.Open(filepath.Join(tmpDir, "meta.db")))
+	metadataIdx, err := metadb.NewEnvelopeIndex(db, "npm", "metadata", 24*time.Hour)
+	require.NoError(t, err)
+	cacheIdx, err := metadb.NewEnvelopeIndex(db, "npm", "cache", 24*time.Hour)
+	require.NoError(t, err)
+	idx := NewIndex(metadataIdx, cacheIdx)
+	return db, idx, func() { _ = db.Close() }
+}
+
 func newTestHandler(t *testing.T, upstreamServer *httptest.Server) (*Handler, func()) {
 	t.Helper()
 	// Use a manual temp dir instead of t.TempDir() to avoid race with async goroutines
@@ -24,14 +38,7 @@ func newTestHandler(t *testing.T, upstreamServer *httptest.Server) (*Handler, fu
 	require.NoError(t, err)
 	cafs := store.NewCAFS(b)
 
-	// Create metadb for index using EnvelopeIndex
-	db := metadb.NewBoltDB()
-	require.NoError(t, db.Open(filepath.Join(tmpDir, "meta.db")))
-	metadataIdx, err := metadb.NewEnvelopeIndex(db, "npm", "metadata", 24*time.Hour)
-	require.NoError(t, err)
-	cacheIdx, err := metadb.NewEnvelopeIndex(db, "npm", "cache", 24*time.Hour)
-	require.NoError(t, err)
-	idx := NewIndex(metadataIdx, cacheIdx)
+	_, idx, closeDB := setupMetaDB(t, tmpDir)
 
 	opts := []UpstreamOption{}
 	if upstreamServer != nil {
@@ -43,7 +50,7 @@ func newTestHandler(t *testing.T, upstreamServer *httptest.Server) (*Handler, fu
 	return h, func() {
 		// Wait for background goroutines to complete before cleanup
 		h.Close()
-		_ = db.Close()
+		closeDB()
 		_ = os.RemoveAll(tmpDir)
 	}
 }

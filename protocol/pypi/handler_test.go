@@ -15,6 +15,18 @@ import (
 	"github.com/wolfeidau/content-cache/store/metadb"
 )
 
+// setupMetaDB creates a BoltDB with an EnvelopeIndex for testing.
+// Returns the database, index, and a cleanup function that closes the database.
+func setupMetaDB(t *testing.T, tmpDir string) (*metadb.BoltDB, *Index, func()) {
+	t.Helper()
+	db := metadb.NewBoltDB()
+	require.NoError(t, db.Open(filepath.Join(tmpDir, "meta.db")))
+	projectIdx, err := metadb.NewEnvelopeIndex(db, "pypi", "project", 5*time.Minute)
+	require.NoError(t, err)
+	idx := NewIndex(projectIdx)
+	return db, idx, func() { _ = db.Close() }
+}
+
 func newTestHandler(t *testing.T, upstreamServer *httptest.Server) (*Handler, func()) {
 	t.Helper()
 	// Use a manual temp dir instead of t.TempDir() to avoid race with async goroutines
@@ -24,12 +36,7 @@ func newTestHandler(t *testing.T, upstreamServer *httptest.Server) (*Handler, fu
 	require.NoError(t, err)
 	cafs := store.NewCAFS(b)
 
-	// Create metadb for index using EnvelopeIndex
-	db := metadb.NewBoltDB()
-	require.NoError(t, db.Open(filepath.Join(tmpDir, "meta.db")))
-	projectIdx, err := metadb.NewEnvelopeIndex(db, "pypi", "project", 5*time.Minute)
-	require.NoError(t, err)
-	idx := NewIndex(projectIdx)
+	_, idx, closeDB := setupMetaDB(t, tmpDir)
 
 	opts := []UpstreamOption{}
 	if upstreamServer != nil {
@@ -40,7 +47,7 @@ func newTestHandler(t *testing.T, upstreamServer *httptest.Server) (*Handler, fu
 	h := NewHandler(idx, cafs, WithUpstream(upstream))
 	return h, func() {
 		h.Close()
-		_ = db.Close()
+		closeDB()
 		_ = os.RemoveAll(tmpDir)
 	}
 }
@@ -298,13 +305,8 @@ func TestHandlerFile(t *testing.T) {
 	require.NoError(t, err)
 	cafs := store.NewCAFS(b)
 
-	// Create metadb for index using EnvelopeIndex
-	db := metadb.NewBoltDB()
-	require.NoError(t, db.Open(filepath.Join(tmpDir, "meta.db")))
-	defer func() { _ = db.Close() }()
-	projectIdx, err := metadb.NewEnvelopeIndex(db, "pypi", "project", 5*time.Minute)
-	require.NoError(t, err)
-	idx := NewIndex(projectIdx)
+	_, idx, closeDB := setupMetaDB(t, tmpDir)
+	defer closeDB()
 
 	pypiUpstream := NewUpstream(WithSimpleURL(upstream.URL + "/simple/"))
 	h := NewHandler(idx, cafs, WithUpstream(pypiUpstream))
@@ -377,13 +379,8 @@ func TestHandlerIntegrityCheckFailure(t *testing.T) {
 	require.NoError(t, err)
 	cafs := store.NewCAFS(b)
 
-	// Create metadb for index using EnvelopeIndex
-	db := metadb.NewBoltDB()
-	require.NoError(t, db.Open(filepath.Join(tmpDir, "meta.db")))
-	defer func() { _ = db.Close() }()
-	projectIdx, err := metadb.NewEnvelopeIndex(db, "pypi", "project", 5*time.Minute)
-	require.NoError(t, err)
-	idx := NewIndex(projectIdx)
+	_, idx, closeDB := setupMetaDB(t, tmpDir)
+	defer closeDB()
 
 	pypiUpstream := NewUpstream(WithSimpleURL(upstream.URL + "/simple/"))
 	h := NewHandler(idx, cafs, WithUpstream(pypiUpstream))
@@ -467,13 +464,8 @@ func TestHandlerHEADRequest(t *testing.T) {
 	require.NoError(t, err)
 	cafs := store.NewCAFS(b)
 
-	// Create metadb for index using EnvelopeIndex
-	db := metadb.NewBoltDB()
-	require.NoError(t, db.Open(filepath.Join(tmpDir, "meta.db")))
-	defer func() { _ = db.Close() }()
-	projectIdx, err := metadb.NewEnvelopeIndex(db, "pypi", "project", 5*time.Minute)
-	require.NoError(t, err)
-	idx := NewIndex(projectIdx)
+	_, idx, closeDB := setupMetaDB(t, tmpDir)
+	defer closeDB()
 
 	pypiUpstream := NewUpstream(WithSimpleURL(upstream.URL + "/simple/"))
 	h := NewHandler(idx, cafs, WithUpstream(pypiUpstream))

@@ -81,9 +81,11 @@ func (idx *Index) SetFileHash(ctx context.Context, project, filename string, has
 
 	key := NormalizeProjectName(project)
 
-	// Get or create cached project
+	// Get or create cached project: fetch existing project if present, otherwise
+	// start with an empty struct. We ignore ErrNotFound because this is a
+	// get-or-create pattern - if the project doesn't exist, we'll create it below.
 	var cached CachedProject
-	_ = idx.projectIndex.GetJSON(ctx, key, &cached) // Ignore not found
+	_ = idx.projectIndex.GetJSON(ctx, key, &cached)
 
 	if cached.Name == "" {
 		cached.Name = project
