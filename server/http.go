@@ -234,8 +234,16 @@ func New(cfg Config) (*Server, error) {
 	}
 	ociHandler := oci.NewHandler(ociIndex, cafsStore, ociHandlerOpts...)
 
-	// Initialize PyPI components
-	pypiIndex := pypi.NewIndex(fsBackend)
+	// Initialize PyPI components using metadb EnvelopeIndex
+	pypiProjectTTL := cfg.PyPIMetadataTTL
+	if pypiProjectTTL == 0 {
+		pypiProjectTTL = 5 * time.Minute
+	}
+	pypiProjectIndex, err := metadb.NewEnvelopeIndex(boltDB, "pypi", "project", pypiProjectTTL)
+	if err != nil {
+		return nil, fmt.Errorf("creating pypi project index: %w", err)
+	}
+	pypiIndex := pypi.NewIndex(pypiProjectIndex)
 	pypiUpstreamOpts := []pypi.UpstreamOption{}
 	if cfg.UpstreamPyPI != "" {
 		pypiUpstreamOpts = append(pypiUpstreamOpts, pypi.WithSimpleURL(cfg.UpstreamPyPI))

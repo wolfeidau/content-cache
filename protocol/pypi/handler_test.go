@@ -4,12 +4,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/wolfeidau/content-cache/backend"
 	"github.com/wolfeidau/content-cache/store"
+	"github.com/wolfeidau/content-cache/store/metadb"
 )
 
 func newTestHandler(t *testing.T, upstreamServer *httptest.Server) (*Handler, func()) {
@@ -20,7 +23,13 @@ func newTestHandler(t *testing.T, upstreamServer *httptest.Server) (*Handler, fu
 	b, err := backend.NewFilesystem(tmpDir)
 	require.NoError(t, err)
 	cafs := store.NewCAFS(b)
-	idx := NewIndex(b)
+
+	// Create metadb for index using EnvelopeIndex
+	db := metadb.NewBoltDB()
+	require.NoError(t, db.Open(filepath.Join(tmpDir, "meta.db")))
+	projectIdx, err := metadb.NewEnvelopeIndex(db, "pypi", "project", 5*time.Minute)
+	require.NoError(t, err)
+	idx := NewIndex(projectIdx)
 
 	opts := []UpstreamOption{}
 	if upstreamServer != nil {
@@ -31,6 +40,7 @@ func newTestHandler(t *testing.T, upstreamServer *httptest.Server) (*Handler, fu
 	h := NewHandler(idx, cafs, WithUpstream(upstream))
 	return h, func() {
 		h.Close()
+		_ = db.Close()
 		_ = os.RemoveAll(tmpDir)
 	}
 }
@@ -287,7 +297,14 @@ func TestHandlerFile(t *testing.T) {
 	b, err := backend.NewFilesystem(tmpDir)
 	require.NoError(t, err)
 	cafs := store.NewCAFS(b)
-	idx := NewIndex(b)
+
+	// Create metadb for index using EnvelopeIndex
+	db := metadb.NewBoltDB()
+	require.NoError(t, db.Open(filepath.Join(tmpDir, "meta.db")))
+	defer func() { _ = db.Close() }()
+	projectIdx, err := metadb.NewEnvelopeIndex(db, "pypi", "project", 5*time.Minute)
+	require.NoError(t, err)
+	idx := NewIndex(projectIdx)
 
 	pypiUpstream := NewUpstream(WithSimpleURL(upstream.URL + "/simple/"))
 	h := NewHandler(idx, cafs, WithUpstream(pypiUpstream))
@@ -359,7 +376,14 @@ func TestHandlerIntegrityCheckFailure(t *testing.T) {
 	b, err := backend.NewFilesystem(tmpDir)
 	require.NoError(t, err)
 	cafs := store.NewCAFS(b)
-	idx := NewIndex(b)
+
+	// Create metadb for index using EnvelopeIndex
+	db := metadb.NewBoltDB()
+	require.NoError(t, db.Open(filepath.Join(tmpDir, "meta.db")))
+	defer func() { _ = db.Close() }()
+	projectIdx, err := metadb.NewEnvelopeIndex(db, "pypi", "project", 5*time.Minute)
+	require.NoError(t, err)
+	idx := NewIndex(projectIdx)
 
 	pypiUpstream := NewUpstream(WithSimpleURL(upstream.URL + "/simple/"))
 	h := NewHandler(idx, cafs, WithUpstream(pypiUpstream))
@@ -442,7 +466,14 @@ func TestHandlerHEADRequest(t *testing.T) {
 	b, err := backend.NewFilesystem(tmpDir)
 	require.NoError(t, err)
 	cafs := store.NewCAFS(b)
-	idx := NewIndex(b)
+
+	// Create metadb for index using EnvelopeIndex
+	db := metadb.NewBoltDB()
+	require.NoError(t, db.Open(filepath.Join(tmpDir, "meta.db")))
+	defer func() { _ = db.Close() }()
+	projectIdx, err := metadb.NewEnvelopeIndex(db, "pypi", "project", 5*time.Minute)
+	require.NoError(t, err)
+	idx := NewIndex(projectIdx)
 
 	pypiUpstream := NewUpstream(WithSimpleURL(upstream.URL + "/simple/"))
 	h := NewHandler(idx, cafs, WithUpstream(pypiUpstream))
