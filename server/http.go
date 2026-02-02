@@ -188,9 +188,21 @@ func New(cfg Config) (*Server, error) {
 		goproxy.WithLogger(cfg.Logger.With("component", "goproxy")),
 	)
 
-	// Initialize npm components using metadb
-	npmMetaIndex := metadb.NewIndex(metaDB, "npm", 24*time.Hour)
-	npmIndex := npm.NewIndex(npmMetaIndex)
+	// Initialize npm components using metadb EnvelopeIndex
+	// Create separate indexes for metadata and cache (with blob refs)
+	boltDB, ok := metaDB.(*metadb.BoltDB)
+	if !ok {
+		return nil, fmt.Errorf("metaDB must be *metadb.BoltDB for envelope storage")
+	}
+	npmMetadataIndex, err := metadb.NewEnvelopeIndex(boltDB, "npm", "metadata", 24*time.Hour)
+	if err != nil {
+		return nil, fmt.Errorf("creating npm metadata index: %w", err)
+	}
+	npmCacheIndex, err := metadb.NewEnvelopeIndex(boltDB, "npm", "cache", 24*time.Hour)
+	if err != nil {
+		return nil, fmt.Errorf("creating npm cache index: %w", err)
+	}
+	npmIndex := npm.NewIndex(npmMetadataIndex, npmCacheIndex)
 	npmUpstreamOpts := []npm.UpstreamOption{}
 	if cfg.UpstreamNPMRegistry != "" {
 		npmUpstreamOpts = append(npmUpstreamOpts, npm.WithRegistryURL(cfg.UpstreamNPMRegistry))

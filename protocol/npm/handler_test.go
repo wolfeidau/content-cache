@@ -24,11 +24,14 @@ func newTestHandler(t *testing.T, upstreamServer *httptest.Server) (*Handler, fu
 	require.NoError(t, err)
 	cafs := store.NewCAFS(b)
 
-	// Create metadb for index
+	// Create metadb for index using EnvelopeIndex
 	db := metadb.NewBoltDB()
 	require.NoError(t, db.Open(filepath.Join(tmpDir, "meta.db")))
-	metaIdx := metadb.NewIndex(db, "npm", 24*time.Hour)
-	idx := NewIndex(metaIdx)
+	metadataIdx, err := metadb.NewEnvelopeIndex(db, "npm", "metadata", 24*time.Hour)
+	require.NoError(t, err)
+	cacheIdx, err := metadb.NewEnvelopeIndex(db, "npm", "cache", 24*time.Hour)
+	require.NoError(t, err)
+	idx := NewIndex(metadataIdx, cacheIdx)
 
 	opts := []UpstreamOption{}
 	if upstreamServer != nil {
