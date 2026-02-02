@@ -2,35 +2,26 @@ package pypi
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"path"
-	"strings"
 	"sync"
 	"time"
 
 	contentcache "github.com/wolfeidau/content-cache"
-	"github.com/wolfeidau/content-cache/backend"
+	"github.com/wolfeidau/content-cache/store/metadb"
 )
 
-const (
-	// pypiPrefix is the storage prefix for PyPI package data.
-	pypiPrefix = "pypi"
-)
-
-// Index manages the PyPI package index.
+// Index manages the PyPI package index using metadb envelope storage.
 type Index struct {
-	backend backend.Backend
-	mu      sync.RWMutex
-	now     func() time.Time
+	projectIndex *metadb.EnvelopeIndex // protocol="pypi", kind="project"
+	mu           sync.RWMutex
+	now          func() time.Time
 }
 
-// NewIndex creates a new PyPI package index.
-func NewIndex(b backend.Backend) *Index {
+// NewIndex creates a new PyPI package index using EnvelopeIndex.
+// projectIndex: protocol="pypi", kind="project" for CachedProject with file hashes
+func NewIndex(projectIndex *metadb.EnvelopeIndex) *Index {
 	return &Index{
-		backend: b,
-		now:     time.Now,
+		projectIndex: projectIndex,
+		now:          time.Now,
 	}
 }
 
@@ -39,26 +30,18 @@ func (idx *Index) GetCachedProject(ctx context.Context, name string) (*CachedPro
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	normalized := NormalizeProjectName(name)
-	key := idx.projectKey(normalized)
-	rc, err := idx.backend.Read(ctx, key)
-	if err != nil {
-		if errors.Is(err, backend.ErrNotFound) {
+	key := NormalizeProjectName(name)
+	var cached CachedProject
+	if err := idx.projectIndex.GetJSON(ctx, key, &cached); err != nil {
+		if err == metadb.ErrNotFound {
 			return nil, ErrNotFound
 		}
-		return nil, fmt.Errorf("reading project info: %w", err)
+		return nil, err
 	}
-	defer func() { _ = rc.Close() }()
-
-	var cached CachedProject
-	if err := json.NewDecoder(rc).Decode(&cached); err != nil {
-		return nil, fmt.Errorf("decoding project info: %w", err)
-	}
-
 	return &cached, nil
 }
 
-// PutCachedProject stores cached project info.
+// PutCachedProject stores cached project info with blob references.
 func (idx *Index) PutCachedProject(ctx context.Context, project *CachedProject) error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
@@ -68,18 +51,12 @@ func (idx *Index) PutCachedProject(ctx context.Context, project *CachedProject) 
 		project.CachedAt = project.UpdatedAt
 	}
 
-	normalized := NormalizeProjectName(project.Name)
-	key := idx.projectKey(normalized)
-	data, err := json.Marshal(project)
-	if err != nil {
-		return fmt.Errorf("encoding project info: %w", err)
-	}
+	key := NormalizeProjectName(project.Name)
 
-	if err := idx.backend.Write(ctx, key, strings.NewReader(string(data))); err != nil {
-		return fmt.Errorf("writing project info: %w", err)
-	}
+	// Collect all blob refs from cached files
+	refs := collectBlobRefs(project)
 
-	return nil
+	return idx.projectIndex.PutJSON(ctx, key, project, refs)
 }
 
 // GetFileHash retrieves the content hash for a specific file.
@@ -102,24 +79,13 @@ func (idx *Index) SetFileHash(ctx context.Context, project, filename string, has
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	normalized := NormalizeProjectName(project)
-	key := idx.projectKey(normalized)
+	key := NormalizeProjectName(project)
 
-	// Get or create cached project
+	// Get or create cached project: fetch existing project if present, otherwise
+	// start with an empty struct. We ignore ErrNotFound because this is a
+	// get-or-create pattern - if the project doesn't exist, we'll create it below.
 	var cached CachedProject
-	rc, err := idx.backend.Read(ctx, key)
-	if err == nil {
-		decodeErr := json.NewDecoder(rc).Decode(&cached)
-		_ = rc.Close()
-		// If decode fails, we'll start fresh with an empty project
-		// This handles corrupted cache entries gracefully
-		if decodeErr != nil {
-			cached = CachedProject{}
-		}
-	} else if !errors.Is(err, backend.ErrNotFound) {
-		// Unexpected read error (not just missing cache entry)
-		return fmt.Errorf("reading existing project info: %w", err)
-	}
+	_ = idx.projectIndex.GetJSON(ctx, key, &cached)
 
 	if cached.Name == "" {
 		cached.Name = project
@@ -140,16 +106,10 @@ func (idx *Index) SetFileHash(ctx context.Context, project, filename string, has
 	}
 	cached.UpdatedAt = idx.now()
 
-	data, err := json.Marshal(&cached)
-	if err != nil {
-		return fmt.Errorf("encoding project info: %w", err)
-	}
+	// Collect all blob refs
+	refs := collectBlobRefs(&cached)
 
-	if err := idx.backend.Write(ctx, key, strings.NewReader(string(data))); err != nil {
-		return fmt.Errorf("writing project info: %w", err)
-	}
-
-	return nil
+	return idx.projectIndex.PutJSON(ctx, key, &cached, refs)
 }
 
 // GetCachedFile retrieves cached file info for a specific file.
@@ -172,9 +132,9 @@ func (idx *Index) DeleteProject(ctx context.Context, name string) error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	normalized := NormalizeProjectName(name)
-	if err := idx.backend.Delete(ctx, idx.projectKey(normalized)); err != nil && !errors.Is(err, backend.ErrNotFound) {
-		return fmt.Errorf("deleting project: %w", err)
+	key := NormalizeProjectName(name)
+	if err := idx.projectIndex.Delete(ctx, key); err != nil && err != metadb.ErrNotFound {
+		return err
 	}
 
 	return nil
@@ -185,23 +145,13 @@ func (idx *Index) ListProjects(ctx context.Context) ([]string, error) {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	keys, err := idx.backend.List(ctx, path.Join(pypiPrefix, "projects"))
+	keys, err := idx.projectIndex.List(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("listing projects: %w", err)
+		return nil, err
 	}
 
-	var names []string
-	for _, key := range keys {
-		// Extract project name from key
-		// Key format: pypi/projects/{normalized-name}.json
-		name := strings.TrimPrefix(key, path.Join(pypiPrefix, "projects")+"/")
-		name = strings.TrimSuffix(name, ".json")
-		if name != "" {
-			names = append(names, name)
-		}
-	}
-
-	return names, nil
+	// Keys are already normalized project names
+	return keys, nil
 }
 
 // IsExpired checks if a cached project has exceeded the TTL.
@@ -212,8 +162,18 @@ func (idx *Index) IsExpired(project *CachedProject, ttl time.Duration) bool {
 	return idx.now().Sub(project.UpdatedAt) > ttl
 }
 
-// Key generation helpers
+// collectBlobRefs extracts all blob hashes from a CachedProject.
+// Returns refs in canonical format: "blake3:<hex>"
+func collectBlobRefs(project *CachedProject) []string {
+	if project == nil || project.Files == nil {
+		return nil
+	}
 
-func (idx *Index) projectKey(normalizedName string) string {
-	return path.Join(pypiPrefix, "projects", normalizedName+".json")
+	refs := make([]string, 0, len(project.Files))
+	for _, file := range project.Files {
+		if file != nil && !file.ContentHash.IsZero() {
+			refs = append(refs, "blake3:"+file.ContentHash.String())
+		}
+	}
+	return refs
 }
