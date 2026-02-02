@@ -10,23 +10,28 @@ import (
 )
 
 const (
-	// Key prefixes for npm metadata in metadb
-	prefixMetadata = "metadata/" // Raw JSON metadata from upstream
-	prefixCache    = "cache/"    // CachedPackage with tarball hashes
+	// kindMetadata is the metadb kind for raw JSON metadata from upstream
+	kindMetadata = "metadata"
+	// kindCache is the metadb kind for CachedPackage with tarball hashes
+	kindCache = "cache"
 )
 
-// Index manages the NPM package index using metadb.
+// Index manages the NPM package index using metadb envelope storage.
 type Index struct {
-	db  *metadb.Index
-	mu  sync.RWMutex
-	now func() time.Time
+	metadataIndex *metadb.EnvelopeIndex // protocol="npm", kind="metadata"
+	cacheIndex    *metadb.EnvelopeIndex // protocol="npm", kind="cache"
+	mu            sync.RWMutex
+	now           func() time.Time
 }
 
-// NewIndex creates a new NPM package index.
-func NewIndex(db *metadb.Index) *Index {
+// NewIndex creates a new NPM package index using EnvelopeIndex instances.
+// metadataIndex: protocol="npm", kind="metadata" for raw JSON from upstream
+// cacheIndex: protocol="npm", kind="cache" for CachedPackage with tarball hashes
+func NewIndex(metadataIndex, cacheIndex *metadb.EnvelopeIndex) *Index {
 	return &Index{
-		db:  db,
-		now: time.Now,
+		metadataIndex: metadataIndex,
+		cacheIndex:    cacheIndex,
+		now:           time.Now,
 	}
 }
 
@@ -35,8 +40,8 @@ func (idx *Index) GetPackageMetadata(ctx context.Context, name string) ([]byte, 
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	key := prefixMetadata + encodePackageName(name)
-	data, err := idx.db.Get(ctx, key)
+	key := encodePackageName(name)
+	data, err := idx.metadataIndex.Get(ctx, key)
 	if err != nil {
 		if err == metadb.ErrNotFound {
 			return nil, ErrNotFound
@@ -51,8 +56,8 @@ func (idx *Index) PutPackageMetadata(ctx context.Context, name string, metadata 
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	key := prefixMetadata + encodePackageName(name)
-	return idx.db.Put(ctx, key, metadata)
+	key := encodePackageName(name)
+	return idx.metadataIndex.Put(ctx, key, metadata, metadb.ContentType_CONTENT_TYPE_JSON, nil)
 }
 
 // GetCachedPackage retrieves the cached package info including tarball hashes.
@@ -60,9 +65,9 @@ func (idx *Index) GetCachedPackage(ctx context.Context, name string) (*CachedPac
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	key := prefixCache + encodePackageName(name)
+	key := encodePackageName(name)
 	var cached CachedPackage
-	if err := idx.db.GetJSON(ctx, key, &cached); err != nil {
+	if err := idx.cacheIndex.GetJSON(ctx, key, &cached); err != nil {
 		if err == metadb.ErrNotFound {
 			return nil, ErrNotFound
 		}
@@ -81,12 +86,12 @@ func (idx *Index) PutCachedPackage(ctx context.Context, pkg *CachedPackage) erro
 		pkg.CachedAt = pkg.UpdatedAt
 	}
 
-	key := prefixCache + encodePackageName(pkg.Name)
+	key := encodePackageName(pkg.Name)
 
 	// Collect all blob refs from cached versions
 	refs := collectBlobRefs(pkg)
 
-	return idx.db.PutJSONWithRefs(ctx, key, pkg, refs)
+	return idx.cacheIndex.PutJSON(ctx, key, pkg, refs)
 }
 
 // GetVersionTarballHash retrieves the tarball hash for a specific version.
@@ -109,11 +114,11 @@ func (idx *Index) SetVersionTarballHash(ctx context.Context, name, version strin
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	key := prefixCache + encodePackageName(name)
+	key := encodePackageName(name)
 
 	// Get or create cached package
 	var cached CachedPackage
-	_ = idx.db.GetJSON(ctx, key, &cached) // Ignore not found
+	_ = idx.cacheIndex.GetJSON(ctx, key, &cached) // Ignore not found
 
 	if cached.Name == "" {
 		cached.Name = name
@@ -136,7 +141,7 @@ func (idx *Index) SetVersionTarballHash(ctx context.Context, name, version strin
 	// Collect all blob refs
 	refs := collectBlobRefs(&cached)
 
-	return idx.db.PutJSONWithRefs(ctx, key, &cached, refs)
+	return idx.cacheIndex.PutJSON(ctx, key, &cached, refs)
 }
 
 // DeletePackage removes all cached data for a package.
@@ -147,12 +152,12 @@ func (idx *Index) DeletePackage(ctx context.Context, name string) error {
 	encodedName := encodePackageName(name)
 
 	// Delete metadata
-	if err := idx.db.Delete(ctx, prefixMetadata+encodedName); err != nil && err != metadb.ErrNotFound {
+	if err := idx.metadataIndex.Delete(ctx, encodedName); err != nil && err != metadb.ErrNotFound {
 		return err
 	}
 
-	// Delete cache info (with blob refs cleanup)
-	if err := idx.db.DeleteWithRefs(ctx, prefixCache+encodedName); err != nil && err != metadb.ErrNotFound {
+	// Delete cache info (with blob refs cleanup via EnvelopeIndex)
+	if err := idx.cacheIndex.Delete(ctx, encodedName); err != nil && err != metadb.ErrNotFound {
 		return err
 	}
 
@@ -164,19 +169,16 @@ func (idx *Index) ListPackages(ctx context.Context) ([]string, error) {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	keys, err := idx.db.List(ctx)
+	// List keys from cache index (not metadata - we want packages with cached tarballs)
+	keys, err := idx.cacheIndex.List(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	var names []string
 	for _, key := range keys {
-		// Only include cache keys (not metadata keys)
-		if len(key) > len(prefixCache) && key[:len(prefixCache)] == prefixCache {
-			encodedName := key[len(prefixCache):]
-			if decoded, err := decodePackageName(encodedName); err == nil {
-				names = append(names, decoded)
-			}
+		if decoded, err := decodePackageName(key); err == nil {
+			names = append(names, decoded)
 		}
 	}
 
@@ -184,6 +186,7 @@ func (idx *Index) ListPackages(ctx context.Context) ([]string, error) {
 }
 
 // collectBlobRefs extracts all blob hashes from a CachedPackage.
+// Returns refs in canonical format: "blake3:<hex>"
 func collectBlobRefs(pkg *CachedPackage) []string {
 	if pkg == nil || pkg.Versions == nil {
 		return nil
@@ -192,7 +195,8 @@ func collectBlobRefs(pkg *CachedPackage) []string {
 	refs := make([]string, 0, len(pkg.Versions))
 	for _, ver := range pkg.Versions {
 		if ver != nil && !ver.TarballHash.IsZero() {
-			refs = append(refs, ver.TarballHash.String())
+			// Format as blake3:<hex> for envelope validation
+			refs = append(refs, "blake3:"+ver.TarballHash.String())
 		}
 	}
 	return refs

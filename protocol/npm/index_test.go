@@ -11,7 +11,7 @@ import (
 	"github.com/wolfeidau/content-cache/store/metadb"
 )
 
-func newTestIndex(t *testing.T) *Index {
+func newTestIndex(t *testing.T) (*Index, *metadb.BoltDB) {
 	t.Helper()
 	tmpDir := t.TempDir()
 
@@ -19,12 +19,16 @@ func newTestIndex(t *testing.T) *Index {
 	require.NoError(t, db.Open(filepath.Join(tmpDir, "test.db")))
 	t.Cleanup(func() { _ = db.Close() })
 
-	idx := metadb.NewIndex(db, "npm", 24*time.Hour)
-	return NewIndex(idx)
+	metadataIdx, err := metadb.NewEnvelopeIndex(db, "npm", kindMetadata, 24*time.Hour)
+	require.NoError(t, err)
+	cacheIdx, err := metadb.NewEnvelopeIndex(db, "npm", kindCache, 24*time.Hour)
+	require.NoError(t, err)
+
+	return NewIndex(metadataIdx, cacheIdx), db
 }
 
 func TestIndexPackageMetadata(t *testing.T) {
-	idx := newTestIndex(t)
+	idx, _ := newTestIndex(t)
 
 	ctx := context.Background()
 	name := "lodash"
@@ -45,7 +49,7 @@ func TestIndexPackageMetadata(t *testing.T) {
 }
 
 func TestIndexScopedPackageMetadata(t *testing.T) {
-	idx := newTestIndex(t)
+	idx, _ := newTestIndex(t)
 
 	ctx := context.Background()
 	name := "@babel/core"
@@ -62,7 +66,7 @@ func TestIndexScopedPackageMetadata(t *testing.T) {
 }
 
 func TestIndexCachedPackage(t *testing.T) {
-	idx := newTestIndex(t)
+	idx, _ := newTestIndex(t)
 
 	ctx := context.Background()
 	name := "test-pkg"
@@ -92,7 +96,7 @@ func TestIndexCachedPackage(t *testing.T) {
 }
 
 func TestIndexVersionTarballHash(t *testing.T) {
-	idx := newTestIndex(t)
+	idx, _ := newTestIndex(t)
 
 	ctx := context.Background()
 	name := "test-pkg"
@@ -120,7 +124,7 @@ func TestIndexVersionTarballHash(t *testing.T) {
 }
 
 func TestIndexDeletePackage(t *testing.T) {
-	idx := newTestIndex(t)
+	idx, _ := newTestIndex(t)
 
 	ctx := context.Background()
 	name := "delete-me"
@@ -143,7 +147,7 @@ func TestIndexDeletePackage(t *testing.T) {
 }
 
 func TestIndexListPackages(t *testing.T) {
-	idx := newTestIndex(t)
+	idx, _ := newTestIndex(t)
 
 	ctx := context.Background()
 
@@ -169,22 +173,16 @@ func TestIndexListPackages(t *testing.T) {
 }
 
 func TestIndexBlobRefTracking(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	db := metadb.NewBoltDB()
-	require.NoError(t, db.Open(filepath.Join(tmpDir, "test.db")))
-	t.Cleanup(func() { _ = db.Close() })
-
-	metaIdx := metadb.NewIndex(db, "npm", 24*time.Hour)
-	idx := NewIndex(metaIdx)
+	idx, db := newTestIndex(t)
 
 	ctx := context.Background()
 	name := "ref-test"
 	hash := contentcache.HashBytes([]byte("tarball content"))
 
-	// Create the blob entry first
+	// Create the blob entry first with blake3: prefix (matches collectBlobRefs format)
+	hashWithPrefix := "blake3:" + hash.String()
 	require.NoError(t, db.PutBlob(ctx, &metadb.BlobEntry{
-		Hash:     hash.String(),
+		Hash:     hashWithPrefix,
 		Size:     100,
 		RefCount: 0,
 	}))
@@ -194,16 +192,15 @@ func TestIndexBlobRefTracking(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify ref was incremented
-	blob, err := db.GetBlob(ctx, hash.String())
+	blob, err := db.GetBlob(ctx, hashWithPrefix)
 	require.NoError(t, err)
 	require.Equal(t, 1, blob.RefCount)
 
-	// Add another version with same hash - ref should stay at 1 (idempotent)
-	// Actually, different version means different ref, but same tarball hash
-	// The refs are per-meta-key, so adding same hash again increments
+	// Add another version with different hash
 	hash2 := contentcache.HashBytes([]byte("tarball content 2"))
+	hash2WithPrefix := "blake3:" + hash2.String()
 	require.NoError(t, db.PutBlob(ctx, &metadb.BlobEntry{
-		Hash:     hash2.String(),
+		Hash:     hash2WithPrefix,
 		Size:     200,
 		RefCount: 0,
 	}))
@@ -212,11 +209,11 @@ func TestIndexBlobRefTracking(t *testing.T) {
 	require.NoError(t, err)
 
 	// hash should still be 1, hash2 should be 1
-	blob, err = db.GetBlob(ctx, hash.String())
+	blob, err = db.GetBlob(ctx, hashWithPrefix)
 	require.NoError(t, err)
 	require.Equal(t, 1, blob.RefCount)
 
-	blob2, err := db.GetBlob(ctx, hash2.String())
+	blob2, err := db.GetBlob(ctx, hash2WithPrefix)
 	require.NoError(t, err)
 	require.Equal(t, 1, blob2.RefCount)
 
@@ -224,11 +221,11 @@ func TestIndexBlobRefTracking(t *testing.T) {
 	err = idx.DeletePackage(ctx, name)
 	require.NoError(t, err)
 
-	blob, err = db.GetBlob(ctx, hash.String())
+	blob, err = db.GetBlob(ctx, hashWithPrefix)
 	require.NoError(t, err)
 	require.Equal(t, 0, blob.RefCount)
 
-	blob2, err = db.GetBlob(ctx, hash2.String())
+	blob2, err = db.GetBlob(ctx, hash2WithPrefix)
 	require.NoError(t, err)
 	require.Equal(t, 0, blob2.RefCount)
 }

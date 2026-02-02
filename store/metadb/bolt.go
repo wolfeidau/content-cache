@@ -15,6 +15,7 @@ import (
 // BoltDB implements MetaDB using bbolt.
 type BoltDB struct {
 	db     *bbolt.DB
+	codec  *EnvelopeCodec // shared codec for all EnvelopeIndex instances
 	logger *slog.Logger
 	now    func() time.Time
 	noSync bool // disables fsync per transaction (for testing only)
@@ -74,6 +75,14 @@ func (b *BoltDB) Open(path string) error {
 		return err
 	}
 
+	// Initialize shared codec for envelope operations
+	codec, err := NewEnvelopeCodec()
+	if err != nil {
+		_ = db.Close()
+		return fmt.Errorf("creating envelope codec: %w", err)
+	}
+	b.codec = codec
+
 	b.logger.Debug("opened metadb", "path", path, "noSync", b.noSync)
 	return nil
 }
@@ -103,13 +112,22 @@ func (b *BoltDB) createBuckets() error {
 	})
 }
 
-// Close closes the database.
+// Close closes the database and releases resources.
 func (b *BoltDB) Close() error {
+	if b.codec != nil {
+		b.codec.Close()
+		b.codec = nil
+	}
 	if b.db == nil {
 		return nil
 	}
 	b.logger.Debug("closing metadb")
 	return b.db.Close()
+}
+
+// Codec returns the shared envelope codec.
+func (b *BoltDB) Codec() *EnvelopeCodec {
+	return b.codec
 }
 
 // GetMeta retrieves protocol metadata.

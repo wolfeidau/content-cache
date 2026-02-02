@@ -20,7 +20,6 @@ func setupEnvelopeIndex(t *testing.T, protocol, kind string, ttl time.Duration) 
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
-		idx.Close()
 		_ = db.Close()
 	})
 
@@ -222,11 +221,9 @@ func TestEnvelopeIndex_MultipleKinds(t *testing.T) {
 
 	modIdx, err := NewEnvelopeIndex(db, "goproxy", "mod", time.Hour)
 	require.NoError(t, err)
-	defer modIdx.Close()
 
 	infoIdx, err := NewEnvelopeIndex(db, "goproxy", "info", time.Hour)
 	require.NoError(t, err)
-	defer infoIdx.Close()
 
 	ctx := context.Background()
 
