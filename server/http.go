@@ -178,8 +178,26 @@ func New(cfg Config) (*Server, error) {
 	// Initialize CAFS store with MetaDB tracking
 	cafsStore := store.NewCAFS(fsBackend, store.WithMetaDB(metaDB))
 
-	// Initialize goproxy components
-	goIndex := goproxy.NewIndex(fsBackend)
+	// Get BoltDB for EnvelopeIndex creation (used by all protocols)
+	boltDB, ok := metaDB.(*metadb.BoltDB)
+	if !ok {
+		return nil, fmt.Errorf("metaDB must be *metadb.BoltDB for envelope storage")
+	}
+
+	// Initialize goproxy components using metadb EnvelopeIndex
+	goproxyModIndex, err := metadb.NewEnvelopeIndex(boltDB, "goproxy", "mod", 24*time.Hour)
+	if err != nil {
+		return nil, fmt.Errorf("creating goproxy mod index: %w", err)
+	}
+	goproxyInfoIndex, err := metadb.NewEnvelopeIndex(boltDB, "goproxy", "info", 24*time.Hour)
+	if err != nil {
+		return nil, fmt.Errorf("creating goproxy info index: %w", err)
+	}
+	goproxyListIndex, err := metadb.NewEnvelopeIndex(boltDB, "goproxy", "list", 24*time.Hour)
+	if err != nil {
+		return nil, fmt.Errorf("creating goproxy list index: %w", err)
+	}
+	goIndex := goproxy.NewIndex(goproxyModIndex, goproxyInfoIndex, goproxyListIndex)
 	goUpstream := goproxy.NewUpstream(goproxy.WithUpstreamURL(cfg.UpstreamGoProxy))
 	goHandler := goproxy.NewHandler(
 		goIndex,
@@ -189,11 +207,6 @@ func New(cfg Config) (*Server, error) {
 	)
 
 	// Initialize npm components using metadb EnvelopeIndex
-	// Create separate indexes for metadata and cache (with blob refs)
-	boltDB, ok := metaDB.(*metadb.BoltDB)
-	if !ok {
-		return nil, fmt.Errorf("metaDB must be *metadb.BoltDB for envelope storage")
-	}
 	npmMetadataIndex, err := metadb.NewEnvelopeIndex(boltDB, "npm", "metadata", 24*time.Hour)
 	if err != nil {
 		return nil, fmt.Errorf("creating npm metadata index: %w", err)

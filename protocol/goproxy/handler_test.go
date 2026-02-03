@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/wolfeidau/content-cache/backend"
 	"github.com/wolfeidau/content-cache/store"
+	"github.com/wolfeidau/content-cache/store/metadb"
 )
 
 func TestHandlerList(t *testing.T) {
@@ -307,7 +309,25 @@ func newTestHandlerWithComponents(t *testing.T, upstreamURL string) (*Handler, *
 	b, err := backend.NewFilesystem(tmpDir)
 	require.NoError(t, err)
 
-	idx := NewIndex(b)
+	// Create and open BoltDB
+	db := metadb.New()
+	dbPath := filepath.Join(tmpDir, "metadata.db")
+	err = db.Open(dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	boltDB, ok := db.(*metadb.BoltDB)
+	require.True(t, ok, "expected *metadb.BoltDB")
+
+	// Create EnvelopeIndex instances for goproxy
+	modIndex, err := metadb.NewEnvelopeIndex(boltDB, "goproxy", "mod", 24*time.Hour)
+	require.NoError(t, err)
+	infoIndex, err := metadb.NewEnvelopeIndex(boltDB, "goproxy", "info", 24*time.Hour)
+	require.NoError(t, err)
+	listIndex, err := metadb.NewEnvelopeIndex(boltDB, "goproxy", "list", 24*time.Hour)
+	require.NoError(t, err)
+
+	idx := NewIndex(modIndex, infoIndex, listIndex)
 	cafsStore := store.NewCAFS(b)
 	upstream := NewUpstream(WithUpstreamURL(upstreamURL))
 
