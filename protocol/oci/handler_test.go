@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	contentcache "github.com/wolfeidau/content-cache"
 	"github.com/wolfeidau/content-cache/backend"
 	"github.com/wolfeidau/content-cache/store"
+	"github.com/wolfeidau/content-cache/store/metadb"
 )
 
 func newTestHandler(t *testing.T, upstreamURL string) (*Handler, func()) {
@@ -25,7 +27,23 @@ func newTestHandler(t *testing.T, upstreamURL string) (*Handler, func()) {
 	b, err := backend.NewFilesystem(tmpDir)
 	require.NoError(t, err)
 
-	idx := NewIndex(b)
+	// Create and open BoltDB for envelope storage
+	db := metadb.New()
+	err = db.Open(filepath.Join(tmpDir, "metadata.db"))
+	require.NoError(t, err)
+
+	boltDB, ok := db.(*metadb.BoltDB)
+	require.True(t, ok, "metaDB must be *metadb.BoltDB")
+
+	// Create EnvelopeIndex instances for OCI
+	imageIndex, err := metadb.NewEnvelopeIndex(boltDB, "oci", "image", 24*time.Hour)
+	require.NoError(t, err)
+	manifestIndex, err := metadb.NewEnvelopeIndex(boltDB, "oci", "manifest", 24*time.Hour)
+	require.NoError(t, err)
+	blobIndex, err := metadb.NewEnvelopeIndex(boltDB, "oci", "blob", 24*time.Hour)
+	require.NoError(t, err)
+
+	idx := NewIndex(imageIndex, manifestIndex, blobIndex)
 	st := store.NewCAFS(b)
 
 	opts := []HandlerOption{
@@ -39,7 +57,40 @@ func newTestHandler(t *testing.T, upstreamURL string) (*Handler, func()) {
 
 	return h, func() {
 		h.Close()
+		_ = db.Close()
 		_ = os.RemoveAll(tmpDir)
+	}
+}
+
+// newTestIndexWithStore creates an OCI index and store for tests that need direct access.
+// Returns index, store, metadb, and cleanup function.
+func newTestIndexWithStore(t *testing.T, tmpDir string) (*Index, store.Store, metadb.MetaDB, func()) {
+	t.Helper()
+
+	b, err := backend.NewFilesystem(tmpDir)
+	require.NoError(t, err)
+
+	// Create and open BoltDB for envelope storage
+	db := metadb.New()
+	err = db.Open(filepath.Join(tmpDir, "metadata.db"))
+	require.NoError(t, err)
+
+	boltDB, ok := db.(*metadb.BoltDB)
+	require.True(t, ok, "metaDB must be *metadb.BoltDB")
+
+	// Create EnvelopeIndex instances for OCI
+	imageIndex, err := metadb.NewEnvelopeIndex(boltDB, "oci", "image", 24*time.Hour)
+	require.NoError(t, err)
+	manifestIndex, err := metadb.NewEnvelopeIndex(boltDB, "oci", "manifest", 24*time.Hour)
+	require.NoError(t, err)
+	blobIndex, err := metadb.NewEnvelopeIndex(boltDB, "oci", "blob", 24*time.Hour)
+	require.NoError(t, err)
+
+	idx := NewIndex(imageIndex, manifestIndex, blobIndex)
+	st := store.NewCAFS(b)
+
+	return idx, st, db, func() {
+		_ = db.Close()
 	}
 }
 
@@ -423,9 +474,8 @@ func TestHandlerManifestCacheHit(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	b, _ := backend.NewFilesystem(tmpDir)
-	idx := NewIndex(b)
-	st := store.NewCAFS(b)
+	idx, st, db, cleanupDB := newTestIndexWithStore(t, tmpDir)
+	defer cleanupDB()
 
 	h := NewHandler(idx, st,
 		WithTagTTL(1*time.Hour),
@@ -457,6 +507,7 @@ func TestHandlerManifestCacheHit(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w2.Code)
 	require.Equal(t, 1, requestCount)
+	_ = db // suppress unused variable warning
 }
 
 func TestHandlerBlobCacheHit(t *testing.T) {
@@ -476,9 +527,8 @@ func TestHandlerBlobCacheHit(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	b, _ := backend.NewFilesystem(tmpDir)
-	idx := NewIndex(b)
-	st := store.NewCAFS(b)
+	idx, st, _, cleanupDB := newTestIndexWithStore(t, tmpDir)
+	defer cleanupDB()
 
 	h := NewHandler(idx, st,
 		WithUpstream(NewUpstream(WithRegistryURL(upstream.URL))),
@@ -562,9 +612,8 @@ func TestHandlerOptions(t *testing.T) {
 	tmpDir, _ := os.MkdirTemp("", "oci-test-*")
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	b, _ := backend.NewFilesystem(tmpDir)
-	idx := NewIndex(b)
-	st := store.NewCAFS(b)
+	idx, st, _, cleanupDB := newTestIndexWithStore(t, tmpDir)
+	defer cleanupDB()
 
 	t.Run("default values", func(t *testing.T) {
 		h := NewHandler(idx, st)
@@ -591,9 +640,8 @@ func TestHandlerHeadManifestCacheHit(t *testing.T) {
 	tmpDir, _ := os.MkdirTemp("", "oci-head-test-*")
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	b, _ := backend.NewFilesystem(tmpDir)
-	idx := NewIndex(b)
-	st := store.NewCAFS(b)
+	idx, st, _, cleanupDB := newTestIndexWithStore(t, tmpDir)
+	defer cleanupDB()
 
 	// Pre-populate cache
 	ctx := context.Background()
@@ -632,9 +680,8 @@ func TestHandlerHeadBlobCacheHit(t *testing.T) {
 	tmpDir, _ := os.MkdirTemp("", "oci-head-blob-test-*")
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	b, _ := backend.NewFilesystem(tmpDir)
-	idx := NewIndex(b)
-	st := store.NewCAFS(b)
+	idx, st, _, cleanupDB := newTestIndexWithStore(t, tmpDir)
+	defer cleanupDB()
 
 	// Pre-populate cache
 	ctx := context.Background()
@@ -670,9 +717,8 @@ func TestHandlerTagTTLExpiry(t *testing.T) {
 	tmpDir, _ := os.MkdirTemp("", "oci-ttl-test-*")
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	b, _ := backend.NewFilesystem(tmpDir)
-	idx := NewIndex(b)
-	st := store.NewCAFS(b)
+	idx, st, _, cleanupDB := newTestIndexWithStore(t, tmpDir)
+	defer cleanupDB()
 
 	// Very short TTL
 	h := NewHandler(idx, st,
@@ -707,13 +753,53 @@ func TestHandlerTagTTLExpiry(t *testing.T) {
 	require.Equal(t, 2, requestCount)
 }
 
+// newBenchIndexWithStore creates an OCI index and store for benchmarks.
+func newBenchIndexWithStore(b *testing.B, tmpDir string) (*Index, store.Store, metadb.MetaDB) {
+	b.Helper()
+
+	be, err := backend.NewFilesystem(tmpDir)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	db := metadb.New()
+	if err := db.Open(filepath.Join(tmpDir, "metadata.db")); err != nil {
+		b.Fatal(err)
+	}
+
+	boltDB, ok := db.(*metadb.BoltDB)
+	if !ok {
+		b.Fatal("metaDB must be *metadb.BoltDB")
+	}
+
+	imageIndex, err := metadb.NewEnvelopeIndex(boltDB, "oci", "image", 24*time.Hour)
+	if err != nil {
+		b.Fatal(err)
+	}
+	manifestIndex, err := metadb.NewEnvelopeIndex(boltDB, "oci", "manifest", 24*time.Hour)
+	if err != nil {
+		b.Fatal(err)
+	}
+	blobIndex, err := metadb.NewEnvelopeIndex(boltDB, "oci", "blob", 24*time.Hour)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	idx := NewIndex(imageIndex, manifestIndex, blobIndex)
+	st := store.NewCAFS(be)
+
+	b.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	return idx, st, db
+}
+
 func BenchmarkHandlerVersionCheck(b *testing.B) {
 	tmpDir, _ := os.MkdirTemp("", "oci-bench-*")
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	be, _ := backend.NewFilesystem(tmpDir)
-	idx := NewIndex(be)
-	st := store.NewCAFS(be)
+	idx, st, _ := newBenchIndexWithStore(b, tmpDir)
 	h := NewHandler(idx, st)
 	defer h.Close()
 
@@ -729,9 +815,7 @@ func BenchmarkHandlerManifestCacheHit(b *testing.B) {
 	tmpDir, _ := os.MkdirTemp("", "oci-bench-*")
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	be, _ := backend.NewFilesystem(tmpDir)
-	idx := NewIndex(be)
-	st := store.NewCAFS(be)
+	idx, st, _ := newBenchIndexWithStore(b, tmpDir)
 
 	// Pre-populate cache
 	ctx := context.Background()

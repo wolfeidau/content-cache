@@ -228,8 +228,20 @@ func New(cfg Config) (*Server, error) {
 		npm.WithLogger(cfg.Logger.With("component", "npm")),
 	)
 
-	// Initialize OCI components
-	ociIndex := oci.NewIndex(fsBackend)
+	// Initialize OCI components using metadb EnvelopeIndex
+	ociImageIndex, err := metadb.NewEnvelopeIndex(boltDB, "oci", "image", 24*time.Hour)
+	if err != nil {
+		return nil, fmt.Errorf("creating oci image index: %w", err)
+	}
+	ociManifestIndex, err := metadb.NewEnvelopeIndex(boltDB, "oci", "manifest", 24*time.Hour)
+	if err != nil {
+		return nil, fmt.Errorf("creating oci manifest index: %w", err)
+	}
+	ociBlobIndex, err := metadb.NewEnvelopeIndex(boltDB, "oci", "blob", 24*time.Hour)
+	if err != nil {
+		return nil, fmt.Errorf("creating oci blob index: %w", err)
+	}
+	ociIndex := oci.NewIndex(ociImageIndex, ociManifestIndex, ociBlobIndex)
 	ociUpstreamOpts := []oci.UpstreamOption{}
 	if cfg.UpstreamOCIRegistry != "" {
 		ociUpstreamOpts = append(ociUpstreamOpts, oci.WithRegistryURL(cfg.UpstreamOCIRegistry))
