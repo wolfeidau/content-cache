@@ -19,7 +19,7 @@ import (
 // Returns the database, index, and a cleanup function that closes the database.
 func setupMetaDB(t *testing.T, tmpDir string) (*metadb.BoltDB, *Index, func()) {
 	t.Helper()
-	db := metadb.NewBoltDB()
+	db := metadb.NewBoltDB(metadb.WithNoSync(true))
 	require.NoError(t, db.Open(filepath.Join(tmpDir, "meta.db")))
 	metadataIdx, err := metadb.NewEnvelopeIndex(db, "npm", "metadata", 24*time.Hour)
 	require.NoError(t, err)

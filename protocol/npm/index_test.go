@@ -15,7 +15,7 @@ func newTestIndex(t *testing.T) (*Index, *metadb.BoltDB) {
 	t.Helper()
 	tmpDir := t.TempDir()
 
-	db := metadb.NewBoltDB()
+	db := metadb.NewBoltDB(metadb.WithNoSync(true))
 	require.NoError(t, db.Open(filepath.Join(tmpDir, "test.db")))
 	t.Cleanup(func() { _ = db.Close() })
 
