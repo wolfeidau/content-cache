@@ -3,10 +3,10 @@ package goproxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	contentcache "github.com/wolfeidau/content-cache"
 	"github.com/wolfeidau/content-cache/store/metadb"
@@ -18,7 +18,6 @@ type Index struct {
 	infoIndex *metadb.EnvelopeIndex // protocol="goproxy", kind="info"
 	listIndex *metadb.EnvelopeIndex // protocol="goproxy", kind="list"
 	mu        sync.RWMutex
-	now       func() time.Time
 }
 
 // NewIndex creates a new module index using EnvelopeIndex instances.
@@ -30,7 +29,6 @@ func NewIndex(modIndex, infoIndex, listIndex *metadb.EnvelopeIndex) *Index {
 		modIndex:  modIndex,
 		infoIndex: infoIndex,
 		listIndex: listIndex,
-		now:       time.Now,
 	}
 }
 
@@ -42,7 +40,7 @@ func (idx *Index) ListVersions(ctx context.Context, modulePath string) ([]string
 	key := encodeModuleKey(modulePath)
 	data, err := idx.listIndex.Get(ctx, key)
 	if err != nil {
-		if err == metadb.ErrNotFound {
+		if errors.Is(err, metadb.ErrNotFound) {
 			return nil, nil // No versions cached yet
 		}
 		return nil, err
@@ -75,7 +73,7 @@ func (idx *Index) GetModuleVersion(ctx context.Context, modulePath, version stri
 	// Get the info (which contains ZipHash)
 	var mv ModuleVersion
 	if err := idx.infoIndex.GetJSON(ctx, key, &mv); err != nil {
-		if err == metadb.ErrNotFound {
+		if errors.Is(err, metadb.ErrNotFound) {
 			return nil, ErrNotFound
 		}
 		return nil, err
@@ -92,7 +90,7 @@ func (idx *Index) GetMod(ctx context.Context, modulePath, version string) ([]byt
 	key := encodeVersionKey(modulePath, version)
 	data, err := idx.modIndex.Get(ctx, key)
 	if err != nil {
-		if err == metadb.ErrNotFound {
+		if errors.Is(err, metadb.ErrNotFound) {
 			return nil, ErrNotFound
 		}
 		return nil, err
@@ -136,12 +134,12 @@ func (idx *Index) DeleteModuleVersion(ctx context.Context, modulePath, version s
 	versionKey := encodeVersionKey(modulePath, version)
 
 	// Delete version info (with blob refs cleanup)
-	if err := idx.infoIndex.Delete(ctx, versionKey); err != nil && err != metadb.ErrNotFound {
+	if err := idx.infoIndex.Delete(ctx, versionKey); err != nil && !errors.Is(err, metadb.ErrNotFound) {
 		return err
 	}
 
 	// Delete go.mod
-	if err := idx.modIndex.Delete(ctx, versionKey); err != nil && err != metadb.ErrNotFound {
+	if err := idx.modIndex.Delete(ctx, versionKey); err != nil && !errors.Is(err, metadb.ErrNotFound) {
 		return err
 	}
 
@@ -202,7 +200,7 @@ func (idx *Index) listVersionsInternal(ctx context.Context, modulePath string) (
 	key := encodeModuleKey(modulePath)
 	data, err := idx.listIndex.Get(ctx, key)
 	if err != nil {
-		if err == metadb.ErrNotFound {
+		if errors.Is(err, metadb.ErrNotFound) {
 			return nil, nil
 		}
 		return nil, err
