@@ -2,25 +2,33 @@ package maven
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	contentcache "github.com/wolfeidau/content-cache"
-	"github.com/wolfeidau/content-cache/backend"
+	"github.com/wolfeidau/content-cache/store/metadb"
 )
 
-func newTestIndex(t *testing.T) (*Index, func()) {
+func newTestIndex(t *testing.T) (*Index, *metadb.BoltDB) {
 	t.Helper()
 	tmpDir := t.TempDir()
-	b, err := backend.NewFilesystem(tmpDir)
+
+	db := metadb.NewBoltDB()
+	require.NoError(t, db.Open(filepath.Join(tmpDir, "test.db")))
+	t.Cleanup(func() { _ = db.Close() })
+
+	metadataIdx, err := metadb.NewEnvelopeIndex(db, "maven", kindMetadata, 5*time.Minute)
 	require.NoError(t, err)
-	return NewIndex(b), func() {}
+	artifactIdx, err := metadb.NewEnvelopeIndex(db, "maven", kindArtifact, 24*time.Hour)
+	require.NoError(t, err)
+
+	return NewIndex(metadataIdx, artifactIdx), db
 }
 
 func TestIndexCachedMetadata(t *testing.T) {
-	idx, cleanup := newTestIndex(t)
-	defer cleanup()
+	idx, _ := newTestIndex(t)
 
 	ctx := context.Background()
 	groupID := "org.apache.commons"
@@ -50,8 +58,7 @@ func TestIndexCachedMetadata(t *testing.T) {
 }
 
 func TestIndexCachedArtifact(t *testing.T) {
-	idx, cleanup := newTestIndex(t)
-	defer cleanup()
+	idx, _ := newTestIndex(t)
 
 	ctx := context.Background()
 	coord := ArtifactCoordinate{
@@ -93,8 +100,7 @@ func TestIndexCachedArtifact(t *testing.T) {
 }
 
 func TestIndexCachedArtifactWithClassifier(t *testing.T) {
-	idx, cleanup := newTestIndex(t)
-	defer cleanup()
+	idx, _ := newTestIndex(t)
 
 	ctx := context.Background()
 
@@ -148,8 +154,7 @@ func TestIndexCachedArtifactWithClassifier(t *testing.T) {
 }
 
 func TestIndexGetArtifactHash(t *testing.T) {
-	idx, cleanup := newTestIndex(t)
-	defer cleanup()
+	idx, _ := newTestIndex(t)
 
 	ctx := context.Background()
 	coord := ArtifactCoordinate{
@@ -183,8 +188,7 @@ func TestIndexGetArtifactHash(t *testing.T) {
 }
 
 func TestIndexDeleteMetadata(t *testing.T) {
-	idx, cleanup := newTestIndex(t)
-	defer cleanup()
+	idx, _ := newTestIndex(t)
 
 	ctx := context.Background()
 	groupID := "org.example"
@@ -208,8 +212,7 @@ func TestIndexDeleteMetadata(t *testing.T) {
 }
 
 func TestIndexDeleteArtifact(t *testing.T) {
-	idx, cleanup := newTestIndex(t)
-	defer cleanup()
+	idx, _ := newTestIndex(t)
 
 	ctx := context.Background()
 	coord := ArtifactCoordinate{
@@ -240,8 +243,7 @@ func TestIndexDeleteArtifact(t *testing.T) {
 }
 
 func TestIndexIsMetadataExpired(t *testing.T) {
-	idx, cleanup := newTestIndex(t)
-	defer cleanup()
+	idx, _ := newTestIndex(t)
 
 	// Override now function for testing
 	fixedTime := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
@@ -264,12 +266,9 @@ func TestIndexIsMetadataExpired(t *testing.T) {
 }
 
 func TestIndexKeyGeneration(t *testing.T) {
-	idx, cleanup := newTestIndex(t)
-	defer cleanup()
-
 	// Test metadata key
-	metaKey := idx.metadataKey("org.apache.commons", "commons-lang3")
-	require.Equal(t, "maven/metadata/org/apache/commons/commons-lang3/metadata.json", metaKey)
+	key := metadataKey("org.apache.commons", "commons-lang3")
+	require.Equal(t, "org/apache/commons/commons-lang3", key)
 
 	// Test artifact key without classifier
 	coord1 := ArtifactCoordinate{
@@ -278,8 +277,8 @@ func TestIndexKeyGeneration(t *testing.T) {
 		Version:    "3.12.0",
 		Extension:  "jar",
 	}
-	artifactKey1 := idx.artifactKey(coord1)
-	require.Equal(t, "maven/artifacts/org/apache/commons/commons-lang3/3.12.0/commons-lang3-3.12.0.jar.json", artifactKey1)
+	artifactKey1 := artifactKey(coord1)
+	require.Equal(t, "org/apache/commons/commons-lang3/3.12.0/_default/jar", artifactKey1)
 
 	// Test artifact key with classifier
 	coord2 := ArtifactCoordinate{
@@ -289,6 +288,22 @@ func TestIndexKeyGeneration(t *testing.T) {
 		Classifier: "sources",
 		Extension:  "jar",
 	}
-	artifactKey2 := idx.artifactKey(coord2)
-	require.Equal(t, "maven/artifacts/org/apache/commons/commons-lang3/3.12.0/commons-lang3-3.12.0-sources.jar.json", artifactKey2)
+	artifactKey2 := artifactKey(coord2)
+	require.Equal(t, "org/apache/commons/commons-lang3/3.12.0/sources/jar", artifactKey2)
+}
+
+func TestCollectBlobRefs(t *testing.T) {
+	// Test nil artifact
+	require.Nil(t, collectBlobRefs(nil))
+
+	// Test artifact with zero hash
+	artifact := &CachedArtifact{}
+	require.Nil(t, collectBlobRefs(artifact))
+
+	// Test artifact with valid hash
+	hash := contentcache.HashBytes([]byte("test content"))
+	artifact.Hash = hash
+	refs := collectBlobRefs(artifact)
+	require.Len(t, refs, 1)
+	require.Equal(t, "blake3:"+hash.String(), refs[0])
 }

@@ -6,12 +6,29 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/wolfeidau/content-cache/backend"
 	"github.com/wolfeidau/content-cache/store"
+	"github.com/wolfeidau/content-cache/store/metadb"
 )
+
+// setupMetaDB creates a BoltDB with EnvelopeIndex instances for testing.
+// Returns the database, index, and a cleanup function that closes the database.
+func setupMetaDB(t *testing.T, tmpDir string) (*metadb.BoltDB, *Index, func()) {
+	t.Helper()
+	db := metadb.NewBoltDB()
+	require.NoError(t, db.Open(filepath.Join(tmpDir, "meta.db")))
+	metadataIdx, err := metadb.NewEnvelopeIndex(db, "maven", kindMetadata, 5*time.Minute)
+	require.NoError(t, err)
+	artifactIdx, err := metadb.NewEnvelopeIndex(db, "maven", kindArtifact, 24*time.Hour)
+	require.NoError(t, err)
+	idx := NewIndex(metadataIdx, artifactIdx)
+	return db, idx, func() { _ = db.Close() }
+}
 
 func newTestHandler(t *testing.T, upstreamServer *httptest.Server) (*Handler, func()) {
 	t.Helper()
@@ -21,7 +38,8 @@ func newTestHandler(t *testing.T, upstreamServer *httptest.Server) (*Handler, fu
 	b, err := backend.NewFilesystem(tmpDir)
 	require.NoError(t, err)
 	cafs := store.NewCAFS(b)
-	idx := NewIndex(b)
+
+	_, idx, closeDB := setupMetaDB(t, tmpDir)
 
 	opts := []UpstreamOption{}
 	if upstreamServer != nil {
@@ -32,6 +50,7 @@ func newTestHandler(t *testing.T, upstreamServer *httptest.Server) (*Handler, fu
 	h := NewHandler(idx, cafs, WithUpstream(upstream))
 	return h, func() {
 		h.Close()
+		closeDB()
 		_ = os.RemoveAll(tmpDir)
 	}
 }
