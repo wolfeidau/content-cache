@@ -75,6 +75,14 @@ type Config struct {
 	// Default: 5 minutes (new versions may be published)
 	RubyGemsMetadataTTL time.Duration
 
+	// SumDBName is the name of the checksum database to proxy.
+	// Default: sum.golang.org
+	SumDBName string
+
+	// UpstreamSumDB is the upstream sumdb URL.
+	// Default: https://sum.golang.org
+	UpstreamSumDB string
+
 	// CacheTTL is the time-to-live for cached content.
 	// Content not accessed within this duration is expired.
 	// Zero disables TTL-based expiration.
@@ -120,6 +128,8 @@ type Server struct {
 	maven         *maven.Handler
 	rubygemsIndex *rubygems.Index
 	rubygems      *rubygems.Handler
+	sumdbIndex    *goproxy.SumdbIndex
+	sumdb         *goproxy.SumdbHandler
 	metaDB        metadb.MetaDB
 	gcManager     *gc.Manager
 }
@@ -357,6 +367,27 @@ func New(cfg Config) (*Server, error) {
 	}
 	rubygemsHandler := rubygems.NewHandler(rubygemsIndex, cafsStore, rubygemsHandlerOpts...)
 
+	// Initialize sumdb components using metadb EnvelopeIndex
+	// Sumdb responses are immutable, so we use a long TTL (or no TTL)
+	sumdbEnvelope, err := metadb.NewEnvelopeIndex(boltDB, "sumdb", "cache", 0)
+	if err != nil {
+		return nil, fmt.Errorf("creating sumdb cache index: %w", err)
+	}
+	sumdbIndex := goproxy.NewSumdbIndex(sumdbEnvelope)
+	sumdbUpstreamOpts := []goproxy.SumdbUpstreamOption{}
+	if cfg.UpstreamSumDB != "" {
+		sumdbUpstreamOpts = append(sumdbUpstreamOpts, goproxy.WithSumdbUpstreamURL(cfg.UpstreamSumDB))
+	}
+	sumdbUpstream := goproxy.NewSumdbUpstream(sumdbUpstreamOpts...)
+	sumdbHandlerOpts := []goproxy.SumdbHandlerOption{
+		goproxy.WithSumdbUpstream(sumdbUpstream),
+		goproxy.WithSumdbLogger(cfg.Logger.With("component", "sumdb")),
+	}
+	if cfg.SumDBName != "" {
+		sumdbHandlerOpts = append(sumdbHandlerOpts, goproxy.WithSumdbName(cfg.SumDBName))
+	}
+	sumdbHandler := goproxy.NewSumdbHandler(sumdbIndex, cafsStore, sumdbHandlerOpts...)
+
 	s := &Server{
 		config:        cfg,
 		logger:        cfg.Logger,
@@ -374,6 +405,8 @@ func New(cfg Config) (*Server, error) {
 		maven:         mavenHandler,
 		rubygemsIndex: rubygemsIndex,
 		rubygems:      rubygemsHandler,
+		sumdbIndex:    sumdbIndex,
+		sumdb:         sumdbHandler,
 		metaDB:        metaDB,
 		gcManager:     gcManager,
 	}
@@ -432,6 +465,13 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// The rubygems handler handles all paths under /rubygems/
 	mux.Handle("GET /rubygems/", http.StripPrefix("/rubygems", s.rubygems))
 	mux.Handle("HEAD /rubygems/", http.StripPrefix("/rubygems", s.rubygems))
+
+	// Sumdb proxy endpoints
+	// Handle both root and prefixed paths for sumdb
+	// Root: GOPROXY=http://localhost:8080 -> /sumdb/sum.golang.org/...
+	// Prefixed: GOPROXY=http://localhost:8080/goproxy -> /goproxy/sumdb/sum.golang.org/...
+	mux.Handle("GET /sumdb/", s.sumdb)
+	mux.Handle("GET /goproxy/sumdb/", http.StripPrefix("/goproxy", s.sumdb))
 
 	// GOPROXY endpoints
 	// The goproxy handler handles all paths under /goproxy/
@@ -646,11 +686,17 @@ func deriveProtocol(p string) string {
 		return "maven"
 	case len(p) >= 10 && p[:10] == "/rubygems/":
 		return "rubygems"
+	case len(p) >= 7 && p[:7] == "/sumdb/":
+		return "sumdb"
 	case len(p) >= 9 && p[:9] == "/goproxy/":
 		return "goproxy"
 	case len(p) >= 3 && p[:3] == "/v2":
 		return "oci"
 	default:
+		// Check for sumdb at root (GOPROXY=http://localhost:8080)
+		if len(p) >= 7 && p[:7] == "/sumdb/" {
+			return "sumdb"
+		}
 		// Root paths are goproxy (GOPROXY=http://localhost:8080)
 		if len(p) > 1 && p[0] == '/' {
 			return "goproxy"
