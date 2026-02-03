@@ -2,35 +2,38 @@ package maven
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"path"
 	"strings"
 	"sync"
 	"time"
 
 	contentcache "github.com/wolfeidau/content-cache"
-	"github.com/wolfeidau/content-cache/backend"
+	"github.com/wolfeidau/content-cache/store/metadb"
 )
 
 const (
-	// mavenPrefix is the storage prefix for Maven artifact data.
-	mavenPrefix = "maven"
+	// kindMetadata is the metadb kind for maven-metadata.xml cache
+	kindMetadata = "metadata"
+	// kindArtifact is the metadb kind for cached artifact info with blob refs
+	kindArtifact = "artifact"
 )
 
-// Index manages the Maven artifact index.
+// Index manages the Maven artifact index using metadb envelope storage.
 type Index struct {
-	backend backend.Backend
-	mu      sync.RWMutex
-	now     func() time.Time
+	metadataIndex *metadb.EnvelopeIndex // protocol="maven", kind="metadata"
+	artifactIndex *metadb.EnvelopeIndex // protocol="maven", kind="artifact"
+	mu            sync.RWMutex
+	now           func() time.Time
 }
 
-// NewIndex creates a new Maven artifact index.
-func NewIndex(b backend.Backend) *Index {
+// NewIndex creates a new Maven artifact index using EnvelopeIndex instances.
+// metadataIndex: protocol="maven", kind="metadata" for maven-metadata.xml
+// artifactIndex: protocol="maven", kind="artifact" for CachedArtifact with blob refs
+func NewIndex(metadataIndex, artifactIndex *metadb.EnvelopeIndex) *Index {
 	return &Index{
-		backend: b,
-		now:     time.Now,
+		metadataIndex: metadataIndex,
+		artifactIndex: artifactIndex,
+		now:           time.Now,
 	}
 }
 
@@ -39,19 +42,13 @@ func (idx *Index) GetCachedMetadata(ctx context.Context, groupID, artifactID str
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	key := idx.metadataKey(groupID, artifactID)
-	rc, err := idx.backend.Read(ctx, key)
-	if err != nil {
-		if errors.Is(err, backend.ErrNotFound) {
+	key := metadataKey(groupID, artifactID)
+	var cached CachedMetadata
+	if err := idx.metadataIndex.GetJSON(ctx, key, &cached); err != nil {
+		if err == metadb.ErrNotFound {
 			return nil, ErrNotFound
 		}
 		return nil, fmt.Errorf("reading metadata: %w", err)
-	}
-	defer func() { _ = rc.Close() }()
-
-	var cached CachedMetadata
-	if err := json.NewDecoder(rc).Decode(&cached); err != nil {
-		return nil, fmt.Errorf("decoding metadata: %w", err)
 	}
 
 	return &cached, nil
@@ -67,17 +64,10 @@ func (idx *Index) PutCachedMetadata(ctx context.Context, metadata *CachedMetadat
 		metadata.CachedAt = metadata.UpdatedAt
 	}
 
-	key := idx.metadataKey(metadata.GroupID, metadata.ArtifactID)
-	data, err := json.Marshal(metadata)
-	if err != nil {
-		return fmt.Errorf("encoding metadata: %w", err)
-	}
+	key := metadataKey(metadata.GroupID, metadata.ArtifactID)
 
-	if err := idx.backend.Write(ctx, key, strings.NewReader(string(data))); err != nil {
-		return fmt.Errorf("writing metadata: %w", err)
-	}
-
-	return nil
+	// No blob refs for metadata (raw XML)
+	return idx.metadataIndex.PutJSON(ctx, key, metadata, nil)
 }
 
 // GetCachedArtifact retrieves cached artifact information.
@@ -85,19 +75,13 @@ func (idx *Index) GetCachedArtifact(ctx context.Context, coord ArtifactCoordinat
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	key := idx.artifactKey(coord)
-	rc, err := idx.backend.Read(ctx, key)
-	if err != nil {
-		if errors.Is(err, backend.ErrNotFound) {
+	key := artifactKey(coord)
+	var cached CachedArtifact
+	if err := idx.artifactIndex.GetJSON(ctx, key, &cached); err != nil {
+		if err == metadb.ErrNotFound {
 			return nil, ErrNotFound
 		}
 		return nil, fmt.Errorf("reading artifact: %w", err)
-	}
-	defer func() { _ = rc.Close() }()
-
-	var cached CachedArtifact
-	if err := json.NewDecoder(rc).Decode(&cached); err != nil {
-		return nil, fmt.Errorf("decoding artifact: %w", err)
 	}
 
 	return &cached, nil
@@ -118,17 +102,12 @@ func (idx *Index) PutCachedArtifact(ctx context.Context, artifact *CachedArtifac
 		Extension:  artifact.Extension,
 	}
 
-	key := idx.artifactKey(coord)
-	data, err := json.Marshal(artifact)
-	if err != nil {
-		return fmt.Errorf("encoding artifact: %w", err)
-	}
+	key := artifactKey(coord)
 
-	if err := idx.backend.Write(ctx, key, strings.NewReader(string(data))); err != nil {
-		return fmt.Errorf("writing artifact: %w", err)
-	}
+	// Collect blob refs from the artifact hash
+	refs := collectBlobRefs(artifact)
 
-	return nil
+	return idx.artifactIndex.PutJSON(ctx, key, artifact, refs)
 }
 
 // GetArtifactHash retrieves the content hash for a specific artifact.
@@ -145,8 +124,8 @@ func (idx *Index) DeleteMetadata(ctx context.Context, groupID, artifactID string
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	key := idx.metadataKey(groupID, artifactID)
-	if err := idx.backend.Delete(ctx, key); err != nil && !errors.Is(err, backend.ErrNotFound) {
+	key := metadataKey(groupID, artifactID)
+	if err := idx.metadataIndex.Delete(ctx, key); err != nil && err != metadb.ErrNotFound {
 		return fmt.Errorf("deleting metadata: %w", err)
 	}
 
@@ -158,8 +137,8 @@ func (idx *Index) DeleteArtifact(ctx context.Context, coord ArtifactCoordinate) 
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	key := idx.artifactKey(coord)
-	if err := idx.backend.Delete(ctx, key); err != nil && !errors.Is(err, backend.ErrNotFound) {
+	key := artifactKey(coord)
+	if err := idx.artifactIndex.Delete(ctx, key); err != nil && err != metadb.ErrNotFound {
 		return fmt.Errorf("deleting artifact: %w", err)
 	}
 
@@ -179,10 +158,18 @@ func (idx *Index) ListArtifacts(ctx context.Context, groupID, artifactID string)
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	prefix := path.Join(mavenPrefix, "artifacts", groupIDToPath(groupID), artifactID)
-	keys, err := idx.backend.List(ctx, prefix)
+	// List all keys and filter by prefix
+	prefix := groupIDToPath(groupID) + "/" + artifactID + "/"
+	allKeys, err := idx.artifactIndex.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("listing artifacts: %w", err)
+	}
+
+	var keys []string
+	for _, key := range allKeys {
+		if strings.HasPrefix(key, prefix) {
+			keys = append(keys, key)
+		}
 	}
 
 	return keys, nil
@@ -190,15 +177,34 @@ func (idx *Index) ListArtifacts(ctx context.Context, groupID, artifactID string)
 
 // Key generation helpers
 
-func (idx *Index) metadataKey(groupID, artifactID string) string {
-	return path.Join(mavenPrefix, "metadata", groupIDToPath(groupID), artifactID, "metadata.json")
+// metadataKey generates the storage key for maven-metadata.xml.
+// Format: {groupPath}/{artifactId}
+func metadataKey(groupID, artifactID string) string {
+	return groupIDToPath(groupID) + "/" + artifactID
 }
 
-func (idx *Index) artifactKey(coord ArtifactCoordinate) string {
-	filename := coord.ArtifactID + "-" + coord.Version
-	if coord.Classifier != "" {
-		filename += "-" + coord.Classifier
+// artifactKey generates the storage key for a cached artifact.
+// Format: {groupPath}/{artifactId}/{version}/{classifier}/{extension}
+func artifactKey(coord ArtifactCoordinate) string {
+	// Use classifier "default" if empty to avoid key collisions
+	classifier := coord.Classifier
+	if classifier == "" {
+		classifier = "_default"
 	}
-	filename += "." + coord.Extension + ".json"
-	return path.Join(mavenPrefix, "artifacts", groupIDToPath(coord.GroupID), coord.ArtifactID, coord.Version, filename)
+	return fmt.Sprintf("%s/%s/%s/%s/%s",
+		groupIDToPath(coord.GroupID),
+		coord.ArtifactID,
+		coord.Version,
+		classifier,
+		coord.Extension,
+	)
+}
+
+// collectBlobRefs extracts blob hash from a CachedArtifact.
+// Returns refs in canonical format: "blake3:<hex>"
+func collectBlobRefs(artifact *CachedArtifact) []string {
+	if artifact == nil || artifact.Hash.IsZero() {
+		return nil
+	}
+	return []string{"blake3:" + artifact.Hash.String()}
 }

@@ -258,8 +258,20 @@ func New(cfg Config) (*Server, error) {
 	}
 	pypiHandler := pypi.NewHandler(pypiIndex, cafsStore, pypiHandlerOpts...)
 
-	// Initialize Maven components
-	mavenIndex := maven.NewIndex(fsBackend)
+	// Initialize Maven components using metadb EnvelopeIndex
+	mavenTTL := cfg.MavenMetadataTTL
+	if mavenTTL == 0 {
+		mavenTTL = 5 * time.Minute
+	}
+	mavenMetadataIndex, err := metadb.NewEnvelopeIndex(boltDB, "maven", "metadata", mavenTTL)
+	if err != nil {
+		return nil, fmt.Errorf("creating maven metadata index: %w", err)
+	}
+	mavenArtifactIndex, err := metadb.NewEnvelopeIndex(boltDB, "maven", "artifact", 24*time.Hour)
+	if err != nil {
+		return nil, fmt.Errorf("creating maven artifact index: %w", err)
+	}
+	mavenIndex := maven.NewIndex(mavenMetadataIndex, mavenArtifactIndex)
 	mavenUpstreamOpts := []maven.UpstreamOption{}
 	if cfg.UpstreamMaven != "" {
 		mavenUpstreamOpts = append(mavenUpstreamOpts, maven.WithRepositoryURL(cfg.UpstreamMaven))
