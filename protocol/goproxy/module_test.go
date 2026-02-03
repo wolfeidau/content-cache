@@ -2,12 +2,13 @@ package goproxy
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	contentcache "github.com/wolfeidau/content-cache"
-	"github.com/wolfeidau/content-cache/backend"
+	"github.com/wolfeidau/content-cache/store/metadb"
 )
 
 func TestEncodePath(t *testing.T) {
@@ -228,7 +229,25 @@ func TestIndexCaseInsensitiveModule(t *testing.T) {
 func newTestIndex(t *testing.T) (*Index, func()) {
 	t.Helper()
 	tmpDir := t.TempDir()
-	b, err := backend.NewFilesystem(tmpDir)
+
+	// Create and open BoltDB
+	db := metadb.New()
+	dbPath := filepath.Join(tmpDir, "metadata.db")
+	err := db.Open(dbPath)
 	require.NoError(t, err)
-	return NewIndex(b), func() {}
+
+	boltDB, ok := db.(*metadb.BoltDB)
+	require.True(t, ok, "expected *metadb.BoltDB")
+
+	// Create EnvelopeIndex instances for goproxy
+	modIndex, err := metadb.NewEnvelopeIndex(boltDB, "goproxy", "mod", 24*time.Hour)
+	require.NoError(t, err)
+	infoIndex, err := metadb.NewEnvelopeIndex(boltDB, "goproxy", "info", 24*time.Hour)
+	require.NoError(t, err)
+	listIndex, err := metadb.NewEnvelopeIndex(boltDB, "goproxy", "list", 24*time.Hour)
+	require.NoError(t, err)
+
+	return NewIndex(modIndex, infoIndex, listIndex), func() {
+		_ = db.Close()
+	}
 }
