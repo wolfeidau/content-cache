@@ -1,111 +1,94 @@
 package rubygems
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"io/fs"
-	"path"
+	"sync"
 	"time"
 
-	"github.com/wolfeidau/content-cache/backend"
+	"github.com/wolfeidau/content-cache/store/metadb"
 )
 
-// Index provides storage for RubyGems metadata.
+// Index provides storage for RubyGems metadata using metadb envelope storage.
 type Index struct {
-	backend backend.Backend
+	versionsIndex *metadb.EnvelopeIndex // protocol="rubygems", kind="versions"
+	infoIndex     *metadb.EnvelopeIndex // protocol="rubygems", kind="info"
+	specsIndex    *metadb.EnvelopeIndex // protocol="rubygems", kind="specs"
+	gemIndex      *metadb.EnvelopeIndex // protocol="rubygems", kind="gem"
+	gemspecIndex  *metadb.EnvelopeIndex // protocol="rubygems", kind="gemspec"
+	mu            sync.RWMutex
+	now           func() time.Time
 }
 
-// NewIndex creates a new Index.
-func NewIndex(b backend.Backend) *Index {
-	return &Index{backend: b}
+// NewIndex creates a new Index using EnvelopeIndex instances.
+func NewIndex(
+	versionsIndex,
+	infoIndex,
+	specsIndex,
+	gemIndex,
+	gemspecIndex *metadb.EnvelopeIndex,
+) *Index {
+	return &Index{
+		versionsIndex: versionsIndex,
+		infoIndex:     infoIndex,
+		specsIndex:    specsIndex,
+		gemIndex:      gemIndex,
+		gemspecIndex:  gemspecIndex,
+		now:           time.Now,
+	}
 }
 
-// Storage paths:
-// rubygems/versions.json           - CachedVersions metadata
-// rubygems/versions                 - Raw /versions file content
-// rubygems/names.json              - CachedNames metadata (if needed)
-// rubygems/names                    - Raw /names file content
-// rubygems/info/{gem}.json         - CachedGemInfo metadata
-// rubygems/info/{gem}              - Raw /info/{gem} content
-// rubygems/specs/{type}.json       - CachedSpecs metadata
-// rubygems/specs/{type}.4.8.gz     - Raw specs file content
-// rubygems/gemspecs/{name}-{ver}[-{plat}].json  - CachedGemspec metadata
-// rubygems/gems/{filename}.json    - CachedGem metadata
+// Storage key patterns:
+// versions: "versions" (single global entry)
+// info:     "{gem}" (gem name)
+// specs:    "{type}" (specs, latest_specs, prerelease_specs)
+// gem:      "{filename}" (e.g., rails-7.0.0.gem)
+// gemspec:  "{name}-{version}[-{platform}]" (e.g., rails-7.0.0, nokogiri-1.13.0-x86_64-linux)
 
-const (
-	indexPrefix = "rubygems"
-)
+const versionsKey = "versions"
 
 // GetVersions retrieves the cached /versions file and its metadata.
-func (i *Index) GetVersions(ctx context.Context) (*CachedVersions, []byte, error) {
-	metaPath := path.Join(indexPrefix, "versions.json")
-	contentPath := path.Join(indexPrefix, "versions")
+func (idx *Index) GetVersions(ctx context.Context) (*CachedVersions, []byte, error) {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
 
-	// Read metadata
-	metaReader, err := i.backend.Read(ctx, metaPath)
+	content, env, err := idx.versionsIndex.GetWithEnvelope(ctx, versionsKey)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+		if err == metadb.ErrNotFound {
 			return nil, nil, ErrNotFound
 		}
-		return nil, nil, fmt.Errorf("reading versions metadata: %w", err)
-	}
-	defer func() { _ = metaReader.Close() }()
-
-	var meta CachedVersions
-	if err := json.NewDecoder(metaReader).Decode(&meta); err != nil {
-		return nil, nil, fmt.Errorf("decoding versions metadata: %w", err)
+		return nil, nil, err
 	}
 
-	// Read content
-	contentReader, err := i.backend.Read(ctx, contentPath)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil, ErrNotFound
-		}
-		return nil, nil, fmt.Errorf("reading versions content: %w", err)
-	}
-	defer func() { _ = contentReader.Close() }()
-
-	content, err := io.ReadAll(contentReader)
-	if err != nil {
-		return nil, nil, fmt.Errorf("reading versions content: %w", err)
+	meta := &CachedVersions{
+		ETag:       env.Etag,
+		ReprDigest: extractReprDigest(env),
+		Size:       min(int64(env.PayloadSize), metadb.MaxPayloadSize), //nolint:gosec // bounded by MaxPayloadSize
+		CachedAt:   time.UnixMilli(env.FetchedAtUnixMs),
+		UpdatedAt:  time.UnixMilli(env.FetchedAtUnixMs),
 	}
 
-	return &meta, content, nil
+	return meta, content, nil
 }
 
 // PutVersions stores the /versions file and its metadata.
-func (i *Index) PutVersions(ctx context.Context, meta *CachedVersions, content []byte) error {
-	metaPath := path.Join(indexPrefix, "versions.json")
-	contentPath := path.Join(indexPrefix, "versions")
+func (idx *Index) PutVersions(ctx context.Context, meta *CachedVersions, content []byte) error {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
 
-	// Write metadata
-	metaBytes, err := json.Marshal(meta)
-	if err != nil {
-		return fmt.Errorf("encoding versions metadata: %w", err)
+	opts := metadb.PutOptions{
+		Etag: meta.ETag,
 	}
-	if err := i.backend.Write(ctx, metaPath, bytes.NewReader(metaBytes)); err != nil {
-		return fmt.Errorf("writing versions metadata: %w", err)
-	}
-
-	// Write content
-	if err := i.backend.Write(ctx, contentPath, bytes.NewReader(content)); err != nil {
-		return fmt.Errorf("writing versions content: %w", err)
-	}
-
-	return nil
+	// Store ReprDigest in attributes if present
+	return idx.versionsIndex.PutWithOptions(ctx, versionsKey, content, metadb.ContentType_CONTENT_TYPE_TEXT, nil, opts)
 }
 
 // AppendVersions appends content to the /versions file and updates metadata.
-func (i *Index) AppendVersions(ctx context.Context, meta *CachedVersions, appendContent []byte) error {
+func (idx *Index) AppendVersions(ctx context.Context, meta *CachedVersions, appendContent []byte) error {
 	// Read existing content
-	_, existingContent, err := i.GetVersions(ctx)
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		return fmt.Errorf("reading existing versions: %w", err)
+	_, existingContent, err := idx.GetVersions(ctx)
+	if err != nil && err != ErrNotFound {
+		return err
 	}
 
 	// Append new content
@@ -114,206 +97,181 @@ func (i *Index) AppendVersions(ctx context.Context, meta *CachedVersions, append
 	copy(newContent[len(existingContent):], appendContent)
 	meta.Size = int64(len(newContent))
 
-	return i.PutVersions(ctx, meta, newContent)
+	return idx.PutVersions(ctx, meta, newContent)
 }
 
 // GetInfo retrieves the cached /info/{gem} file and its metadata.
-func (i *Index) GetInfo(ctx context.Context, gem string) (*CachedGemInfo, []byte, error) {
-	metaPath := path.Join(indexPrefix, "info", gem+".json")
-	contentPath := path.Join(indexPrefix, "info", gem)
+func (idx *Index) GetInfo(ctx context.Context, gem string) (*CachedGemInfo, []byte, error) {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
 
-	// Read metadata
-	metaReader, err := i.backend.Read(ctx, metaPath)
+	content, env, err := idx.infoIndex.GetWithEnvelope(ctx, gem)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+		if err == metadb.ErrNotFound {
 			return nil, nil, ErrNotFound
 		}
-		return nil, nil, fmt.Errorf("reading info metadata: %w", err)
-	}
-	defer func() { _ = metaReader.Close() }()
-
-	var meta CachedGemInfo
-	if err := json.NewDecoder(metaReader).Decode(&meta); err != nil {
-		return nil, nil, fmt.Errorf("decoding info metadata: %w", err)
+		return nil, nil, err
 	}
 
-	// Read content
-	contentReader, err := i.backend.Read(ctx, contentPath)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil, ErrNotFound
-		}
-		return nil, nil, fmt.Errorf("reading info content: %w", err)
-	}
-	defer func() { _ = contentReader.Close() }()
-
-	content, err := io.ReadAll(contentReader)
-	if err != nil {
-		return nil, nil, fmt.Errorf("reading info content: %w", err)
+	meta := &CachedGemInfo{
+		Name:       gem,
+		ETag:       env.Etag,
+		ReprDigest: extractReprDigest(env),
+		Size:       min(int64(env.PayloadSize), metadb.MaxPayloadSize), //nolint:gosec // bounded by MaxPayloadSize
+		CachedAt:   time.UnixMilli(env.FetchedAtUnixMs),
+		UpdatedAt:  time.UnixMilli(env.FetchedAtUnixMs),
 	}
 
-	return &meta, content, nil
+	// Checksums are stored as JSON in attributes if present
+	if checksumData, ok := env.Attributes["checksums"]; ok {
+		meta.Checksums = decodeChecksums(checksumData)
+	}
+
+	// MD5 from versions file
+	if md5Data, ok := env.Attributes["md5"]; ok {
+		meta.MD5 = string(md5Data)
+	}
+
+	return meta, content, nil
 }
 
 // PutInfo stores the /info/{gem} file and its metadata.
-func (i *Index) PutInfo(ctx context.Context, gem string, meta *CachedGemInfo, content []byte) error {
-	metaPath := path.Join(indexPrefix, "info", gem+".json")
-	contentPath := path.Join(indexPrefix, "info", gem)
+func (idx *Index) PutInfo(ctx context.Context, gem string, meta *CachedGemInfo, content []byte) error {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
 
-	// Write metadata
-	metaBytes, err := json.Marshal(meta)
-	if err != nil {
-		return fmt.Errorf("encoding info metadata: %w", err)
-	}
-	if err := i.backend.Write(ctx, metaPath, bytes.NewReader(metaBytes)); err != nil {
-		return fmt.Errorf("writing info metadata: %w", err)
+	opts := metadb.PutOptions{
+		Etag: meta.ETag,
 	}
 
-	// Write content
-	if err := i.backend.Write(ctx, contentPath, bytes.NewReader(content)); err != nil {
-		return fmt.Errorf("writing info content: %w", err)
+	// First store the content
+	if err := idx.infoIndex.PutWithOptions(ctx, gem, content, metadb.ContentType_CONTENT_TYPE_TEXT, nil, opts); err != nil {
+		return err
+	}
+
+	// If we have checksums, update the envelope with attributes
+	if len(meta.Checksums) > 0 || meta.MD5 != "" {
+		return idx.infoIndex.Update(ctx, gem, func(data []byte, env *metadb.MetadataEnvelope) ([]byte, []string, error) {
+			if env.Attributes == nil {
+				env.Attributes = make(map[string][]byte)
+			}
+			if len(meta.Checksums) > 0 {
+				env.Attributes["checksums"] = encodeChecksums(meta.Checksums)
+			}
+			if meta.MD5 != "" {
+				env.Attributes["md5"] = []byte(meta.MD5)
+			}
+			return data, nil, nil
+		})
 	}
 
 	return nil
 }
 
 // GetSpecs retrieves the cached specs file (specs, latest_specs, or prerelease_specs).
-func (i *Index) GetSpecs(ctx context.Context, specsType string) (*CachedSpecs, []byte, error) {
-	metaPath := path.Join(indexPrefix, "specs", specsType+".json")
-	contentPath := path.Join(indexPrefix, "specs", specsType+".4.8.gz")
+func (idx *Index) GetSpecs(ctx context.Context, specsType string) (*CachedSpecs, []byte, error) {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
 
-	// Read metadata
-	metaReader, err := i.backend.Read(ctx, metaPath)
+	content, env, err := idx.specsIndex.GetWithEnvelope(ctx, specsType)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+		if err == metadb.ErrNotFound {
 			return nil, nil, ErrNotFound
 		}
-		return nil, nil, fmt.Errorf("reading specs metadata: %w", err)
-	}
-	defer func() { _ = metaReader.Close() }()
-
-	var meta CachedSpecs
-	if err := json.NewDecoder(metaReader).Decode(&meta); err != nil {
-		return nil, nil, fmt.Errorf("decoding specs metadata: %w", err)
+		return nil, nil, err
 	}
 
-	// Read content
-	contentReader, err := i.backend.Read(ctx, contentPath)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil, ErrNotFound
-		}
-		return nil, nil, fmt.Errorf("reading specs content: %w", err)
-	}
-	defer func() { _ = contentReader.Close() }()
-
-	content, err := io.ReadAll(contentReader)
-	if err != nil {
-		return nil, nil, fmt.Errorf("reading specs content: %w", err)
+	meta := &CachedSpecs{
+		Type:       specsType,
+		ETag:       env.Etag,
+		ReprDigest: extractReprDigest(env),
+		Size:       min(int64(env.PayloadSize), metadb.MaxPayloadSize), //nolint:gosec // bounded by MaxPayloadSize
+		CachedAt:   time.UnixMilli(env.FetchedAtUnixMs),
+		UpdatedAt:  time.UnixMilli(env.FetchedAtUnixMs),
 	}
 
-	return &meta, content, nil
+	return meta, content, nil
 }
 
 // PutSpecs stores a specs file and its metadata.
-func (i *Index) PutSpecs(ctx context.Context, specsType string, meta *CachedSpecs, content []byte) error {
-	metaPath := path.Join(indexPrefix, "specs", specsType+".json")
-	contentPath := path.Join(indexPrefix, "specs", specsType+".4.8.gz")
+func (idx *Index) PutSpecs(ctx context.Context, specsType string, meta *CachedSpecs, content []byte) error {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
 
-	// Write metadata
-	metaBytes, err := json.Marshal(meta)
-	if err != nil {
-		return fmt.Errorf("encoding specs metadata: %w", err)
-	}
-	if err := i.backend.Write(ctx, metaPath, bytes.NewReader(metaBytes)); err != nil {
-		return fmt.Errorf("writing specs metadata: %w", err)
+	opts := metadb.PutOptions{
+		Etag: meta.ETag,
 	}
 
-	// Write content
-	if err := i.backend.Write(ctx, contentPath, bytes.NewReader(content)); err != nil {
-		return fmt.Errorf("writing specs content: %w", err)
-	}
-
-	return nil
+	// Specs files are binary (gzipped Marshal data)
+	return idx.specsIndex.PutWithOptions(ctx, specsType, content, metadb.ContentType_CONTENT_TYPE_OCTET_STREAM, nil, opts)
 }
 
 // GetGem retrieves cached gem metadata.
-func (i *Index) GetGem(ctx context.Context, filename string) (*CachedGem, error) {
-	metaPath := path.Join(indexPrefix, "gems", filename+".json")
+func (idx *Index) GetGem(ctx context.Context, filename string) (*CachedGem, error) {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
 
-	metaReader, err := i.backend.Read(ctx, metaPath)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+	var cached CachedGem
+	if err := idx.gemIndex.GetJSON(ctx, filename, &cached); err != nil {
+		if err == metadb.ErrNotFound {
 			return nil, ErrNotFound
 		}
-		return nil, fmt.Errorf("reading gem metadata: %w", err)
-	}
-	defer func() { _ = metaReader.Close() }()
-
-	var meta CachedGem
-	if err := json.NewDecoder(metaReader).Decode(&meta); err != nil {
-		return nil, fmt.Errorf("decoding gem metadata: %w", err)
+		return nil, err
 	}
 
-	return &meta, nil
+	return &cached, nil
 }
 
-// PutGem stores gem metadata.
-func (i *Index) PutGem(ctx context.Context, gem *CachedGem) error {
-	metaPath := path.Join(indexPrefix, "gems", gem.Filename+".json")
+// PutGem stores gem metadata with blob reference.
+func (idx *Index) PutGem(ctx context.Context, gem *CachedGem) error {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
 
-	metaBytes, err := json.Marshal(gem)
-	if err != nil {
-		return fmt.Errorf("encoding gem metadata: %w", err)
-	}
-	if err := i.backend.Write(ctx, metaPath, bytes.NewReader(metaBytes)); err != nil {
-		return fmt.Errorf("writing gem metadata: %w", err)
+	// Collect blob ref for the gem content
+	var refs []string
+	if !gem.ContentHash.IsZero() {
+		refs = []string{"blake3:" + gem.ContentHash.String()}
 	}
 
-	return nil
+	return idx.gemIndex.PutJSON(ctx, gem.Filename, gem, refs)
 }
 
 // GetGemspec retrieves cached gemspec metadata.
-func (i *Index) GetGemspec(ctx context.Context, name, version, platform string) (*CachedGemspec, error) {
-	filename := gemspecFilename(name, version, platform)
-	metaPath := path.Join(indexPrefix, "gemspecs", filename+".json")
+func (idx *Index) GetGemspec(ctx context.Context, name, version, platform string) (*CachedGemspec, error) {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
 
-	metaReader, err := i.backend.Read(ctx, metaPath)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+	filename := gemspecFilename(name, version, platform)
+	var cached CachedGemspec
+	if err := idx.gemspecIndex.GetJSON(ctx, filename, &cached); err != nil {
+		if err == metadb.ErrNotFound {
 			return nil, ErrNotFound
 		}
-		return nil, fmt.Errorf("reading gemspec metadata: %w", err)
-	}
-	defer func() { _ = metaReader.Close() }()
-
-	var meta CachedGemspec
-	if err := json.NewDecoder(metaReader).Decode(&meta); err != nil {
-		return nil, fmt.Errorf("decoding gemspec metadata: %w", err)
+		return nil, err
 	}
 
-	return &meta, nil
+	return &cached, nil
 }
 
-// PutGemspec stores gemspec metadata.
-func (i *Index) PutGemspec(ctx context.Context, spec *CachedGemspec) error {
+// PutGemspec stores gemspec metadata with blob reference.
+func (idx *Index) PutGemspec(ctx context.Context, spec *CachedGemspec) error {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+
 	filename := gemspecFilename(spec.Name, spec.Version, spec.Platform)
-	metaPath := path.Join(indexPrefix, "gemspecs", filename+".json")
 
-	metaBytes, err := json.Marshal(spec)
-	if err != nil {
-		return fmt.Errorf("encoding gemspec metadata: %w", err)
-	}
-	if err := i.backend.Write(ctx, metaPath, bytes.NewReader(metaBytes)); err != nil {
-		return fmt.Errorf("writing gemspec metadata: %w", err)
+	// Collect blob ref for the gemspec content
+	var refs []string
+	if !spec.ContentHash.IsZero() {
+		refs = []string{"blake3:" + spec.ContentHash.String()}
 	}
 
-	return nil
+	return idx.gemspecIndex.PutJSON(ctx, filename, spec, refs)
 }
 
 // IsExpired checks if the cached content is expired based on TTL.
-func (i *Index) IsExpired(cachedAt time.Time, ttl time.Duration) bool {
-	return time.Since(cachedAt) > ttl
+func (idx *Index) IsExpired(cachedAt time.Time, ttl time.Duration) bool {
+	return idx.now().Sub(cachedAt) > ttl
 }
 
 // gemspecFilename builds the filename for a gemspec.
@@ -322,4 +280,75 @@ func gemspecFilename(name, version, platform string) string {
 		return name + "-" + version
 	}
 	return name + "-" + version + "-" + platform
+}
+
+// extractReprDigest extracts the ReprDigest from envelope attributes if present.
+// This is used for the Repr-Digest header in Compact Index responses.
+func extractReprDigest(env *metadb.MetadataEnvelope) string {
+	if env.Attributes == nil {
+		return ""
+	}
+	if data, ok := env.Attributes["repr_digest"]; ok {
+		return string(data)
+	}
+	return ""
+}
+
+// encodeChecksums encodes checksums map to JSON bytes for envelope attributes.
+func encodeChecksums(checksums map[string]string) []byte {
+	if len(checksums) == 0 {
+		return nil
+	}
+	// Simple JSON encoding: {"key":"value",...}
+	// Using manual encoding to avoid import cycle and keep it simple
+	var buf []byte
+	buf = append(buf, '{')
+	first := true
+	for k, v := range checksums {
+		if !first {
+			buf = append(buf, ',')
+		}
+		first = false
+		buf = append(buf, '"')
+		buf = append(buf, escapeJSON(k)...)
+		buf = append(buf, `":"`...)
+		buf = append(buf, escapeJSON(v)...)
+		buf = append(buf, '"')
+	}
+	buf = append(buf, '}')
+	return buf
+}
+
+// decodeChecksums decodes JSON bytes to checksums map.
+func decodeChecksums(data []byte) map[string]string {
+	if len(data) == 0 {
+		return nil
+	}
+	var m map[string]string
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil
+	}
+	return m
+}
+
+// escapeJSON escapes a string for JSON encoding.
+func escapeJSON(s string) string {
+	var buf []byte
+	for _, r := range s {
+		switch r {
+		case '"':
+			buf = append(buf, '\\', '"')
+		case '\\':
+			buf = append(buf, '\\', '\\')
+		case '\n':
+			buf = append(buf, '\\', 'n')
+		case '\r':
+			buf = append(buf, '\\', 'r')
+		case '\t':
+			buf = append(buf, '\\', 't')
+		default:
+			buf = append(buf, string(r)...)
+		}
+	}
+	return string(buf)
 }

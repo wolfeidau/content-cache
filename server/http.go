@@ -274,8 +274,38 @@ func New(cfg Config) (*Server, error) {
 	}
 	mavenHandler := maven.NewHandler(mavenIndex, cafsStore, mavenHandlerOpts...)
 
-	// Initialize RubyGems components
-	rubygemsIndex := rubygems.NewIndex(fsBackend)
+	// Initialize RubyGems components using metadb EnvelopeIndex
+	rubygemsTTL := cfg.RubyGemsMetadataTTL
+	if rubygemsTTL == 0 {
+		rubygemsTTL = 5 * time.Minute
+	}
+	rubygemsVersionsIndex, err := metadb.NewEnvelopeIndex(boltDB, "rubygems", "versions", rubygemsTTL)
+	if err != nil {
+		return nil, fmt.Errorf("creating rubygems versions index: %w", err)
+	}
+	rubygemsInfoIndex, err := metadb.NewEnvelopeIndex(boltDB, "rubygems", "info", rubygemsTTL)
+	if err != nil {
+		return nil, fmt.Errorf("creating rubygems info index: %w", err)
+	}
+	rubygemsSpecsIndex, err := metadb.NewEnvelopeIndex(boltDB, "rubygems", "specs", rubygemsTTL)
+	if err != nil {
+		return nil, fmt.Errorf("creating rubygems specs index: %w", err)
+	}
+	rubygemsGemIndex, err := metadb.NewEnvelopeIndex(boltDB, "rubygems", "gem", 24*time.Hour)
+	if err != nil {
+		return nil, fmt.Errorf("creating rubygems gem index: %w", err)
+	}
+	rubygemsGemspecIndex, err := metadb.NewEnvelopeIndex(boltDB, "rubygems", "gemspec", 24*time.Hour)
+	if err != nil {
+		return nil, fmt.Errorf("creating rubygems gemspec index: %w", err)
+	}
+	rubygemsIndex := rubygems.NewIndex(
+		rubygemsVersionsIndex,
+		rubygemsInfoIndex,
+		rubygemsSpecsIndex,
+		rubygemsGemIndex,
+		rubygemsGemspecIndex,
+	)
 	rubygemsUpstreamOpts := []rubygems.UpstreamOption{}
 	if cfg.UpstreamRubyGems != "" {
 		rubygemsUpstreamOpts = append(rubygemsUpstreamOpts, rubygems.WithRegistryURL(cfg.UpstreamRubyGems))
