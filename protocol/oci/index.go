@@ -2,37 +2,37 @@ package oci
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"net/url"
-	"path"
-	"strings"
 	"sync"
 	"time"
 
 	contentcache "github.com/wolfeidau/content-cache"
-	"github.com/wolfeidau/content-cache/backend"
+	"github.com/wolfeidau/content-cache/store/metadb"
 )
-
-const ociPrefix = "oci"
 
 // ErrNotFound is returned when a resource is not found in the index.
 var ErrNotFound = errors.New("not found")
 
-// Index manages the OCI image cache index.
+// Index manages the OCI image cache index using metadb envelope storage.
 type Index struct {
-	backend backend.Backend
-	mu      sync.RWMutex
-	now     func() time.Time
+	imageIndex    *metadb.EnvelopeIndex // protocol="oci", kind="image" for tag->digest mappings
+	manifestIndex *metadb.EnvelopeIndex // protocol="oci", kind="manifest" for manifest metadata
+	blobIndex     *metadb.EnvelopeIndex // protocol="oci", kind="blob" for blob metadata
+	mu            sync.RWMutex
+	now           func() time.Time
 }
 
-// NewIndex creates a new OCI index.
-func NewIndex(b backend.Backend) *Index {
+// NewIndex creates a new OCI index using EnvelopeIndex instances.
+// imageIndex: protocol="oci", kind="image" for tag-to-digest mappings (CachedImage)
+// manifestIndex: protocol="oci", kind="manifest" for manifest metadata (CachedManifest)
+// blobIndex: protocol="oci", kind="blob" for blob metadata (CachedBlob)
+func NewIndex(imageIndex, manifestIndex, blobIndex *metadb.EnvelopeIndex) *Index {
 	return &Index{
-		backend: b,
-		now:     time.Now,
+		imageIndex:    imageIndex,
+		manifestIndex: manifestIndex,
+		blobIndex:     blobIndex,
+		now:           time.Now,
 	}
 }
 
@@ -41,8 +41,12 @@ func (idx *Index) GetTagDigest(ctx context.Context, name, tag string) (string, t
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	image, err := idx.getImage(ctx, name)
-	if err != nil {
+	key := encodeImageName(name)
+	var image CachedImage
+	if err := idx.imageIndex.GetJSON(ctx, key, &image); err != nil {
+		if errors.Is(err, metadb.ErrNotFound) {
+			return "", time.Time{}, ErrNotFound
+		}
 		return "", time.Time{}, err
 	}
 
@@ -59,9 +63,13 @@ func (idx *Index) SetTagDigest(ctx context.Context, name, tag, digest string) er
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	image, err := idx.getImage(ctx, name)
-	if errors.Is(err, ErrNotFound) {
-		image = &CachedImage{
+	key := encodeImageName(name)
+
+	// Get or create cached image
+	var image CachedImage
+	err := idx.imageIndex.GetJSON(ctx, key, &image)
+	if errors.Is(err, metadb.ErrNotFound) {
+		image = CachedImage{
 			Name:      name,
 			Tags:      make(map[string]*CachedTag),
 			CachedAt:  idx.now(),
@@ -80,7 +88,10 @@ func (idx *Index) SetTagDigest(ctx context.Context, name, tag, digest string) er
 	}
 	image.UpdatedAt = now
 
-	return idx.putImage(ctx, name, image)
+	// Collect blob refs from all tags (digests of manifests)
+	refs := collectImageBlobRefs(&image)
+
+	return idx.imageIndex.PutJSON(ctx, key, &image, refs)
 }
 
 // RefreshTag updates the RefreshedAt timestamp for a tag without changing the digest.
@@ -88,8 +99,12 @@ func (idx *Index) RefreshTag(ctx context.Context, name, tag string) error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	image, err := idx.getImage(ctx, name)
-	if err != nil {
+	key := encodeImageName(name)
+	var image CachedImage
+	if err := idx.imageIndex.GetJSON(ctx, key, &image); err != nil {
+		if errors.Is(err, metadb.ErrNotFound) {
+			return ErrNotFound
+		}
 		return err
 	}
 
@@ -101,7 +116,8 @@ func (idx *Index) RefreshTag(ctx context.Context, name, tag string) error {
 	cachedTag.RefreshedAt = idx.now()
 	image.UpdatedAt = idx.now()
 
-	return idx.putImage(ctx, name, image)
+	refs := collectImageBlobRefs(&image)
+	return idx.imageIndex.PutJSON(ctx, key, &image, refs)
 }
 
 // GetManifest returns the cached manifest metadata by digest.
@@ -109,16 +125,13 @@ func (idx *Index) GetManifest(ctx context.Context, digest string) (*CachedManife
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	key := idx.manifestKey(digest)
-	rc, err := idx.backend.Read(ctx, key)
-	if err != nil {
-		return nil, ErrNotFound
-	}
-	defer func() { _ = rc.Close() }()
-
+	key := encodeDigest(digest)
 	var manifest CachedManifest
-	if err := json.NewDecoder(rc).Decode(&manifest); err != nil {
-		return nil, fmt.Errorf("decoding manifest: %w", err)
+	if err := idx.manifestIndex.GetJSON(ctx, key, &manifest); err != nil {
+		if errors.Is(err, metadb.ErrNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
 	}
 
 	return &manifest, nil
@@ -137,13 +150,11 @@ func (idx *Index) PutManifest(ctx context.Context, digest, mediaType string, has
 		CachedAt:    idx.now(),
 	}
 
-	key := idx.manifestKey(digest)
-	data, err := json.Marshal(manifest)
-	if err != nil {
-		return fmt.Errorf("encoding manifest: %w", err)
-	}
+	key := encodeDigest(digest)
+	// Manifest content hash is a blob ref
+	refs := []string{"blake3:" + hash.String()}
 
-	return idx.backend.Write(ctx, key, strings.NewReader(string(data)))
+	return idx.manifestIndex.PutJSON(ctx, key, manifest, refs)
 }
 
 // GetBlob returns the cached blob metadata by digest.
@@ -151,16 +162,13 @@ func (idx *Index) GetBlob(ctx context.Context, digest string) (*CachedBlob, erro
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	key := idx.blobKey(digest)
-	rc, err := idx.backend.Read(ctx, key)
-	if err != nil {
-		return nil, ErrNotFound
-	}
-	defer func() { _ = rc.Close() }()
-
+	key := encodeDigest(digest)
 	var blob CachedBlob
-	if err := json.NewDecoder(rc).Decode(&blob); err != nil {
-		return nil, fmt.Errorf("decoding blob: %w", err)
+	if err := idx.blobIndex.GetJSON(ctx, key, &blob); err != nil {
+		if errors.Is(err, metadb.ErrNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
 	}
 
 	return &blob, nil
@@ -178,13 +186,11 @@ func (idx *Index) PutBlob(ctx context.Context, digest string, hash contentcache.
 		CachedAt:    idx.now(),
 	}
 
-	key := idx.blobKey(digest)
-	data, err := json.Marshal(blob)
-	if err != nil {
-		return fmt.Errorf("encoding blob: %w", err)
-	}
+	key := encodeDigest(digest)
+	// Blob content hash is a blob ref
+	refs := []string{"blake3:" + hash.String()}
 
-	return idx.backend.Write(ctx, key, strings.NewReader(string(data)))
+	return idx.blobIndex.PutJSON(ctx, key, blob, refs)
 }
 
 // ListImages returns a list of all cached image names.
@@ -192,18 +198,14 @@ func (idx *Index) ListImages(ctx context.Context) ([]string, error) {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	prefix := path.Join(ociPrefix, "images") + "/"
-	keys, err := idx.backend.List(ctx, prefix)
+	keys, err := idx.imageIndex.List(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("listing images: %w", err)
+		return nil, err
 	}
 
 	var names []string
 	for _, key := range keys {
-		// Remove prefix and .json suffix
-		name := strings.TrimPrefix(key, prefix)
-		name = strings.TrimSuffix(name, ".json")
-		decoded, err := decodeImageName(name)
+		decoded, err := decodeImageName(key)
 		if err != nil {
 			continue
 		}
@@ -211,64 +213,6 @@ func (idx *Index) ListImages(ctx context.Context) ([]string, error) {
 	}
 
 	return names, nil
-}
-
-// getImage reads image metadata from storage.
-func (idx *Index) getImage(ctx context.Context, name string) (*CachedImage, error) {
-	key := idx.imageKey(name)
-	rc, err := idx.backend.Read(ctx, key)
-	if err != nil {
-		return nil, ErrNotFound
-	}
-	defer func() { _ = rc.Close() }()
-
-	data, err := io.ReadAll(rc)
-	if err != nil {
-		return nil, fmt.Errorf("reading image: %w", err)
-	}
-
-	var image CachedImage
-	if err := json.Unmarshal(data, &image); err != nil {
-		return nil, fmt.Errorf("decoding image: %w", err)
-	}
-
-	return &image, nil
-}
-
-// putImage writes image metadata to storage.
-func (idx *Index) putImage(ctx context.Context, name string, image *CachedImage) error {
-	key := idx.imageKey(name)
-	data, err := json.Marshal(image)
-	if err != nil {
-		return fmt.Errorf("encoding image: %w", err)
-	}
-
-	return idx.backend.Write(ctx, key, strings.NewReader(string(data)))
-}
-
-// imageKey returns the storage key for an image.
-func (idx *Index) imageKey(name string) string {
-	return path.Join(ociPrefix, "images", encodeImageName(name)+".json")
-}
-
-// manifestKey returns the storage key for a manifest.
-func (idx *Index) manifestKey(digest string) string {
-	d, err := ParseDigest(digest)
-	if err != nil {
-		// Fallback to using the raw digest
-		return path.Join(ociPrefix, "manifests", digest+".json")
-	}
-	return path.Join(ociPrefix, "manifests", d.Algorithm, d.Hex+".json")
-}
-
-// blobKey returns the storage key for a blob.
-func (idx *Index) blobKey(digest string) string {
-	d, err := ParseDigest(digest)
-	if err != nil {
-		// Fallback to using the raw digest
-		return path.Join(ociPrefix, "blobs", digest+".json")
-	}
-	return path.Join(ociPrefix, "blobs", d.Algorithm, d.Hex+".json")
 }
 
 // encodeImageName encodes an image name for use in storage keys.
@@ -280,4 +224,23 @@ func encodeImageName(name string) string {
 // decodeImageName decodes a storage key back to an image name.
 func decodeImageName(encoded string) (string, error) {
 	return url.PathUnescape(encoded)
+}
+
+// encodeDigest encodes a digest for use as a storage key.
+// Uses the digest hex portion (after algorithm:) for uniqueness.
+func encodeDigest(digest string) string {
+	d, err := ParseDigest(digest)
+	if err != nil {
+		return url.PathEscape(digest)
+	}
+	return d.Algorithm + "_" + d.Hex
+}
+
+// collectImageBlobRefs extracts manifest digest references from a CachedImage.
+// Note: These are not CAFS blob refs, but OCI manifest digests stored for reference tracking.
+// The actual CAFS blob refs are stored when manifests/blobs are cached.
+func collectImageBlobRefs(_ *CachedImage) []string {
+	// Image metadata doesn't directly reference CAFS blobs - the manifest and blob
+	// indexes track those references. Return nil to avoid double-counting.
+	return nil
 }

@@ -2,20 +2,40 @@ package oci
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	contentcache "github.com/wolfeidau/content-cache"
-	"github.com/wolfeidau/content-cache/backend"
+	"github.com/wolfeidau/content-cache/store/metadb"
 )
 
 func newTestIndex(t *testing.T) *Index {
 	t.Helper()
 	tmpDir := t.TempDir()
-	b, err := backend.NewFilesystem(tmpDir)
+
+	// Create and open BoltDB for envelope storage
+	db := metadb.New()
+	err := db.Open(filepath.Join(tmpDir, "metadata.db"))
 	require.NoError(t, err)
-	return NewIndex(b)
+
+	boltDB, ok := db.(*metadb.BoltDB)
+	require.True(t, ok, "metaDB must be *metadb.BoltDB")
+
+	// Create EnvelopeIndex instances for OCI
+	imageIndex, err := metadb.NewEnvelopeIndex(boltDB, "oci", "image", 24*time.Hour)
+	require.NoError(t, err)
+	manifestIndex, err := metadb.NewEnvelopeIndex(boltDB, "oci", "manifest", 24*time.Hour)
+	require.NoError(t, err)
+	blobIndex, err := metadb.NewEnvelopeIndex(boltDB, "oci", "blob", 24*time.Hour)
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	return NewIndex(imageIndex, manifestIndex, blobIndex)
 }
 
 func TestIndexTagDigest(t *testing.T) {
