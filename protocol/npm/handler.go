@@ -17,6 +17,7 @@ import (
 	"time"
 
 	contentcache "github.com/wolfeidau/content-cache"
+	"github.com/wolfeidau/content-cache/download"
 	"github.com/wolfeidau/content-cache/store"
 	"github.com/wolfeidau/content-cache/telemetry"
 )
@@ -33,10 +34,11 @@ var tarballPathRegex = regexp.MustCompile(`^/(.+?)/-/(.+)\.tgz$`)
 
 // Handler implements the NPM registry protocol as an HTTP handler.
 type Handler struct {
-	index    *Index
-	store    store.Store
-	upstream *Upstream
-	logger   *slog.Logger
+	index      *Index
+	store      store.Store
+	upstream   *Upstream
+	logger     *slog.Logger
+	downloader *download.Downloader
 
 	// Lifecycle management for background goroutines
 	wg     sync.WaitGroup
@@ -58,6 +60,13 @@ func WithLogger(logger *slog.Logger) HandlerOption {
 func WithUpstream(upstream *Upstream) HandlerOption {
 	return func(h *Handler) {
 		h.upstream = upstream
+	}
+}
+
+// WithDownloader sets the singleflight downloader for deduplicating concurrent fetches.
+func WithDownloader(dl *download.Downloader) HandlerOption {
+	return func(h *Handler) {
+		h.downloader = dl
 	}
 }
 
@@ -316,6 +325,42 @@ func (h *Handler) handleTarball(w http.ResponseWriter, r *http.Request, packageN
 		}
 	}
 
+	// Fetch from upstream (with singleflight deduplication if downloader is configured)
+	logger.Debug("cache miss, fetching from upstream", "version", version)
+	telemetry.SetCacheResult(r, telemetry.CacheMiss)
+
+	if h.downloader != nil {
+		h.handleTarballWithDownloader(w, r, packageName, version, logger)
+		return
+	}
+
+	h.handleTarballDirect(w, r, packageName, version, logger)
+}
+
+// handleTarballWithDownloader uses the singleflight downloader to deduplicate concurrent fetches.
+func (h *Handler) handleTarballWithDownloader(w http.ResponseWriter, r *http.Request, packageName, version string, logger *slog.Logger) {
+	key := fmt.Sprintf("npm:tarball:%s:%s", packageName, version)
+
+	result, _, err := h.downloader.Do(r.Context(), key, func(dlCtx context.Context) (*download.Result, error) {
+		return h.fetchAndStoreTarball(dlCtx, packageName, version, logger)
+	})
+
+	download.HandleResult(download.HandleResultParams{
+		Writer:     w,
+		Request:    r,
+		Downloader: h.downloader,
+		Key:        key,
+		Result:     result,
+		Err:        err,
+		Store:      h.store,
+		IsNotFound: func(e error) bool { return errors.Is(e, ErrNotFound) },
+		Opts:       download.ServeOptions{ContentType: "application/octet-stream"},
+		Logger:     logger,
+	})
+}
+
+// fetchAndStoreTarball fetches a tarball from upstream, verifies integrity, stores in CAFS, and updates the index.
+func (h *Handler) fetchAndStoreTarball(ctx context.Context, packageName, version string, logger *slog.Logger) (*download.Result, error) {
 	// Fetch package metadata to get expected shasum for integrity verification
 	var expectedShasum string
 	var expectedIntegrity string
@@ -331,9 +376,92 @@ func (h *Handler) handleTarball(w http.ResponseWriter, r *http.Request, packageN
 		}
 	}
 
-	// Fetch from upstream
-	logger.Debug("cache miss, fetching from upstream", "version", version)
-	telemetry.SetCacheResult(r, telemetry.CacheMiss)
+	tarballURL := h.upstream.TarballURL(packageName, version)
+
+	rc, err := h.upstream.FetchTarball(ctx, tarballURL)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rc.Close() }()
+
+	// Create temp file
+	tmpFile, err := os.CreateTemp("", "npm-tarball-*")
+	if err != nil {
+		return nil, fmt.Errorf("creating temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	// Stream to temp file while computing hashes
+	hr := contentcache.NewHashingReader(rc)
+	sha1Hash := sha1.New()
+	teeReader := io.TeeReader(hr, sha1Hash)
+
+	size, err := io.Copy(tmpFile, teeReader)
+	if err != nil {
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("reading tarball: %w", err)
+	}
+	hash := hr.Sum()
+	computedShasum := hex.EncodeToString(sha1Hash.Sum(nil))
+
+	// Verify integrity
+	if expectedShasum != "" && computedShasum != expectedShasum {
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("integrity check failed: expected %s, got %s", expectedShasum, computedShasum)
+	}
+
+	if expectedShasum != "" {
+		logger.Debug("integrity check passed", "shasum", computedShasum)
+	}
+
+	// Seek to beginning for storing in CAFS
+	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("seeking temp file: %w", err)
+	}
+
+	// Store in CAFS
+	storedHash, err := h.store.Put(ctx, tmpFile)
+	if err != nil {
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("storing tarball: %w", err)
+	}
+	_ = tmpFile.Close()
+
+	if storedHash != hash {
+		logger.Warn("hash mismatch during storage", "expected", hash.ShortString(), "got", storedHash.ShortString())
+	}
+
+	// Update index
+	if err := h.index.SetVersionTarballHash(ctx, packageName, version, hash, size, computedShasum, expectedIntegrity); err != nil {
+		logger.Error("failed to update index", "error", err)
+	} else {
+		logger.Info("cached tarball", "version", version, "hash", hash.ShortString(), "size", size, "shasum", computedShasum)
+	}
+
+	return &download.Result{Hash: hash, Size: size}, nil
+}
+
+// handleTarballDirect fetches from upstream without singleflight deduplication (legacy path).
+func (h *Handler) handleTarballDirect(w http.ResponseWriter, r *http.Request, packageName, version string, logger *slog.Logger) {
+	ctx := r.Context()
+
+	// Fetch package metadata to get expected shasum for integrity verification
+	var expectedShasum string
+	var expectedIntegrity string
+	if version != "" {
+		meta, err := h.upstream.FetchPackageMetadata(ctx, packageName)
+		if err == nil {
+			if versionMeta, ok := meta.Versions[version]; ok && versionMeta.Dist != nil {
+				expectedShasum = versionMeta.Dist.Shasum
+				expectedIntegrity = versionMeta.Dist.Integrity
+			}
+		} else {
+			logger.Warn("failed to fetch metadata for integrity check", "error", err)
+		}
+	}
+
 	tarballURL := h.upstream.TarballURL(packageName, version)
 
 	rc, err := h.upstream.FetchTarball(ctx, tarballURL)

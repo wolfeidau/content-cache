@@ -20,6 +20,7 @@ import (
 	"time"
 
 	contentcache "github.com/wolfeidau/content-cache"
+	"github.com/wolfeidau/content-cache/download"
 	"github.com/wolfeidau/content-cache/store"
 	"github.com/wolfeidau/content-cache/telemetry"
 )
@@ -54,6 +55,7 @@ type Handler struct {
 	store       store.Store
 	upstream    *Upstream
 	logger      *slog.Logger
+	downloader  *download.Downloader
 	metadataTTL time.Duration
 
 	// Lifecycle management for background goroutines
@@ -76,6 +78,13 @@ func WithLogger(logger *slog.Logger) HandlerOption {
 func WithUpstream(upstream *Upstream) HandlerOption {
 	return func(h *Handler) {
 		h.upstream = upstream
+	}
+}
+
+// WithDownloader sets the singleflight downloader for deduplicating concurrent fetches.
+func WithDownloader(dl *download.Downloader) HandlerOption {
+	return func(h *Handler) {
+		h.downloader = dl
 	}
 }
 
@@ -410,12 +419,130 @@ func (h *Handler) handleArtifact(w http.ResponseWriter, r *http.Request, coord A
 		logger.Error("cache read failed", "error", err)
 	}
 
-	// Fetch SHA1 checksum from upstream for integrity verification
-	sha1Checksum, _ := h.upstream.FetchChecksum(ctx, coord, ChecksumSHA1)
-
 	// Fetch from upstream
 	telemetry.SetCacheResult(r, telemetry.CacheMiss)
 	logger.Debug("cache miss, fetching from upstream")
+
+	if h.downloader != nil {
+		h.handleArtifactWithDownloader(w, r, coord, logger)
+		return
+	}
+
+	h.handleArtifactDirect(w, r, coord, logger)
+}
+
+// handleArtifactWithDownloader uses the singleflight downloader to deduplicate concurrent artifact fetches.
+func (h *Handler) handleArtifactWithDownloader(w http.ResponseWriter, r *http.Request, coord ArtifactCoordinate, logger *slog.Logger) {
+	key := fmt.Sprintf("maven:artifact:%s/%s/%s/%s.%s", coord.GroupID, coord.ArtifactID, coord.Version, coord.Classifier, coord.Extension)
+
+	result, _, err := h.downloader.Do(r.Context(), key, func(dlCtx context.Context) (*download.Result, error) {
+		return h.fetchAndStoreArtifact(dlCtx, coord, logger)
+	})
+
+	download.HandleResult(download.HandleResultParams{
+		Writer:     w,
+		Request:    r,
+		Downloader: h.downloader,
+		Key:        key,
+		Result:     result,
+		Err:        err,
+		Store:      h.store,
+		IsNotFound: func(e error) bool { return errors.Is(e, ErrNotFound) },
+		Opts:       download.ServeOptions{ContentType: contentTypeForExtension(coord.Extension)},
+		Logger:     logger,
+	})
+}
+
+// fetchAndStoreArtifact fetches an artifact from upstream, verifies integrity, stores in CAFS, and updates the index.
+func (h *Handler) fetchAndStoreArtifact(ctx context.Context, coord ArtifactCoordinate, logger *slog.Logger) (*download.Result, error) {
+	sha1Checksum, _ := h.upstream.FetchChecksum(ctx, coord, ChecksumSHA1)
+
+	rc, _, err := h.upstream.FetchArtifact(ctx, coord)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rc.Close() }()
+
+	tmpFile, err := os.CreateTemp("", "maven-artifact-*")
+	if err != nil {
+		return nil, fmt.Errorf("creating temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	hr := contentcache.NewHashingReader(rc)
+	sha1Hash := sha1.New()
+	md5Hash := md5.New()
+	sha256Hash := sha256.New()
+	sha512Hash := sha512.New()
+	multiWriter := io.MultiWriter(tmpFile, sha1Hash, md5Hash, sha256Hash, sha512Hash)
+
+	size, err := io.Copy(multiWriter, hr)
+	if err != nil {
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("reading artifact: %w", err)
+	}
+	blake3Hash := hr.Sum()
+	computedSHA1 := hex.EncodeToString(sha1Hash.Sum(nil))
+
+	if sha1Checksum != "" && computedSHA1 != sha1Checksum {
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("SHA1 integrity check failed: expected %s, got %s", sha1Checksum, computedSHA1)
+	}
+
+	if sha1Checksum != "" {
+		logger.Debug("integrity check passed", "sha1", computedSHA1)
+	}
+
+	// Seek to beginning for storing in CAFS
+	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("seeking temp file: %w", err)
+	}
+
+	storedHash, err := h.store.Put(ctx, tmpFile)
+	if err != nil {
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("storing artifact: %w", err)
+	}
+	_ = tmpFile.Close()
+
+	if storedHash != blake3Hash {
+		logger.Warn("hash mismatch during storage", "expected", blake3Hash.ShortString(), "got", storedHash.ShortString())
+	}
+
+	checksums := Checksums{
+		SHA1:   computedSHA1,
+		MD5:    hex.EncodeToString(md5Hash.Sum(nil)),
+		SHA256: hex.EncodeToString(sha256Hash.Sum(nil)),
+		SHA512: hex.EncodeToString(sha512Hash.Sum(nil)),
+	}
+
+	artifact := &CachedArtifact{
+		GroupID:    coord.GroupID,
+		ArtifactID: coord.ArtifactID,
+		Version:    coord.Version,
+		Classifier: coord.Classifier,
+		Extension:  coord.Extension,
+		Hash:       blake3Hash,
+		Size:       size,
+		Checksums:  checksums,
+	}
+	if err := h.index.PutCachedArtifact(ctx, artifact); err != nil {
+		logger.Error("failed to update index", "error", err)
+	} else {
+		logger.Info("cached artifact", "hash", blake3Hash.ShortString(), "size", size)
+	}
+
+	return &download.Result{Hash: blake3Hash, Size: size}, nil
+}
+
+// handleArtifactDirect handles artifact requests without singleflight deduplication (legacy path).
+func (h *Handler) handleArtifactDirect(w http.ResponseWriter, r *http.Request, coord ArtifactCoordinate, logger *slog.Logger) {
+	ctx := r.Context()
+
+	sha1Checksum, _ := h.upstream.FetchChecksum(ctx, coord, ChecksumSHA1)
+
 	rc, _, err := h.upstream.FetchArtifact(ctx, coord)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -428,7 +555,6 @@ func (h *Handler) handleArtifact(w http.ResponseWriter, r *http.Request, coord A
 	}
 	defer func() { _ = rc.Close() }()
 
-	// Create temp file to avoid memory exhaustion for large artifacts
 	tmpFile, err := os.CreateTemp("", "maven-artifact-*")
 	if err != nil {
 		logger.Error("failed to create temp file", "error", err)
@@ -436,9 +562,7 @@ func (h *Handler) handleArtifact(w http.ResponseWriter, r *http.Request, coord A
 		return
 	}
 	tmpPath := tmpFile.Name()
-	// Note: tmpPath cleanup is handled by cacheArtifact or on error paths below
 
-	// Stream to temp file while computing hashes
 	hr := contentcache.NewHashingReader(rc)
 	sha1Hash := sha1.New()
 	md5Hash := md5.New()
@@ -460,7 +584,6 @@ func (h *Handler) handleArtifact(w http.ResponseWriter, r *http.Request, coord A
 	computedSHA256 := hex.EncodeToString(sha256Hash.Sum(nil))
 	computedSHA512 := hex.EncodeToString(sha512Hash.Sum(nil))
 
-	// Verify integrity if we have expected checksums
 	if sha1Checksum != "" && computedSHA1 != sha1Checksum {
 		_ = tmpFile.Close()
 		_ = os.Remove(tmpPath)
@@ -476,7 +599,6 @@ func (h *Handler) handleArtifact(w http.ResponseWriter, r *http.Request, coord A
 		logger.Debug("integrity check passed", "sha1", computedSHA1)
 	}
 
-	// Seek to beginning for sending to client
 	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
 		_ = tmpFile.Close()
 		_ = os.Remove(tmpPath)
@@ -485,7 +607,6 @@ func (h *Handler) handleArtifact(w http.ResponseWriter, r *http.Request, coord A
 		return
 	}
 
-	// Write to client
 	w.Header().Set("Content-Type", contentTypeForExtension(coord.Extension))
 	if size > 0 {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
@@ -497,7 +618,6 @@ func (h *Handler) handleArtifact(w http.ResponseWriter, r *http.Request, coord A
 	}
 	_ = tmpFile.Close()
 
-	// Cache asynchronously
 	checksums := Checksums{
 		SHA1:   computedSHA1,
 		MD5:    computedMD5,

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	contentcache "github.com/wolfeidau/content-cache"
+	"github.com/wolfeidau/content-cache/download"
 	"github.com/wolfeidau/content-cache/store"
 	"github.com/wolfeidau/content-cache/telemetry"
 )
@@ -35,6 +36,7 @@ type Handler struct {
 	store       store.Store
 	upstream    *Upstream
 	logger      *slog.Logger
+	downloader  *download.Downloader
 	metadataTTL time.Duration
 
 	// Lifecycle management for background goroutines
@@ -57,6 +59,13 @@ func WithLogger(logger *slog.Logger) HandlerOption {
 func WithUpstream(upstream *Upstream) HandlerOption {
 	return func(h *Handler) {
 		h.upstream = upstream
+	}
+}
+
+// WithDownloader sets the singleflight downloader for deduplicating concurrent fetches.
+func WithDownloader(dl *download.Downloader) HandlerOption {
+	return func(h *Handler) {
+		h.downloader = dl
 	}
 }
 
@@ -340,6 +349,110 @@ func (h *Handler) handleFile(w http.ResponseWriter, r *http.Request) {
 	// Fetch from upstream
 	logger.Debug("cache miss, fetching from upstream")
 	telemetry.SetCacheResult(r, telemetry.CacheMiss)
+
+	if h.downloader != nil {
+		h.handleFileWithDownloader(w, r, project, filename, upstreamURL, expectedHash, fileHashes, requiresPython, logger)
+		return
+	}
+
+	h.handleFileDirect(w, r, project, filename, upstreamURL, expectedHash, fileHashes, requiresPython, logger)
+}
+
+// handleFileWithDownloader uses the singleflight downloader to deduplicate concurrent file fetches.
+func (h *Handler) handleFileWithDownloader(w http.ResponseWriter, r *http.Request, project, filename, upstreamURL, expectedHash string, fileHashes map[string]string, requiresPython string, logger *slog.Logger) {
+	key := fmt.Sprintf("pypi:file:%s", filename)
+
+	result, _, err := h.downloader.Do(r.Context(), key, func(dlCtx context.Context) (*download.Result, error) {
+		return h.fetchAndStoreFile(dlCtx, project, filename, upstreamURL, expectedHash, fileHashes, requiresPython, logger)
+	})
+
+	download.HandleResult(download.HandleResultParams{
+		Writer:          w,
+		Request:         r,
+		Downloader:      h.downloader,
+		Key:             key,
+		Result:          result,
+		Err:             err,
+		Store:           h.store,
+		IsNotFound:      func(e error) bool { return errors.Is(e, ErrNotFound) },
+		NotFoundHandler: func() { http.NotFound(w, r) },
+		Opts:            download.ServeOptions{ContentType: "application/octet-stream"},
+		Logger:          logger,
+	})
+}
+
+// fetchAndStoreFile fetches a file from upstream, verifies integrity, stores in CAFS, and updates the index.
+func (h *Handler) fetchAndStoreFile(ctx context.Context, project, filename, upstreamURL, expectedHash string, fileHashes map[string]string, requiresPython string, logger *slog.Logger) (*download.Result, error) {
+	rc, err := h.upstream.FetchFile(ctx, upstreamURL)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rc.Close() }()
+
+	tmpFile, err := os.CreateTemp("", "pypi-file-*")
+	if err != nil {
+		return nil, fmt.Errorf("creating temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	hr := contentcache.NewHashingReader(rc)
+	sha256Hash := sha256.New()
+	teeReader := io.TeeReader(hr, sha256Hash)
+
+	size, err := io.Copy(tmpFile, teeReader)
+	if err != nil {
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("reading file: %w", err)
+	}
+	contentHash := hr.Sum()
+	computedSha256 := hex.EncodeToString(sha256Hash.Sum(nil))
+
+	if expectedHash != "" && computedSha256 != expectedHash {
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("integrity check failed: expected %s, got %s", expectedHash, computedSha256)
+	}
+
+	if expectedHash != "" {
+		logger.Debug("integrity check passed", "sha256", computedSha256)
+	}
+
+	// Seek to beginning for storing in CAFS
+	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("seeking temp file: %w", err)
+	}
+
+	storedHash, err := h.store.Put(ctx, tmpFile)
+	if err != nil {
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("storing file: %w", err)
+	}
+	_ = tmpFile.Close()
+
+	if storedHash != contentHash {
+		logger.Warn("hash mismatch during storage", "expected", contentHash.ShortString(), "got", storedHash.ShortString())
+	}
+
+	// Update hashes
+	if fileHashes == nil {
+		fileHashes = make(map[string]string)
+	}
+	fileHashes["sha256"] = computedSha256
+
+	if err := h.index.SetFileHash(ctx, project, filename, contentHash, size, fileHashes, upstreamURL, requiresPython); err != nil {
+		logger.Error("failed to update index", "error", err)
+	} else {
+		logger.Info("cached file", "filename", filename, "hash", contentHash.ShortString(), "size", size)
+	}
+
+	return &download.Result{Hash: contentHash, Size: size}, nil
+}
+
+// handleFileDirect handles file download requests without singleflight deduplication (legacy path).
+func (h *Handler) handleFileDirect(w http.ResponseWriter, r *http.Request, project, filename, upstreamURL, expectedHash string, fileHashes map[string]string, requiresPython string, logger *slog.Logger) {
+	ctx := r.Context()
+
 	rc, err := h.upstream.FetchFile(ctx, upstreamURL)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -352,7 +465,6 @@ func (h *Handler) handleFile(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = rc.Close() }()
 
-	// Create temp file to avoid memory exhaustion for large files
 	tmpFile, err := os.CreateTemp("", "pypi-file-*")
 	if err != nil {
 		logger.Error("failed to create temp file", "error", err)
@@ -360,11 +472,7 @@ func (h *Handler) handleFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tmpPath := tmpFile.Name()
-	// Note: temp file cleanup is handled by the background caching goroutine,
-	// NOT via defer here, to avoid a race condition where the file is deleted
-	// before the goroutine can read it.
 
-	// Stream to temp file while computing hashes
 	hr := contentcache.NewHashingReader(rc)
 	sha256Hash := sha256.New()
 	teeReader := io.TeeReader(hr, sha256Hash)
@@ -380,7 +488,6 @@ func (h *Handler) handleFile(w http.ResponseWriter, r *http.Request) {
 	contentHash := hr.Sum()
 	computedSha256 := hex.EncodeToString(sha256Hash.Sum(nil))
 
-	// Verify integrity before serving to client
 	if expectedHash != "" && computedSha256 != expectedHash {
 		_ = tmpFile.Close()
 		_ = os.Remove(tmpPath)
@@ -396,7 +503,6 @@ func (h *Handler) handleFile(w http.ResponseWriter, r *http.Request) {
 		logger.Debug("integrity check passed", "sha256", computedSha256)
 	}
 
-	// Seek to beginning for sending to client
 	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
 		_ = tmpFile.Close()
 		_ = os.Remove(tmpPath)
@@ -405,10 +511,8 @@ func (h *Handler) handleFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Write to client
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-	// For HEAD requests, just return headers without body
 	if r.Method != http.MethodHead {
 		if _, err := io.Copy(w, tmpFile); err != nil {
 			logger.Error("failed to write response", "error", err)
@@ -416,20 +520,16 @@ func (h *Handler) handleFile(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = tmpFile.Close()
 
-	// Update hashes with computed value
 	if fileHashes == nil {
 		fileHashes = make(map[string]string)
 	}
 	fileHashes["sha256"] = computedSha256
 
-	// Cache asynchronously
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
-		defer func() { _ = os.Remove(tmpPath) }() // Clean up temp file after caching
+		defer func() { _ = os.Remove(tmpPath) }()
 
-		// Use context.Background() for cache operations that should complete even during shutdown.
-		// The WaitGroup ensures we wait for this to finish before Close() returns.
 		cacheCtx, cancel := context.WithTimeout(context.Background(), cacheTimeout)
 		defer cancel()
 

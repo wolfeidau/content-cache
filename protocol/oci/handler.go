@@ -2,6 +2,7 @@ package oci
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	contentcache "github.com/wolfeidau/content-cache"
+	"github.com/wolfeidau/content-cache/download"
 	"github.com/wolfeidau/content-cache/store"
 	"github.com/wolfeidau/content-cache/telemetry"
 )
@@ -36,10 +38,11 @@ var (
 
 // Handler implements the OCI Distribution v2 protocol as an HTTP handler.
 type Handler struct {
-	index    *Index
-	store    store.Store
-	upstream *Upstream
-	logger   *slog.Logger
+	index      *Index
+	store      store.Store
+	upstream   *Upstream
+	logger     *slog.Logger
+	downloader *download.Downloader
 
 	// Tag TTL - how long before re-validating tag->digest mapping
 	tagTTL time.Duration
@@ -64,6 +67,13 @@ func WithLogger(logger *slog.Logger) HandlerOption {
 func WithUpstream(upstream *Upstream) HandlerOption {
 	return func(h *Handler) {
 		h.upstream = upstream
+	}
+}
+
+// WithDownloader sets the singleflight downloader for deduplicating concurrent fetches.
+func WithDownloader(dl *download.Downloader) HandlerOption {
+	return func(h *Handler) {
+		h.downloader = dl
 	}
 }
 
@@ -336,6 +346,117 @@ func (h *Handler) handleGetBlob(w http.ResponseWriter, r *http.Request, name, di
 	// Fetch from upstream
 	telemetry.SetCacheResult(r, telemetry.CacheMiss)
 	logger.Debug("cache miss, fetching from upstream")
+
+	if h.downloader != nil {
+		h.handleGetBlobWithDownloader(w, r, name, digestStr, logger)
+		return
+	}
+
+	h.handleGetBlobDirect(w, r, name, digestStr, logger)
+}
+
+// handleGetBlobWithDownloader uses the singleflight downloader to deduplicate concurrent blob fetches.
+func (h *Handler) handleGetBlobWithDownloader(w http.ResponseWriter, r *http.Request, name, digestStr string, logger *slog.Logger) {
+	key := fmt.Sprintf("oci:blob:%s", digestStr)
+
+	result, _, err := h.downloader.Do(r.Context(), key, func(dlCtx context.Context) (*download.Result, error) {
+		return h.fetchAndStoreBlob(dlCtx, name, digestStr, logger)
+	})
+
+	download.HandleResult(download.HandleResultParams{
+		Writer:     w,
+		Request:    r,
+		Downloader: h.downloader,
+		Key:        key,
+		Result:     result,
+		Err:        err,
+		Store:      h.store,
+		IsNotFound: func(e error) bool { return errors.Is(e, ErrNotFound) },
+		Opts: download.ServeOptions{
+			ContentType:  "application/octet-stream",
+			ExtraHeaders: map[string]string{DockerContentDigestHeader: digestStr},
+		},
+		Logger: logger,
+	})
+}
+
+// fetchAndStoreBlob fetches a blob from upstream, verifies its digest, stores in CAFS, and updates the index.
+func (h *Handler) fetchAndStoreBlob(ctx context.Context, name, digestStr string, logger *slog.Logger) (*download.Result, error) {
+	rc, _, err := h.upstream.FetchBlob(ctx, name, digestStr)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rc.Close() }()
+
+	expectedDigest, err := ParseDigest(digestStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid digest: %w", err)
+	}
+
+	// Create temp file
+	tmpFile, err := os.CreateTemp("", "oci-blob-*")
+	if err != nil {
+		return nil, fmt.Errorf("creating temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	// Stream to temp file while computing hashes
+	blake3Reader := contentcache.NewHashingReader(rc)
+	digestHasher, err := expectedDigest.NewHasher()
+	if err != nil {
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("unsupported digest algorithm: %w", err)
+	}
+	teeReader := io.TeeReader(blake3Reader, digestHasher)
+
+	written, err := io.Copy(tmpFile, teeReader)
+	if err != nil {
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("reading blob: %w", err)
+	}
+	blake3Hash := blake3Reader.Sum()
+
+	// Verify digest
+	computedHex := fmt.Sprintf("%x", digestHasher.Sum(nil))
+	if computedHex != expectedDigest.Hex {
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("digest verification failed: expected %s, got %s", expectedDigest.Hex, computedHex)
+	}
+
+	logger.Debug("digest verified", "digest", digestStr)
+
+	// Seek to beginning for storing in CAFS
+	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("seeking temp file: %w", err)
+	}
+
+	storedHash, err := h.store.Put(ctx, tmpFile)
+	if err != nil {
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("storing blob: %w", err)
+	}
+	_ = tmpFile.Close()
+
+	if storedHash != blake3Hash {
+		logger.Warn("hash mismatch during storage", "expected", blake3Hash.ShortString(), "got", storedHash.ShortString())
+	}
+
+	// Update blob index
+	if err := h.index.PutBlob(ctx, digestStr, blake3Hash, written); err != nil {
+		logger.Error("failed to update blob index", "error", err)
+	} else {
+		logger.Info("cached blob", "digest", digestStr, "hash", blake3Hash.ShortString(), "size", written)
+	}
+
+	return &download.Result{Hash: blake3Hash, Size: written}, nil
+}
+
+// handleGetBlobDirect handles blob requests without singleflight deduplication (legacy path).
+func (h *Handler) handleGetBlobDirect(w http.ResponseWriter, r *http.Request, name, digestStr string, logger *slog.Logger) {
+	ctx := r.Context()
+
 	rc, size, err := h.upstream.FetchBlob(ctx, name, digestStr)
 	if err != nil {
 		if err == ErrNotFound {
@@ -348,7 +469,6 @@ func (h *Handler) handleGetBlob(w http.ResponseWriter, r *http.Request, name, di
 	}
 	defer func() { _ = rc.Close() }()
 
-	// Parse the expected digest for verification
 	expectedDigest, err := ParseDigest(digestStr)
 	if err != nil {
 		logger.Error("invalid digest", "error", err)
@@ -356,7 +476,6 @@ func (h *Handler) handleGetBlob(w http.ResponseWriter, r *http.Request, name, di
 		return
 	}
 
-	// Create temp file for streaming
 	tmpFile, err := os.CreateTemp("", "oci-blob-*")
 	if err != nil {
 		logger.Error("failed to create temp file", "error", err)
@@ -364,9 +483,7 @@ func (h *Handler) handleGetBlob(w http.ResponseWriter, r *http.Request, name, di
 		return
 	}
 	tmpPath := tmpFile.Name()
-	// Note: temp file cleanup is handled by the background caching goroutine
 
-	// Stream to temp file while computing both BLAKE3 (for CAFS) and SHA256 (for verification)
 	blake3Reader := contentcache.NewHashingReader(rc)
 	digestHasher, err := expectedDigest.NewHasher()
 	if err != nil {
@@ -384,10 +501,8 @@ func (h *Handler) handleGetBlob(w http.ResponseWriter, r *http.Request, name, di
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		return
 	}
-
 	blake3Hash := blake3Reader.Sum()
 
-	// Verify digest
 	computedHex := fmt.Sprintf("%x", digestHasher.Sum(nil))
 	if computedHex != expectedDigest.Hex {
 		_ = tmpFile.Close()
@@ -401,7 +516,6 @@ func (h *Handler) handleGetBlob(w http.ResponseWriter, r *http.Request, name, di
 
 	logger.Debug("digest verified", "digest", digestStr)
 
-	// Seek to beginning for sending to client
 	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
 		_ = tmpFile.Close()
 		logger.Error("failed to seek temp file", "error", err)
@@ -409,20 +523,17 @@ func (h *Handler) handleGetBlob(w http.ResponseWriter, r *http.Request, name, di
 		return
 	}
 
-	// Write response headers
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set(DockerContentDigestHeader, digestStr)
 	if size > 0 {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
 	}
 
-	// Stream to client
 	if _, err := io.Copy(w, tmpFile); err != nil {
 		logger.Error("failed to write response", "error", err)
 	}
 	_ = tmpFile.Close()
 
-	// Cache asynchronously
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
