@@ -439,12 +439,18 @@ func (h *Handler) handleArtifactWithDownloader(w http.ResponseWriter, r *http.Re
 		return h.fetchAndStoreArtifact(dlCtx, coord, logger)
 	})
 
-	download.HandleResult(w, r, h.downloader, key, result, err, h.store,
-		func(e error) bool { return errors.Is(e, ErrNotFound) },
-		func() { http.Error(w, "not found", http.StatusNotFound) },
-		download.ServeOptions{ContentType: contentTypeForExtension(coord.Extension)},
-		logger,
-	)
+	download.HandleResult(download.HandleResultParams{
+		Writer:     w,
+		Request:    r,
+		Downloader: h.downloader,
+		Key:        key,
+		Result:     result,
+		Err:        err,
+		Store:      h.store,
+		IsNotFound: func(e error) bool { return errors.Is(e, ErrNotFound) },
+		Opts:       download.ServeOptions{ContentType: contentTypeForExtension(coord.Extension)},
+		Logger:     logger,
+	})
 }
 
 // fetchAndStoreArtifact fetches an artifact from upstream, verifies integrity, stores in CAFS, and updates the index.

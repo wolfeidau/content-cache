@@ -186,8 +186,8 @@ func TestForgetOnDownloadError_SkipsContextErrors(t *testing.T) {
 	// Wait for download to start
 	<-started
 
-	// Simulate a caller that timed out — ForgetOnDownloadError should NOT forget
-	ForgetOnDownloadError(d, "forget-test", context.DeadlineExceeded)
+	// Simulate a caller that timed out — forgetOnDownloadError should NOT forget
+	forgetOnDownloadError(d, "forget-test", context.DeadlineExceeded)
 
 	// A new caller should still join the in-flight download (not start a new one)
 	result, shared, err := d.Do(context.Background(), "forget-test", func(ctx context.Context) (*Result, error) {
@@ -214,8 +214,8 @@ func TestForgetOnDownloadError_ForgetsRealErrors(t *testing.T) {
 	})
 	require.ErrorIs(t, err, expectedErr)
 
-	// ForgetOnDownloadError should forget since it's a real error
-	ForgetOnDownloadError(d, "forget-err", expectedErr)
+	// forgetOnDownloadError should forget since it's a real error
+	forgetOnDownloadError(d, "forget-err", expectedErr)
 
 	// Now a retry should trigger a new download
 	expected := &Result{

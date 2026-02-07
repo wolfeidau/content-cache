@@ -18,12 +18,66 @@ type ServeOptions struct {
 	ExtraHeaders map[string]string // e.g., Docker-Content-Digest
 }
 
-// HandleDownloadError writes an appropriate HTTP error response for download
-// errors that are not protocol-specific (e.g., not ErrNotFound). It handles
-// context cancellation/timeout and generic upstream failures.
-//
-// Returns true if an error was handled, false if err is nil.
-func HandleDownloadError(w http.ResponseWriter, logger *slog.Logger, err error) {
+// HandleResultParams bundles the arguments for HandleResult, keeping the
+// function signature concise and call sites self-documenting.
+type HandleResultParams struct {
+	// Writer and Request for the HTTP response.
+	Writer  http.ResponseWriter
+	Request *http.Request
+
+	// Downloader and Key are used to call Forget on download errors,
+	// allowing subsequent requests to retry.
+	Downloader *Downloader
+	Key        string
+
+	// Result and Err come from Downloader.Do.
+	Result *Result
+	Err    error
+
+	// Store is the content-addressable storage to read from on success.
+	Store store.Store
+
+	// IsNotFound checks whether err is a protocol-specific not-found error.
+	// Each protocol provides its own implementation (e.g., errors.Is(err, ErrNotFound)).
+	IsNotFound func(error) bool
+
+	// NotFoundHandler is called when IsNotFound returns true. If nil,
+	// a default handler writes a standard 404 response.
+	NotFoundHandler func()
+
+	// Opts configures Content-Type and any extra response headers.
+	Opts ServeOptions
+
+	// Logger for error reporting.
+	Logger *slog.Logger
+}
+
+// HandleResult processes the result of a Downloader.Do call, handling errors
+// and serving content from the store on success. This consolidates the common
+// pattern used across all protocol handlers.
+func HandleResult(p HandleResultParams) {
+	if p.Err != nil {
+		if p.IsNotFound(p.Err) {
+			p.Downloader.Forget(p.Key)
+			if p.NotFoundHandler != nil {
+				p.NotFoundHandler()
+			} else {
+				http.Error(p.Writer, "not found", http.StatusNotFound)
+			}
+			return
+		}
+		forgetOnDownloadError(p.Downloader, p.Key, p.Err)
+		handleDownloadError(p.Writer, p.Logger, p.Err)
+		return
+	}
+
+	ServeFromStore(p.Request.Context(), p.Writer, p.Request, p.Store, p.Result, p.Opts, p.Logger)
+}
+
+// handleDownloadError writes an appropriate HTTP error response for download
+// errors that are not protocol-specific. It handles context cancellation/timeout
+// and generic upstream failures.
+func handleDownloadError(w http.ResponseWriter, logger *slog.Logger, err error) {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		http.Error(w, "request timeout", http.StatusGatewayTimeout)
 		return
@@ -59,48 +113,13 @@ func ServeFromStore(ctx context.Context, w http.ResponseWriter, r *http.Request,
 	}
 }
 
-// ForgetOnDownloadError calls Forget on the downloader if the error represents
-// a real download failure (not a caller context timeout). Returns the error
-// unchanged for further handling.
-func ForgetOnDownloadError(d *Downloader, key string, err error) {
+// forgetOnDownloadError calls Forget on the downloader if the error represents
+// a real download failure (not a caller context timeout).
+func forgetOnDownloadError(d *Downloader, key string, err error) {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return
 	}
 	d.Forget(key)
-}
-
-// IsNotFoundFunc is a function that checks if an error is a protocol-specific
-// not-found error. Each protocol provides its own implementation.
-type IsNotFoundFunc func(error) bool
-
-// HandleResult processes the result of a Downloader.Do call, handling errors
-// and serving from the store on success. This consolidates the common pattern
-// used across all protocol handlers.
-//
-// The isNotFound function checks for protocol-specific not-found errors.
-// The notFoundHandler is called when the error matches not-found.
-func HandleResult(
-	w http.ResponseWriter, r *http.Request,
-	d *Downloader, key string,
-	result *Result, err error,
-	s store.Store,
-	isNotFound IsNotFoundFunc,
-	notFoundHandler func(),
-	opts ServeOptions,
-	logger *slog.Logger,
-) {
-	if err != nil {
-		if isNotFound(err) {
-			d.Forget(key)
-			notFoundHandler()
-			return
-		}
-		ForgetOnDownloadError(d, key, err)
-		HandleDownloadError(w, logger, err)
-		return
-	}
-
-	ServeFromStore(r.Context(), w, r, s, result, opts, logger)
 }
 
 // Hash re-exports contentcache.Hash for convenience in protocol packages.

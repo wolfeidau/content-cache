@@ -363,15 +363,21 @@ func (h *Handler) handleGetBlobWithDownloader(w http.ResponseWriter, r *http.Req
 		return h.fetchAndStoreBlob(dlCtx, name, digestStr, logger)
 	})
 
-	download.HandleResult(w, r, h.downloader, key, result, err, h.store,
-		func(e error) bool { return errors.Is(e, ErrNotFound) },
-		func() { http.Error(w, "not found", http.StatusNotFound) },
-		download.ServeOptions{
+	download.HandleResult(download.HandleResultParams{
+		Writer:     w,
+		Request:    r,
+		Downloader: h.downloader,
+		Key:        key,
+		Result:     result,
+		Err:        err,
+		Store:      h.store,
+		IsNotFound: func(e error) bool { return errors.Is(e, ErrNotFound) },
+		Opts: download.ServeOptions{
 			ContentType:  "application/octet-stream",
 			ExtraHeaders: map[string]string{DockerContentDigestHeader: digestStr},
 		},
-		logger,
-	)
+		Logger: logger,
+	})
 }
 
 // fetchAndStoreBlob fetches a blob from upstream, verifies its digest, stores in CAFS, and updates the index.

@@ -345,12 +345,18 @@ func (h *Handler) handleTarballWithDownloader(w http.ResponseWriter, r *http.Req
 		return h.fetchAndStoreTarball(dlCtx, packageName, version, logger)
 	})
 
-	download.HandleResult(w, r, h.downloader, key, result, err, h.store,
-		func(e error) bool { return errors.Is(e, ErrNotFound) },
-		func() { http.Error(w, "not found", http.StatusNotFound) },
-		download.ServeOptions{ContentType: "application/octet-stream"},
-		logger,
-	)
+	download.HandleResult(download.HandleResultParams{
+		Writer:     w,
+		Request:    r,
+		Downloader: h.downloader,
+		Key:        key,
+		Result:     result,
+		Err:        err,
+		Store:      h.store,
+		IsNotFound: func(e error) bool { return errors.Is(e, ErrNotFound) },
+		Opts:       download.ServeOptions{ContentType: "application/octet-stream"},
+		Logger:     logger,
+	})
 }
 
 // fetchAndStoreTarball fetches a tarball from upstream, verifies integrity, stores in CAFS, and updates the index.
