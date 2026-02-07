@@ -13,6 +13,7 @@ import (
 	"time"
 
 	contentcache "github.com/wolfeidau/content-cache"
+	"github.com/wolfeidau/content-cache/download"
 	"github.com/wolfeidau/content-cache/store"
 	"github.com/wolfeidau/content-cache/telemetry"
 )
@@ -25,10 +26,11 @@ const (
 // Handler implements the GOPROXY protocol as an HTTP handler.
 // It acts as a caching proxy, storing modules in a content-addressable store.
 type Handler struct {
-	index    *Index
-	store    store.Store
-	upstream *Upstream
-	logger   *slog.Logger
+	index      *Index
+	store      store.Store
+	upstream   *Upstream
+	logger     *slog.Logger
+	downloader *download.Downloader
 
 	// Lifecycle management for background goroutines
 	wg     sync.WaitGroup
@@ -50,6 +52,13 @@ func WithLogger(logger *slog.Logger) HandlerOption {
 func WithUpstream(upstream *Upstream) HandlerOption {
 	return func(h *Handler) {
 		h.upstream = upstream
+	}
+}
+
+// WithDownloader sets the singleflight downloader for deduplicating concurrent fetches.
+func WithDownloader(dl *download.Downloader) HandlerOption {
+	return func(h *Handler) {
+		h.downloader = dl
 	}
 }
 
@@ -307,7 +316,106 @@ func (h *Handler) handleZip(w http.ResponseWriter, r *http.Request, modulePath, 
 	logger.Debug("cache miss, fetching from upstream")
 	telemetry.SetCacheResult(r, telemetry.CacheMiss)
 
-	// For zip, we stream directly while also caching
+	if h.downloader != nil {
+		h.handleZipWithDownloader(w, r, modulePath, version, logger)
+		return
+	}
+
+	h.handleZipDirect(w, r, modulePath, version, logger)
+}
+
+// handleZipWithDownloader uses the singleflight downloader to deduplicate concurrent zip fetches.
+// Unlike the direct path, this downloads to CAFS first, then serves from the store,
+// eliminating the double-fetch that occurs in the legacy path.
+func (h *Handler) handleZipWithDownloader(w http.ResponseWriter, r *http.Request, modulePath, version string, logger *slog.Logger) {
+	ctx := r.Context()
+	key := fmt.Sprintf("goproxy:zip:%s:%s", modulePath, version)
+
+	result, _, err := h.downloader.Do(ctx, key, func(dlCtx context.Context) (*download.Result, error) {
+		return h.fetchAndStoreZip(dlCtx, modulePath, version, logger)
+	})
+	if err != nil {
+		h.downloader.Forget(key)
+		if errors.Is(err, ErrNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			http.Error(w, "request timeout", http.StatusGatewayTimeout)
+			return
+		}
+		logger.Error("download failed", "error", err)
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+
+	// Serve from CAFS
+	rc, err := h.store.Get(ctx, result.Hash)
+	if err != nil {
+		logger.Error("failed to read from store after download", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	defer func() { _ = rc.Close() }()
+
+	w.Header().Set("Content-Type", "application/zip")
+	if _, err := io.Copy(w, rc); err != nil {
+		logger.Error("failed to stream zip", "error", err)
+	}
+}
+
+// fetchAndStoreZip fetches a module zip, stores it in CAFS, and updates the index.
+func (h *Handler) fetchAndStoreZip(ctx context.Context, modulePath, version string, logger *slog.Logger) (*download.Result, error) {
+	// Fetch info first (needed for index)
+	info, err := h.upstream.FetchInfo(ctx, modulePath, version)
+	if err != nil {
+		return nil, fmt.Errorf("fetching info: %w", err)
+	}
+
+	// Fetch mod file
+	modFile, err := h.upstream.FetchMod(ctx, modulePath, version)
+	if err != nil {
+		return nil, fmt.Errorf("fetching mod: %w", err)
+	}
+
+	// Fetch and store zip
+	zipReader, err := h.upstream.FetchZip(ctx, modulePath, version)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = zipReader.Close() }()
+
+	zipHash, err := h.store.Put(ctx, zipReader)
+	if err != nil {
+		return nil, fmt.Errorf("storing zip: %w", err)
+	}
+
+	// Get size from store
+	rc, err := h.store.Get(ctx, zipHash)
+	if err != nil {
+		return nil, fmt.Errorf("getting stored zip for size: %w", err)
+	}
+	// We just need to read to get size info, but store.Get gives us a reader
+	_ = rc.Close()
+
+	// Store in index
+	mv := &ModuleVersion{
+		Info:    *info,
+		ZipHash: zipHash,
+	}
+	if err := h.index.PutModuleVersion(ctx, modulePath, version, mv, modFile); err != nil {
+		logger.Error("failed to store module version in index", "error", err)
+	} else {
+		logger.Info("cached module version", "zip_hash", zipHash.ShortString())
+	}
+
+	return &download.Result{Hash: zipHash}, nil
+}
+
+// handleZipDirect handles zip requests without singleflight deduplication (legacy path).
+func (h *Handler) handleZipDirect(w http.ResponseWriter, r *http.Request, modulePath, version string, logger *slog.Logger) {
+	ctx := r.Context()
+
 	zipReader, err := h.upstream.FetchZip(ctx, modulePath, version)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -326,8 +434,6 @@ func (h *Handler) handleZip(w http.ResponseWriter, r *http.Request, modulePath, 
 	w.Header().Set("Content-Type", "application/zip")
 
 	// Stream to client while computing hash
-	// Note: This means we can't store in CAFS during this request
-	// because we need to know the hash first. We'll cache async.
 	if _, err := io.Copy(w, hr); err != nil {
 		logger.Error("failed to stream zip", "error", err)
 		return

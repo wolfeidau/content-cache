@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	contentcache "github.com/wolfeidau/content-cache"
+	"github.com/wolfeidau/content-cache/download"
 	"github.com/wolfeidau/content-cache/store"
 	"github.com/wolfeidau/content-cache/telemetry"
 )
@@ -35,6 +37,7 @@ type Handler struct {
 	store       store.Store
 	upstream    *Upstream
 	logger      *slog.Logger
+	downloader  *download.Downloader
 	metadataTTL time.Duration
 
 	wg     sync.WaitGroup
@@ -56,6 +59,13 @@ func WithLogger(logger *slog.Logger) HandlerOption {
 func WithUpstream(upstream *Upstream) HandlerOption {
 	return func(h *Handler) {
 		h.upstream = upstream
+	}
+}
+
+// WithDownloader sets the singleflight downloader for deduplicating concurrent fetches.
+func WithDownloader(dl *download.Downloader) HandlerOption {
+	return func(h *Handler) {
+		h.downloader = dl
 	}
 }
 
@@ -653,6 +663,134 @@ func (h *Handler) handleGem(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("cache miss, fetching from upstream")
 	telemetry.SetCacheResult(r, telemetry.CacheMiss)
 
+	if h.downloader != nil {
+		h.handleGemWithDownloader(w, r, filename, parsed, expectedSHA256, logger)
+		return
+	}
+
+	h.handleGemDirect(w, r, filename, parsed, expectedSHA256, logger)
+}
+
+// handleGemWithDownloader uses the singleflight downloader to deduplicate concurrent gem fetches.
+func (h *Handler) handleGemWithDownloader(w http.ResponseWriter, r *http.Request, filename string, parsed *ParsedGemFilename, expectedSHA256 string, logger *slog.Logger) {
+	ctx := r.Context()
+	key := fmt.Sprintf("rubygems:gem:%s", filename)
+
+	result, _, err := h.downloader.Do(ctx, key, func(dlCtx context.Context) (*download.Result, error) {
+		return h.fetchAndStoreGem(dlCtx, filename, parsed, expectedSHA256, logger)
+	})
+	if err != nil {
+		h.downloader.Forget(key)
+		if errors.Is(err, ErrNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			http.Error(w, "request timeout", http.StatusGatewayTimeout)
+			return
+		}
+		logger.Error("download failed", "error", err)
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+
+	// Serve from CAFS
+	rc, err := h.store.Get(ctx, result.Hash)
+	if err != nil {
+		logger.Error("failed to read from store after download", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	defer func() { _ = rc.Close() }()
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.FormatInt(result.Size, 10))
+	if r.Method != http.MethodHead {
+		if _, err := io.Copy(w, rc); err != nil {
+			logger.Error("failed to stream gem", "error", err)
+		}
+	}
+}
+
+// fetchAndStoreGem fetches a gem from upstream, verifies integrity, stores in CAFS, and updates the index.
+func (h *Handler) fetchAndStoreGem(ctx context.Context, filename string, parsed *ParsedGemFilename, expectedSHA256 string, logger *slog.Logger) (*download.Result, error) {
+	body, _, err := h.upstream.FetchGem(ctx, filename)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = body.Close() }()
+
+	tmpFile, err := os.CreateTemp("", "gem-*.gem")
+	if err != nil {
+		return nil, fmt.Errorf("creating temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	hr := contentcache.NewHashingReader(body)
+	sha256Hash := sha256.New()
+	teeReader := io.TeeReader(hr, sha256Hash)
+
+	written, err := io.Copy(tmpFile, teeReader)
+	if err != nil {
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("reading gem: %w", err)
+	}
+	contentHash := hr.Sum()
+	computedSHA256 := hex.EncodeToString(sha256Hash.Sum(nil))
+
+	if expectedSHA256 != "" && computedSHA256 != expectedSHA256 {
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("integrity check failed: expected %s, got %s", expectedSHA256, computedSHA256)
+	}
+
+	if expectedSHA256 != "" {
+		logger.Debug("integrity check passed", "sha256", computedSHA256)
+	}
+
+	// Seek to beginning for storing in CAFS
+	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("seeking temp file: %w", err)
+	}
+
+	storedHash, err := h.store.Put(ctx, tmpFile)
+	if err != nil {
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("storing gem: %w", err)
+	}
+	_ = tmpFile.Close()
+
+	if storedHash != contentHash {
+		logger.Warn("hash mismatch during storage", "expected", contentHash.ShortString(), "got", storedHash.ShortString())
+	}
+
+	gem := &CachedGem{
+		Filename:    filename,
+		ContentHash: storedHash,
+		Size:        written,
+		SHA256:      computedSHA256,
+		CachedAt:    time.Now(),
+	}
+	if parsed != nil {
+		gem.Name = parsed.Name
+		gem.Version = parsed.Version
+		gem.Platform = parsed.Platform
+	}
+
+	if err := h.index.PutGem(ctx, gem); err != nil {
+		logger.Error("failed to store gem metadata", "error", err)
+	} else {
+		logger.Info("cached gem", "filename", filename, "hash", storedHash.ShortString(), "size", written)
+	}
+
+	return &download.Result{Hash: contentHash, Size: written}, nil
+}
+
+// handleGemDirect handles gem requests without singleflight deduplication (legacy path).
+func (h *Handler) handleGemDirect(w http.ResponseWriter, r *http.Request, filename string, parsed *ParsedGemFilename, expectedSHA256 string, logger *slog.Logger) {
+	ctx := r.Context()
+
 	body, _, err := h.upstream.FetchGem(ctx, filename)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -665,7 +803,6 @@ func (h *Handler) handleGem(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = body.Close() }()
 
-	// Stream to temp file for caching and integrity verification
 	tmpFile, err := os.CreateTemp("", "gem-*.gem")
 	if err != nil {
 		logger.Error("failed to create temp file", "error", err)
@@ -674,8 +811,6 @@ func (h *Handler) handleGem(w http.ResponseWriter, r *http.Request) {
 	}
 	tmpPath := tmpFile.Name()
 
-	// cleanupNeeded tracks whether this function should cleanup the temp file.
-	// Set to false when responsibility is handed to the async caching goroutine.
 	cleanupNeeded := true
 	defer func() {
 		if cleanupNeeded {
@@ -697,7 +832,6 @@ func (h *Handler) handleGem(w http.ResponseWriter, r *http.Request) {
 	contentHash := hr.Sum()
 	computedSHA256 := hex.EncodeToString(sha256Hash.Sum(nil))
 
-	// Verify integrity if we have expected checksum
 	if expectedSHA256 != "" && computedSHA256 != expectedSHA256 {
 		logger.Error("integrity check failed",
 			"expected_sha256", expectedSHA256,
@@ -711,14 +845,12 @@ func (h *Handler) handleGem(w http.ResponseWriter, r *http.Request) {
 		logger.Debug("integrity check passed", "sha256", computedSHA256)
 	}
 
-	// Seek to beginning for sending to client
 	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
 		logger.Error("failed to seek temp file", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	// Write to client
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.FormatInt(written, 10))
 	if r.Method != http.MethodHead {
@@ -728,7 +860,6 @@ func (h *Handler) handleGem(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = tmpFile.Close()
 
-	// Hand off cleanup responsibility to goroutine
 	cleanupNeeded = false
 	h.wg.Add(1)
 	go func() {

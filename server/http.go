@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/wolfeidau/content-cache/backend"
+	"github.com/wolfeidau/content-cache/download"
 	"github.com/wolfeidau/content-cache/protocol/goproxy"
 	"github.com/wolfeidau/content-cache/protocol/maven"
 	"github.com/wolfeidau/content-cache/protocol/npm"
@@ -195,6 +196,9 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("metaDB must be *metadb.BoltDB for envelope storage")
 	}
 
+	// Create shared downloader for singleflight deduplication
+	dl := download.New(download.WithLogger(cfg.Logger.With("component", "download")))
+
 	// Initialize goproxy components using metadb EnvelopeIndex
 	goproxyModIndex, err := metadb.NewEnvelopeIndex(boltDB, "goproxy", "mod", 24*time.Hour)
 	if err != nil {
@@ -215,6 +219,7 @@ func New(cfg Config) (*Server, error) {
 		cafsStore,
 		goproxy.WithUpstream(goUpstream),
 		goproxy.WithLogger(cfg.Logger.With("component", "goproxy")),
+		goproxy.WithDownloader(dl),
 	)
 
 	// Initialize npm components using metadb EnvelopeIndex
@@ -237,6 +242,7 @@ func New(cfg Config) (*Server, error) {
 		cafsStore,
 		npm.WithUpstream(npmUpstream),
 		npm.WithLogger(cfg.Logger.With("component", "npm")),
+		npm.WithDownloader(dl),
 	)
 
 	// Initialize OCI components using metadb EnvelopeIndex
@@ -264,6 +270,7 @@ func New(cfg Config) (*Server, error) {
 	ociHandlerOpts := []oci.HandlerOption{
 		oci.WithUpstream(ociUpstream),
 		oci.WithLogger(cfg.Logger.With("component", "oci")),
+		oci.WithDownloader(dl),
 	}
 	if cfg.OCITagTTL > 0 {
 		ociHandlerOpts = append(ociHandlerOpts, oci.WithTagTTL(cfg.OCITagTTL))
@@ -288,6 +295,7 @@ func New(cfg Config) (*Server, error) {
 	pypiHandlerOpts := []pypi.HandlerOption{
 		pypi.WithUpstream(pypiUpstream),
 		pypi.WithLogger(cfg.Logger.With("component", "pypi")),
+		pypi.WithDownloader(dl),
 	}
 	if cfg.PyPIMetadataTTL > 0 {
 		pypiHandlerOpts = append(pypiHandlerOpts, pypi.WithMetadataTTL(cfg.PyPIMetadataTTL))
@@ -316,6 +324,7 @@ func New(cfg Config) (*Server, error) {
 	mavenHandlerOpts := []maven.HandlerOption{
 		maven.WithUpstream(mavenUpstream),
 		maven.WithLogger(cfg.Logger.With("component", "maven")),
+		maven.WithDownloader(dl),
 	}
 	if cfg.MavenMetadataTTL > 0 {
 		mavenHandlerOpts = append(mavenHandlerOpts, maven.WithMetadataTTL(cfg.MavenMetadataTTL))
@@ -362,6 +371,7 @@ func New(cfg Config) (*Server, error) {
 	rubygemsHandlerOpts := []rubygems.HandlerOption{
 		rubygems.WithUpstream(rubygemsUpstream),
 		rubygems.WithLogger(cfg.Logger.With("component", "rubygems")),
+		rubygems.WithDownloader(dl),
 	}
 	if cfg.RubyGemsMetadataTTL > 0 {
 		rubygemsHandlerOpts = append(rubygemsHandlerOpts, rubygems.WithMetadataTTL(cfg.RubyGemsMetadataTTL))
