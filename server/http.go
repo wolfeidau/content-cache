@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"path"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -676,31 +677,23 @@ func deriveProtocol(p string) string {
 	switch {
 	case p == "/health" || p == "/stats" || p == "/metrics":
 		return "internal"
-	case len(p) >= 7 && p[:7] == "/admin/":
+	case strings.HasPrefix(p, "/admin/"):
 		return "admin"
-	case len(p) >= 5 && p[:5] == "/npm/":
+	case strings.HasPrefix(p, "/npm/"):
 		return "npm"
-	case len(p) >= 6 && p[:6] == "/pypi/":
+	case strings.HasPrefix(p, "/pypi/"):
 		return "pypi"
-	case len(p) >= 7 && p[:7] == "/maven/":
+	case strings.HasPrefix(p, "/maven/"):
 		return "maven"
-	case len(p) >= 10 && p[:10] == "/rubygems/":
+	case strings.HasPrefix(p, "/rubygems/"):
 		return "rubygems"
-	case len(p) >= 7 && p[:7] == "/sumdb/":
+	case strings.HasPrefix(p, "/sumdb/"):
 		return "sumdb"
-	case len(p) >= 9 && p[:9] == "/goproxy/":
+	case strings.HasPrefix(p, "/goproxy/"):
 		return "goproxy"
-	case len(p) >= 3 && p[:3] == "/v2":
+	case strings.HasPrefix(p, "/v2"):
 		return "oci"
 	default:
-		// Check for sumdb at root (GOPROXY=http://localhost:8080)
-		if len(p) >= 7 && p[:7] == "/sumdb/" {
-			return "sumdb"
-		}
-		// Root paths are goproxy (GOPROXY=http://localhost:8080)
-		if len(p) > 1 && p[0] == '/' {
-			return "goproxy"
-		}
 		return "unknown"
 	}
 }
