@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/wolfeidau/content-cache/backend"
 	"github.com/wolfeidau/content-cache/download"
+	"github.com/wolfeidau/content-cache/protocol/git"
 	"github.com/wolfeidau/content-cache/protocol/goproxy"
 	"github.com/wolfeidau/content-cache/protocol/maven"
 	"github.com/wolfeidau/content-cache/protocol/npm"
@@ -77,6 +78,13 @@ type Config struct {
 	// Default: 5 minutes (new versions may be published)
 	RubyGemsMetadataTTL time.Duration
 
+	// GitAllowedHosts is the allowlist of permitted upstream Git hosts.
+	GitAllowedHosts []string
+
+	// GitMaxRequestBodySize is the maximum upload-pack request body size in bytes.
+	// Default: 100MB
+	GitMaxRequestBodySize int64
+
 	// SumDBName is the name of the checksum database to proxy.
 	// Default: sum.golang.org
 	SumDBName string
@@ -130,6 +138,8 @@ type Server struct {
 	maven         *maven.Handler
 	rubygemsIndex *rubygems.Index
 	rubygems      *rubygems.Handler
+	gitIndex      *git.Index
+	git           *git.Handler
 	sumdbIndex    *goproxy.SumdbIndex
 	sumdb         *goproxy.SumdbHandler
 	metaDB        metadb.MetaDB
@@ -378,6 +388,26 @@ func New(cfg Config) (*Server, error) {
 	}
 	rubygemsHandler := rubygems.NewHandler(rubygemsIndex, cafsStore, rubygemsHandlerOpts...)
 
+	// Initialize Git proxy components using metadb EnvelopeIndex
+	gitPackIndex, err := metadb.NewEnvelopeIndex(boltDB, "git", "pack", 24*time.Hour)
+	if err != nil {
+		return nil, fmt.Errorf("creating git pack index: %w", err)
+	}
+	gitIndex := git.NewIndex(gitPackIndex)
+	gitUpstream := git.NewUpstream()
+	gitHandlerOpts := []git.HandlerOption{
+		git.WithUpstream(gitUpstream),
+		git.WithLogger(cfg.Logger.With("component", "git")),
+		git.WithDownloader(dl),
+	}
+	if len(cfg.GitAllowedHosts) > 0 {
+		gitHandlerOpts = append(gitHandlerOpts, git.WithAllowedHosts(cfg.GitAllowedHosts))
+	}
+	if cfg.GitMaxRequestBodySize > 0 {
+		gitHandlerOpts = append(gitHandlerOpts, git.WithMaxRequestBodySize(cfg.GitMaxRequestBodySize))
+	}
+	gitHandler := git.NewHandler(gitIndex, cafsStore, gitHandlerOpts...)
+
 	// Initialize sumdb components using metadb EnvelopeIndex
 	// Sumdb responses are immutable, so we use a long TTL (or no TTL)
 	sumdbEnvelope, err := metadb.NewEnvelopeIndex(boltDB, "sumdb", "cache", 0)
@@ -416,6 +446,8 @@ func New(cfg Config) (*Server, error) {
 		maven:         mavenHandler,
 		rubygemsIndex: rubygemsIndex,
 		rubygems:      rubygemsHandler,
+		gitIndex:      gitIndex,
+		git:           gitHandler,
 		sumdbIndex:    sumdbIndex,
 		sumdb:         sumdbHandler,
 		metaDB:        metaDB,
@@ -476,6 +508,11 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// The rubygems handler handles all paths under /rubygems/
 	mux.Handle("GET /rubygems/", http.StripPrefix("/rubygems", s.rubygems))
 	mux.Handle("HEAD /rubygems/", http.StripPrefix("/rubygems", s.rubygems))
+
+	// Git proxy endpoints
+	// The git handler handles all paths under /git/
+	mux.Handle("GET /git/", http.StripPrefix("/git", s.git))
+	mux.Handle("POST /git/", http.StripPrefix("/git", s.git))
 
 	// Sumdb proxy endpoints
 	// Handle both root and prefixed paths for sumdb
@@ -697,6 +734,8 @@ func deriveProtocol(p string) string {
 		return "maven"
 	case strings.HasPrefix(p, "/rubygems/"):
 		return "rubygems"
+	case strings.HasPrefix(p, "/git/"):
+		return "git"
 	case strings.HasPrefix(p, "/sumdb/"):
 		return "sumdb"
 	case strings.HasPrefix(p, "/goproxy/"):
