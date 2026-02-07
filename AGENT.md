@@ -33,6 +33,7 @@ protocol/              # Protocol handlers (one package per protocol)
   ├── oci/             # OCI/Docker registry
   ├── pypi/            # Python Package Index
   └── maven/           # Maven repository
+download/              # Singleflight-based download deduplication
 store/                 # Content-addressable storage (CAFS)
 backend/               # Storage backends (filesystem, future: S3)
 expiry/                # TTL and LRU cache expiration
@@ -103,6 +104,7 @@ The base image is cached at `${BUILDKITE_HOSTED_REGISTRY_URL}/content_cache_base
 - `github.com/google/uuid` - Request ID generation
 - `github.com/stretchr/testify` - Test assertions
 - `golang.org/x/net` - Extended networking utilities
+- `golang.org/x/sync` - Singleflight for download deduplication
 
 ## Planned Features
 

@@ -12,6 +12,7 @@ content-cache acts as a local caching proxy that:
 - Stores packages once using content-addressable storage (BLAKE3 hashing)
 - Serves cached packages in microseconds instead of milliseconds
 - Deduplicates identical content across different package versions
+- Coalesces concurrent requests for the same uncached resource into a single upstream fetch
 - Continues serving cached packages when upstream registries are unavailable
 
 ## Quick Start
@@ -107,6 +108,7 @@ bundle install   # Second request: served from cache
 - **OCI Distribution v2**: Read-through cache for container registries with tag-to-digest resolution
 - **Content-Addressable Storage**: BLAKE3 hashing with automatic deduplication
 - **Filesystem Backend**: Atomic writes with sharded directory structure
+- **Download Deduplication**: Singleflight-based coalescing of concurrent requests for the same uncached resource
 - **Pull-Through Caching**: Fetches from upstream on cache miss, caches for future requests
 - **Cache Expiration**: TTL-based and size-based (LRU) eviction with configurable intervals
 - **Authentication**: Support for OCI registry authentication with username/password
@@ -131,12 +133,14 @@ graph TD
     A --> H[Maven Handler]
     A --> I[RubyGems Handler]
 
-    B --> E[Content-Addressable Store]
-    C --> E
-    D --> E
-    G --> E
-    H --> E
-    I --> E
+    B --> DL[Download Deduplication]
+    C --> DL
+    D --> DL
+    G --> DL
+    H --> DL
+    I --> DL
+
+    DL --> E[Content-Addressable Store]
 
     E --> F[Storage Backend]
 
@@ -155,6 +159,7 @@ graph TD
     F -.-> F2["S3 (planned)"]
 
     style A fill:#e1f5ff
+    style DL fill:#f3e5f5
     style E fill:#fff4e1
     style F fill:#e8f5e9
 ```
