@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -328,40 +329,18 @@ func (h *Handler) handleZip(w http.ResponseWriter, r *http.Request, modulePath, 
 // Unlike the direct path, this downloads to CAFS first, then serves from the store,
 // eliminating the double-fetch that occurs in the legacy path.
 func (h *Handler) handleZipWithDownloader(w http.ResponseWriter, r *http.Request, modulePath, version string, logger *slog.Logger) {
-	ctx := r.Context()
 	key := fmt.Sprintf("goproxy:zip:%s:%s", modulePath, version)
 
-	result, _, err := h.downloader.Do(ctx, key, func(dlCtx context.Context) (*download.Result, error) {
+	result, _, err := h.downloader.Do(r.Context(), key, func(dlCtx context.Context) (*download.Result, error) {
 		return h.fetchAndStoreZip(dlCtx, modulePath, version, logger)
 	})
-	if err != nil {
-		h.downloader.Forget(key)
-		if errors.Is(err, ErrNotFound) {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			http.Error(w, "request timeout", http.StatusGatewayTimeout)
-			return
-		}
-		logger.Error("download failed", "error", err)
-		http.Error(w, "upstream error", http.StatusBadGateway)
-		return
-	}
 
-	// Serve from CAFS
-	rc, err := h.store.Get(ctx, result.Hash)
-	if err != nil {
-		logger.Error("failed to read from store after download", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	defer func() { _ = rc.Close() }()
-
-	w.Header().Set("Content-Type", "application/zip")
-	if _, err := io.Copy(w, rc); err != nil {
-		logger.Error("failed to stream zip", "error", err)
-	}
+	download.HandleResult(w, r, h.downloader, key, result, err, h.store,
+		func(e error) bool { return errors.Is(e, ErrNotFound) },
+		func() { http.Error(w, "not found", http.StatusNotFound) },
+		download.ServeOptions{ContentType: "application/zip"},
+		logger,
+	)
 }
 
 // fetchAndStoreZip fetches a module zip, stores it in CAFS, and updates the index.
@@ -385,18 +364,38 @@ func (h *Handler) fetchAndStoreZip(ctx context.Context, modulePath, version stri
 	}
 	defer func() { _ = zipReader.Close() }()
 
-	zipHash, err := h.store.Put(ctx, zipReader)
+	// Stream through a temp file to track size and compute hash
+	tmpFile, err := os.CreateTemp("", "goproxy-zip-*")
 	if err != nil {
-		return nil, fmt.Errorf("storing zip: %w", err)
+		return nil, fmt.Errorf("creating temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	hr := contentcache.NewHashingReader(zipReader)
+
+	size, err := io.Copy(tmpFile, hr)
+	if err != nil {
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("reading zip: %w", err)
+	}
+	zipHash := hr.Sum()
+
+	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("seeking temp file: %w", err)
 	}
 
-	// Get size from store
-	rc, err := h.store.Get(ctx, zipHash)
+	storedHash, err := h.store.Put(ctx, tmpFile)
 	if err != nil {
-		return nil, fmt.Errorf("getting stored zip for size: %w", err)
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("storing zip: %w", err)
 	}
-	// We just need to read to get size info, but store.Get gives us a reader
-	_ = rc.Close()
+	_ = tmpFile.Close()
+
+	if storedHash != zipHash {
+		logger.Warn("hash mismatch during storage", "expected", zipHash.ShortString(), "got", storedHash.ShortString())
+	}
 
 	// Store in index
 	mv := &ModuleVersion{
@@ -406,10 +405,10 @@ func (h *Handler) fetchAndStoreZip(ctx context.Context, modulePath, version stri
 	if err := h.index.PutModuleVersion(ctx, modulePath, version, mv, modFile); err != nil {
 		logger.Error("failed to store module version in index", "error", err)
 	} else {
-		logger.Info("cached module version", "zip_hash", zipHash.ShortString())
+		logger.Info("cached module version", "zip_hash", zipHash.ShortString(), "size", size)
 	}
 
-	return &download.Result{Hash: zipHash}, nil
+	return &download.Result{Hash: zipHash, Size: size}, nil
 }
 
 // handleZipDirect handles zip requests without singleflight deduplication (legacy path).

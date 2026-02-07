@@ -163,6 +163,75 @@ func TestDo_DifferentKeys(t *testing.T) {
 	require.Equal(t, int32(5), callCount.Load(), "each key should trigger its own download")
 }
 
+func TestForgetOnDownloadError_SkipsContextErrors(t *testing.T) {
+	d := New()
+
+	var callCount atomic.Int32
+	expected := &Result{
+		Hash: contentcache.HashBytes([]byte("data")),
+		Size: 4,
+	}
+
+	// Start a slow download
+	started := make(chan struct{})
+	go func() {
+		_, _, _ = d.Do(context.Background(), "forget-test", func(ctx context.Context) (*Result, error) {
+			callCount.Add(1)
+			close(started)
+			time.Sleep(200 * time.Millisecond)
+			return expected, nil
+		})
+	}()
+
+	// Wait for download to start
+	<-started
+
+	// Simulate a caller that timed out — ForgetOnDownloadError should NOT forget
+	ForgetOnDownloadError(d, "forget-test", context.DeadlineExceeded)
+
+	// A new caller should still join the in-flight download (not start a new one)
+	result, shared, err := d.Do(context.Background(), "forget-test", func(ctx context.Context) (*Result, error) {
+		callCount.Add(1)
+		return expected, nil
+	})
+
+	require.NoError(t, err)
+	require.True(t, shared, "should share the in-flight download")
+	require.Equal(t, expected.Hash, result.Hash)
+	require.Equal(t, int32(1), callCount.Load(), "download func should be called exactly once")
+}
+
+func TestForgetOnDownloadError_ForgetsRealErrors(t *testing.T) {
+	d := New()
+
+	var callCount atomic.Int32
+	expectedErr := errors.New("upstream error")
+
+	// First call fails
+	_, _, err := d.Do(context.Background(), "forget-err", func(ctx context.Context) (*Result, error) {
+		callCount.Add(1)
+		return nil, expectedErr
+	})
+	require.ErrorIs(t, err, expectedErr)
+
+	// ForgetOnDownloadError should forget since it's a real error
+	ForgetOnDownloadError(d, "forget-err", expectedErr)
+
+	// Now a retry should trigger a new download
+	expected := &Result{
+		Hash: contentcache.HashBytes([]byte("retry")),
+		Size: 5,
+	}
+	result, shared, err := d.Do(context.Background(), "forget-err", func(ctx context.Context) (*Result, error) {
+		callCount.Add(1)
+		return expected, nil
+	})
+	require.NoError(t, err)
+	require.False(t, shared)
+	require.Equal(t, expected.Hash, result.Hash)
+	require.Equal(t, int32(2), callCount.Load())
+}
+
 func TestDo_Forget(t *testing.T) {
 	d := New()
 

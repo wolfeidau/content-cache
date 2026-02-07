@@ -197,7 +197,7 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	// Create shared downloader for singleflight deduplication
-	dl := download.New(download.WithLogger(cfg.Logger.With("component", "download")))
+	dl := download.New()
 
 	// Initialize goproxy components using metadb EnvelopeIndex
 	goproxyModIndex, err := metadb.NewEnvelopeIndex(boltDB, "goproxy", "mod", 24*time.Hour)

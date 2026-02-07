@@ -360,43 +360,18 @@ func (h *Handler) handleFile(w http.ResponseWriter, r *http.Request) {
 
 // handleFileWithDownloader uses the singleflight downloader to deduplicate concurrent file fetches.
 func (h *Handler) handleFileWithDownloader(w http.ResponseWriter, r *http.Request, project, filename, upstreamURL, expectedHash string, fileHashes map[string]string, requiresPython string, logger *slog.Logger) {
-	ctx := r.Context()
 	key := fmt.Sprintf("pypi:file:%s", filename)
 
-	result, _, err := h.downloader.Do(ctx, key, func(dlCtx context.Context) (*download.Result, error) {
+	result, _, err := h.downloader.Do(r.Context(), key, func(dlCtx context.Context) (*download.Result, error) {
 		return h.fetchAndStoreFile(dlCtx, project, filename, upstreamURL, expectedHash, fileHashes, requiresPython, logger)
 	})
-	if err != nil {
-		h.downloader.Forget(key)
-		if errors.Is(err, ErrNotFound) {
-			http.NotFound(w, r)
-			return
-		}
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			http.Error(w, "request timeout", http.StatusGatewayTimeout)
-			return
-		}
-		logger.Error("download failed", "error", err)
-		http.Error(w, "upstream error", http.StatusBadGateway)
-		return
-	}
 
-	// Serve from CAFS
-	rc, err := h.store.Get(ctx, result.Hash)
-	if err != nil {
-		logger.Error("failed to read from store after download", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	defer func() { _ = rc.Close() }()
-
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", strconv.FormatInt(result.Size, 10))
-	if r.Method != http.MethodHead {
-		if _, err := io.Copy(w, rc); err != nil {
-			logger.Error("failed to stream file", "error", err)
-		}
-	}
+	download.HandleResult(w, r, h.downloader, key, result, err, h.store,
+		func(e error) bool { return errors.Is(e, ErrNotFound) },
+		func() { http.NotFound(w, r) },
+		download.ServeOptions{ContentType: "application/octet-stream"},
+		logger,
+	)
 }
 
 // fetchAndStoreFile fetches a file from upstream, verifies integrity, stores in CAFS, and updates the index.

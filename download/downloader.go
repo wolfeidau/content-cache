@@ -5,7 +5,6 @@ package download
 
 import (
 	"context"
-	"log/slog"
 
 	contentcache "github.com/wolfeidau/content-cache"
 	"golang.org/x/sync/singleflight"
@@ -26,29 +25,12 @@ type DownloadFunc func(ctx context.Context) (*Result, error)
 // using singleflight. It uses DoChan so each caller can respect its own
 // context deadline without cancelling the in-flight download for others.
 type Downloader struct {
-	group  singleflight.Group
-	logger *slog.Logger
-}
-
-// Option configures a Downloader.
-type Option func(*Downloader)
-
-// WithLogger sets the logger for the downloader.
-func WithLogger(logger *slog.Logger) Option {
-	return func(d *Downloader) {
-		d.logger = logger
-	}
+	group singleflight.Group
 }
 
 // New creates a new Downloader.
-func New(opts ...Option) *Downloader {
-	d := &Downloader{
-		logger: slog.Default(),
-	}
-	for _, opt := range opts {
-		opt(d)
-	}
-	return d
+func New() *Downloader {
+	return &Downloader{}
 }
 
 // Do deduplicates concurrent downloads for the same key.

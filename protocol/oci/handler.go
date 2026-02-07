@@ -357,44 +357,21 @@ func (h *Handler) handleGetBlob(w http.ResponseWriter, r *http.Request, name, di
 
 // handleGetBlobWithDownloader uses the singleflight downloader to deduplicate concurrent blob fetches.
 func (h *Handler) handleGetBlobWithDownloader(w http.ResponseWriter, r *http.Request, name, digestStr string, logger *slog.Logger) {
-	ctx := r.Context()
 	key := fmt.Sprintf("oci:blob:%s", digestStr)
 
-	result, _, err := h.downloader.Do(ctx, key, func(dlCtx context.Context) (*download.Result, error) {
+	result, _, err := h.downloader.Do(r.Context(), key, func(dlCtx context.Context) (*download.Result, error) {
 		return h.fetchAndStoreBlob(dlCtx, name, digestStr, logger)
 	})
-	if err != nil {
-		h.downloader.Forget(key)
-		if err == ErrNotFound {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			http.Error(w, "request timeout", http.StatusGatewayTimeout)
-			return
-		}
-		logger.Error("download failed", "error", err)
-		http.Error(w, "upstream error", http.StatusBadGateway)
-		return
-	}
 
-	// Serve from CAFS
-	rc, err := h.store.Get(ctx, result.Hash)
-	if err != nil {
-		logger.Error("failed to read from store after download", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	defer func() { _ = rc.Close() }()
-
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set(DockerContentDigestHeader, digestStr)
-	if result.Size > 0 {
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", result.Size))
-	}
-	if _, err := io.Copy(w, rc); err != nil {
-		logger.Error("failed to stream blob", "error", err)
-	}
+	download.HandleResult(w, r, h.downloader, key, result, err, h.store,
+		func(e error) bool { return errors.Is(e, ErrNotFound) },
+		func() { http.Error(w, "not found", http.StatusNotFound) },
+		download.ServeOptions{
+			ContentType:  "application/octet-stream",
+			ExtraHeaders: map[string]string{DockerContentDigestHeader: digestStr},
+		},
+		logger,
+	)
 }
 
 // fetchAndStoreBlob fetches a blob from upstream, verifies its digest, stores in CAFS, and updates the index.
