@@ -97,6 +97,15 @@ git clone http://localhost:8080/git/github.com/user/repo.git /tmp/repo
 
 # Repeated clones with the same refs are served from cache
 git clone http://localhost:8080/git/github.com/user/repo.git /tmp/repo2  # cache hit
+
+# Or configure Git to transparently route through the proxy
+git config --global url."http://localhost:8080/git/github.com/".insteadOf "https://github.com/"
+
+# Now regular git commands work transparently through the cache
+git clone https://github.com/user/repo.git  # routed through proxy automatically
+
+# To undo
+git config --global --unset url."http://localhost:8080/git/github.com/".insteadOf
 ```
 
 ## Performance
