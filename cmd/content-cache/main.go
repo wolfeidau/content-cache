@@ -36,6 +36,9 @@ type ServeCmd struct {
 	MavenUpstream    string `kong:"name='maven-upstream',env='MAVEN_UPSTREAM',help='Upstream Maven repository URL (default: repo.maven.apache.org/maven2)',group='Upstream'"`
 	RubyGemsUpstream string `kong:"name='rubygems-upstream',env='RUBYGEMS_UPSTREAM',help='Upstream RubyGems registry URL (default: rubygems.org)',group='Upstream'"`
 
+	GitAllowedHosts       []string `kong:"name='git-allowed-hosts',env='GIT_ALLOWED_HOSTS',help='Comma-separated list of allowed Git upstream hosts (e.g. github.com,gitlab.com)',group='Git'"`
+	GitMaxRequestBodySize int64    `kong:"name='git-max-request-body',default='104857600',env='GIT_MAX_REQUEST_BODY',help='Maximum git-upload-pack request body size in bytes (default: 100MB)',group='Git'"`
+
 	OCIUsername     string        `kong:"name='oci-username',env='OCI_USERNAME',help='OCI registry username for authentication',group='OCI'"`
 	OCIPassword     string        `kong:"name='oci-password',env='OCI_PASSWORD',help='OCI registry password for authentication',group='OCI'"`
 	OCIPasswordFile string        `kong:"name='oci-password-file',env='OCI_PASSWORD_FILE',type='existingfile',help='Path to file containing OCI registry password',group='OCI'"`
@@ -70,7 +73,7 @@ func run() error {
 	var cli CLI
 	ctx := kong.Parse(&cli,
 		kong.Name("content-cache"),
-		kong.Description("A content-addressable cache server for Go modules, NPM packages, OCI images, PyPI, Maven, and RubyGems."),
+		kong.Description("A content-addressable cache server for Go modules, NPM packages, OCI images, PyPI, Maven, RubyGems, and Git repositories."),
 		kong.Vars{"version": version},
 		kong.UsageOnError(),
 	)
@@ -140,26 +143,28 @@ func (cmd *ServeCmd) Run() error {
 
 	// Create server
 	cfg := server.Config{
-		Address:             cmd.ListenAddress,
-		StoragePath:         cmd.Storage,
-		UpstreamGoProxy:     cmd.GoUpstream,
-		UpstreamNPMRegistry: cmd.NPMUpstream,
-		UpstreamOCIRegistry: cmd.OCIUpstream,
-		OCIUsername:         cmd.OCIUsername,
-		OCIPassword:         ociPassword,
-		OCITagTTL:           cmd.OCITagTTL,
-		UpstreamPyPI:        cmd.PyPIUpstream,
-		PyPIMetadataTTL:     cmd.PyPIMetadataTTL,
-		UpstreamMaven:       cmd.MavenUpstream,
-		MavenMetadataTTL:    cmd.MavenMetadataTTL,
-		UpstreamRubyGems:    cmd.RubyGemsUpstream,
-		RubyGemsMetadataTTL: cmd.RubyGemsMetadataTTL,
-		CacheTTL:            cmd.CacheTTL,
-		CacheMaxSize:        cmd.CacheMaxSize,
-		ExpiryCheckInterval: cmd.ExpiryCheckInterval,
-		GCInterval:          cmd.GCInterval,
-		GCStartupDelay:      cmd.GCStartupDelay,
-		Logger:              logger,
+		Address:               cmd.ListenAddress,
+		StoragePath:           cmd.Storage,
+		UpstreamGoProxy:       cmd.GoUpstream,
+		UpstreamNPMRegistry:   cmd.NPMUpstream,
+		UpstreamOCIRegistry:   cmd.OCIUpstream,
+		OCIUsername:           cmd.OCIUsername,
+		OCIPassword:           ociPassword,
+		OCITagTTL:             cmd.OCITagTTL,
+		UpstreamPyPI:          cmd.PyPIUpstream,
+		PyPIMetadataTTL:       cmd.PyPIMetadataTTL,
+		UpstreamMaven:         cmd.MavenUpstream,
+		MavenMetadataTTL:      cmd.MavenMetadataTTL,
+		UpstreamRubyGems:      cmd.RubyGemsUpstream,
+		RubyGemsMetadataTTL:   cmd.RubyGemsMetadataTTL,
+		GitAllowedHosts:       cmd.GitAllowedHosts,
+		GitMaxRequestBodySize: cmd.GitMaxRequestBodySize,
+		CacheTTL:              cmd.CacheTTL,
+		CacheMaxSize:          cmd.CacheMaxSize,
+		ExpiryCheckInterval:   cmd.ExpiryCheckInterval,
+		GCInterval:            cmd.GCInterval,
+		GCStartupDelay:        cmd.GCStartupDelay,
+		Logger:                logger,
 	}
 
 	srv, err := server.New(cfg)
