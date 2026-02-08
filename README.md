@@ -1,6 +1,6 @@
 # content-cache
 
-A content-addressable caching proxy for Go modules, NPM packages, PyPI packages, Maven artifacts, RubyGems, and OCI registries. Reduces build times and network bandwidth by caching package downloads locally with automatic deduplication and expiration policies.
+A content-addressable caching proxy for Go modules, NPM packages, PyPI packages, Maven artifacts, RubyGems, OCI registries, and Git repositories. Reduces build times and network bandwidth by caching package downloads locally with automatic deduplication and expiration policies.
 
 ## Problem
 
@@ -88,6 +88,15 @@ gem sources --remove https://rubygems.org/
 # Ruby gems are now cached
 bundle install   # First request: fetches from upstream
 bundle install   # Second request: served from cache
+
+# Use as a Git HTTPS caching proxy (requires --git-allowed-hosts)
+./content-cache serve --listen :8080 --storage ./cache --git-allowed-hosts github.com
+
+# Clone through the proxy
+git clone http://localhost:8080/git/github.com/user/repo.git /tmp/repo
+
+# Repeated clones with the same refs are served from cache
+git clone http://localhost:8080/git/github.com/user/repo.git /tmp/repo2  # cache hit
 ```
 
 ## Performance
@@ -106,6 +115,7 @@ bundle install   # Second request: served from cache
 - **Maven Repository**: Full support for Maven Central with JAR, POM, and checksum caching
 - **RubyGems Registry**: Full support for Compact Index and legacy specs API with gem caching and SHA256 verification
 - **OCI Distribution v2**: Read-through cache for container registries with tag-to-digest resolution
+- **Git Smart HTTP Proxy**: Caching proxy for `git clone`/`fetch` over HTTPS with pack-level caching, host allowlist, and singleflight deduplication
 - **Content-Addressable Storage**: BLAKE3 hashing with automatic deduplication
 - **Filesystem Backend**: Atomic writes with sharded directory structure
 - **Download Deduplication**: Singleflight-based coalescing of concurrent requests for the same uncached resource
@@ -132,6 +142,7 @@ graph TD
     A --> G[PyPI Handler]
     A --> H[Maven Handler]
     A --> I[RubyGems Handler]
+    A --> J[Git Handler]
 
     B --> DL[Download Deduplication]
     C --> DL
@@ -139,6 +150,7 @@ graph TD
     G --> DL
     H --> DL
     I --> DL
+    J --> DL
 
     DL --> E[Content-Addressable Store]
 
@@ -150,6 +162,7 @@ graph TD
     A -.-> A4["/pypi/*"]
     A -.-> A5["/maven/*"]
     A -.-> A6["/rubygems/*"]
+    A -.-> A8["/git/*"]
     A -.-> A7["/health, /stats"]
 
     E -.-> E1["blobs/{hash[0:2]}/{hash}"]
@@ -202,6 +215,13 @@ Configuration is available via command-line flags or environment variables. Envi
 | `--pypi-metadata-ttl` | `PYPI_METADATA_TTL` | `5m` | TTL for PyPI project metadata cache |
 | `--maven-metadata-ttl` | `MAVEN_METADATA_TTL` | `5m` | TTL for maven-metadata.xml cache |
 | `--rubygems-metadata-ttl` | `RUBYGEMS_METADATA_TTL` | `5m` | TTL for RubyGems metadata cache |
+
+### Git Proxy Options
+
+| Flag | Environment Variable | Default | Description |
+|------|---------------------|---------|-------------|
+| `--git-allowed-hosts` | `GIT_ALLOWED_HOSTS` | | Comma-separated list of allowed Git upstream hosts (e.g., `github.com,gitlab.com`) |
+| `--git-max-request-body` | `GIT_MAX_REQUEST_BODY` | `104857600` | Maximum git-upload-pack request body size in bytes (100MB) |
 
 ### Cache Management
 
@@ -335,13 +355,14 @@ stringData:
 │   │   └── specs.4.8.gz     # Legacy specs files
 │   └── gems/
 │       └── rails-7.1.0.gem.json  # Gem file references
-└── oci/                     # OCI image index
+├── oci/                     # OCI image index
     └── library/
         └── alpine/
             ├── manifests/
             │   └── sha256:abc...    # Image manifests
             └── blobs/
                 └── sha256:def...    # Layer references
+└── meta.db                  # BoltDB metadata index (git pack cache, etc.)
 ```
 
 ## Development
@@ -368,6 +389,9 @@ curl http://localhost:8080/maven/org/apache/commons/commons-lang3/maven-metadata
 # Test the RubyGems registry endpoint (Compact Index)
 curl http://localhost:8080/rubygems/versions
 curl http://localhost:8080/rubygems/info/rails
+
+# Test the Git proxy endpoint (requires --git-allowed-hosts github.com)
+git clone http://localhost:8080/git/github.com/wolfeidau/content-cache.git /tmp/test-clone
 
 # Test the OCI registry endpoint
 curl http://localhost:8080/v2/
@@ -396,7 +420,7 @@ content-cache exports OpenTelemetry metrics for monitoring cache effectiveness.
 
 ### Labels
 
-- `protocol`: npm, pypi, goproxy, maven, rubygems, oci
+- `protocol`: npm, pypi, goproxy, maven, rubygems, oci, git
 - `endpoint`: metadata, tarball, artifact, blob, manifest, etc.
 - `cache_result`: hit, miss, bypass
 - `status_class`: 2xx, 3xx, 4xx, 5xx

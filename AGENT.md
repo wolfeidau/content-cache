@@ -32,7 +32,8 @@ protocol/              # Protocol handlers (one package per protocol)
   ├── npm/             # NPM registry
   ├── oci/             # OCI/Docker registry
   ├── pypi/            # Python Package Index
-  └── maven/           # Maven repository
+  ├── maven/           # Maven repository
+  └── git/             # Git Smart HTTP proxy
 download/              # Singleflight-based download deduplication
 store/                 # Content-addressable storage (CAFS)
 backend/               # Storage backends (filesystem, future: S3)
@@ -61,7 +62,7 @@ When adding a new protocol:
 - **Logging**: ALWAYS use `"log/slog"` for all logging operations
 - **Testing**: Use `testify/require` for assertions
 - **Error handling**: Return errors up the stack, log at top level only
-- **Package names**: Lowercase, descriptive (goproxy, npm, oci, pypi, maven)
+- **Package names**: Lowercase, descriptive (goproxy, npm, oci, pypi, maven, git)
 - **Contexts**: Pass contexts for cancellation and tracing throughout
 - **Options pattern**: Use functional options for configurable types (see `WithLogger`, `WithUpstream`)
 
