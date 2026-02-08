@@ -2,16 +2,21 @@ package git
 
 import (
 	"bytes"
+	"compress/gzip"
+	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	contentcache "github.com/wolfeidau/content-cache"
 	"github.com/wolfeidau/content-cache/backend"
 	"github.com/wolfeidau/content-cache/download"
 	"github.com/wolfeidau/content-cache/store"
@@ -31,11 +36,11 @@ func fakeGitUpstream(t *testing.T) *httptest.Server {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && contains(r.URL.Path, "/info/refs"):
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/info/refs"):
 			w.Header().Set("Content-Type", ContentTypeUploadPackAdvertisement)
 			_, _ = w.Write([]byte(fakeInfoRefsBody))
 
-		case r.Method == http.MethodPost && contains(r.URL.Path, "/git-upload-pack"):
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/git-upload-pack"):
 			fetchCount.Add(1)
 			w.Header().Set("Content-Type", ContentTypeUploadPackResult)
 			_, _ = w.Write([]byte(fakeUploadPackBody))
@@ -50,19 +55,6 @@ func fakeGitUpstream(t *testing.T) *httptest.Server {
 	})
 
 	return srv
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsImpl(s, substr))
-}
-
-func containsImpl(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
 
 func TestParseGitPath(t *testing.T) {
@@ -314,7 +306,7 @@ func TestHandlerSingleflight(t *testing.T) {
 	fetchGate.Add(1)
 
 	slowUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && contains(r.URL.Path, "/git-upload-pack") {
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/git-upload-pack") {
 			fetchCount.Add(1)
 			fetchGate.Wait() // Block until released
 			w.Header().Set("Content-Type", ContentTypeUploadPackResult)
@@ -357,6 +349,197 @@ func TestHandlerSingleflight(t *testing.T) {
 	for i, w := range results {
 		require.Equal(t, http.StatusOK, w.Code, "request %d failed", i)
 	}
+}
+
+func TestHandlerUploadPackGzip(t *testing.T) {
+	upstream := fakeGitUpstream(t)
+	h, cleanup := newTestHandlerWithTransport(t, upstream)
+	defer cleanup()
+
+	requestBody := []byte("0032want abc123\n00000009done\n")
+
+	// Compress the request body
+	var gzBuf bytes.Buffer
+	gz := gzip.NewWriter(&gzBuf)
+	_, err := gz.Write(requestBody)
+	require.NoError(t, err)
+	require.NoError(t, gz.Close())
+
+	t.Run("gzip request body is decompressed and cached", func(t *testing.T) {
+		// Send gzip-encoded request
+		req := httptest.NewRequest(http.MethodPost, "/github.com/user/gzip-repo.git/git-upload-pack", bytes.NewReader(gzBuf.Bytes()))
+		req.Header.Set("Content-Type", ContentTypeUploadPackRequest)
+		req.Header.Set("Content-Encoding", "gzip")
+		w := httptest.NewRecorder()
+
+		h.ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code)
+		require.Equal(t, ContentTypeUploadPackResult, w.Header().Get("Content-Type"))
+		firstBody := w.Body.String()
+
+		// Send the same body uncompressed — should be a cache hit
+		// because the decompressed body produces the same hash
+		req2 := httptest.NewRequest(http.MethodPost, "/github.com/user/gzip-repo.git/git-upload-pack", bytes.NewReader(requestBody))
+		req2.Header.Set("Content-Type", ContentTypeUploadPackRequest)
+		w2 := httptest.NewRecorder()
+
+		h.ServeHTTP(w2, req2)
+
+		require.Equal(t, http.StatusOK, w2.Code)
+		require.Equal(t, firstBody, w2.Body.String())
+	})
+
+	t.Run("invalid gzip body returns 400", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/github.com/user/gzip-repo.git/git-upload-pack", bytes.NewReader([]byte("not gzip")))
+		req.Header.Set("Content-Type", ContentTypeUploadPackRequest)
+		req.Header.Set("Content-Encoding", "gzip")
+		w := httptest.NewRecorder()
+
+		h.ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusBadRequest, w.Code)
+	})
+}
+
+func TestHandlerUploadPackCacheHitSkipsUpstream(t *testing.T) {
+	var fetchCount atomic.Int32
+
+	countingUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/info/refs"):
+			w.Header().Set("Content-Type", ContentTypeUploadPackAdvertisement)
+			_, _ = w.Write([]byte(fakeInfoRefsBody))
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/git-upload-pack"):
+			fetchCount.Add(1)
+			w.Header().Set("Content-Type", ContentTypeUploadPackResult)
+			_, _ = w.Write([]byte(fakeUploadPackBody))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer countingUpstream.Close()
+
+	h, cleanup := newTestHandlerWithTransport(t, countingUpstream)
+	defer cleanup()
+
+	body := []byte("0032want def456\n00000009done\n")
+
+	// First request — cache miss
+	req := httptest.NewRequest(http.MethodPost, "/github.com/user/repo.git/git-upload-pack", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, int32(1), fetchCount.Load())
+
+	// Second request — cache hit, upstream must not be called again
+	req2 := httptest.NewRequest(http.MethodPost, "/github.com/user/repo.git/git-upload-pack", bytes.NewReader(body))
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, req2)
+	require.Equal(t, http.StatusOK, w2.Code)
+	require.Equal(t, int32(1), fetchCount.Load(), "cache hit should not call upstream")
+}
+
+func TestHandlerUpstreamErrors(t *testing.T) {
+	t.Run("upstream 404 returns 404", func(t *testing.T) {
+		notFoundUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer notFoundUpstream.Close()
+
+		h, cleanup := newTestHandlerWithTransport(t, notFoundUpstream)
+		defer cleanup()
+
+		req := httptest.NewRequest(http.MethodGet, "/github.com/user/nonexistent.git/info/refs?service=git-upload-pack", nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		require.Equal(t, http.StatusNotFound, w.Code)
+	})
+
+	t.Run("upstream 500 returns 502", func(t *testing.T) {
+		errorUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer errorUpstream.Close()
+
+		h, cleanup := newTestHandlerWithTransport(t, errorUpstream)
+		defer cleanup()
+
+		req := httptest.NewRequest(http.MethodGet, "/github.com/user/broken.git/info/refs?service=git-upload-pack", nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		require.Equal(t, http.StatusBadGateway, w.Code)
+	})
+
+	t.Run("upload-pack upstream 404 returns 404", func(t *testing.T) {
+		notFoundUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer notFoundUpstream.Close()
+
+		h, cleanup := newTestHandlerWithTransport(t, notFoundUpstream)
+		defer cleanup()
+
+		body := []byte("0032want abc123\n00000009done\n")
+		req := httptest.NewRequest(http.MethodPost, "/github.com/user/nonexistent.git/git-upload-pack", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		require.Equal(t, http.StatusNotFound, w.Code)
+	})
+}
+
+func TestHandlerStaleCacheEviction(t *testing.T) {
+	upstream := fakeGitUpstream(t)
+
+	tmpDir, err := os.MkdirTemp("", "git-test-*")
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	b, err := backend.NewFilesystem(tmpDir)
+	require.NoError(t, err)
+	cafs := store.NewCAFS(b)
+
+	db := metadb.NewBoltDB(metadb.WithNoSync(true))
+	require.NoError(t, db.Open(filepath.Join(tmpDir, "meta.db")))
+	defer func() { _ = db.Close() }()
+
+	packIdx, err := metadb.NewEnvelopeIndex(db, "git", "pack", 24*time.Hour)
+	require.NoError(t, err)
+	idx := NewIndex(packIdx)
+	dl := download.New()
+
+	h := NewHandler(idx, cafs,
+		WithUpstream(NewUpstream(WithHTTPClient(redirectClient(upstream.URL)))),
+		WithDownloader(dl),
+		WithAllowedHosts([]string{"github.com"}),
+	)
+
+	body := []byte("0032want stale1\n00000009done\n")
+
+	// First request — populates cache
+	req := httptest.NewRequest(http.MethodPost, "/github.com/user/repo.git/git-upload-pack", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	firstBody := w.Body.String()
+
+	// Get the cached entry to find the stored hash
+	ctx := context.Background()
+	bodyHash := contentcache.HashBytes(body)
+	cacheKey := fmt.Sprintf("github.com/user/repo::%s", bodyHash.String())
+	cached, err := idx.GetCachedPack(ctx, cacheKey)
+	require.NoError(t, err)
+
+	// Delete the blob from CAFS to simulate stale cache
+	err = cafs.Delete(ctx, cached.ResponseHash)
+	require.NoError(t, err)
+
+	// Next request should detect stale entry, evict it, and re-fetch from upstream
+	req2 := httptest.NewRequest(http.MethodPost, "/github.com/user/repo.git/git-upload-pack", bytes.NewReader(body))
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, req2)
+	require.Equal(t, http.StatusOK, w2.Code)
+	require.Equal(t, firstBody, w2.Body.String())
 }
 
 // newTestHandlerWithTransport creates a test handler that redirects all HTTPS

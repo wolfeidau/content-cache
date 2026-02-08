@@ -402,6 +402,8 @@ func New(cfg Config) (*Server, error) {
 	}
 	if len(cfg.GitAllowedHosts) > 0 {
 		gitHandlerOpts = append(gitHandlerOpts, git.WithAllowedHosts(cfg.GitAllowedHosts))
+	} else {
+		cfg.Logger.Warn("git proxy has no allowed hosts configured, all git requests will be rejected — set --git-allowed-hosts to enable")
 	}
 	if cfg.GitMaxRequestBodySize > 0 {
 		gitHandlerOpts = append(gitHandlerOpts, git.WithMaxRequestBodySize(cfg.GitMaxRequestBodySize))

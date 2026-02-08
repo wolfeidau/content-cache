@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -331,7 +332,7 @@ func (h *Handler) fetchAndStorePack(ctx context.Context, repo RepoRef, gitProtoc
 		"git_protocol", gitProtocol,
 	)
 
-	rc, _, err := h.upstream.FetchUploadPack(ctx, repo, gitProtocol, bytes.NewReader(body))
+	rc, err := h.upstream.FetchUploadPack(ctx, repo, gitProtocol, bytes.NewReader(body))
 	if err != nil {
 		logger.Error("download failed", "error", err)
 		return nil, err
@@ -394,6 +395,10 @@ func (h *Handler) fetchAndStorePack(ctx context.Context, repo RepoRef, gitProtoc
 // logPktLineSummary logs a summary of the git pkt-line request body for debugging.
 // It parses pkt-line framing (4-hex-digit length prefix) and summarizes the content.
 func logPktLineSummary(logger *slog.Logger, body []byte) {
+	if !logger.Enabled(context.Background(), slog.LevelDebug) {
+		return
+	}
+
 	var (
 		wantCount, haveCount, shallowCount int
 		hasDone, hasFilter                 bool
@@ -474,19 +479,9 @@ func logPktLineSummary(logger *slog.Logger, body []byte) {
 
 // parseHexLen parses a 4-character hex string into an integer.
 func parseHexLen(s string) (int, error) {
-	var n int
-	for _, c := range s {
-		n <<= 4
-		switch {
-		case c >= '0' && c <= '9':
-			n += int(c - '0')
-		case c >= 'a' && c <= 'f':
-			n += int(c-'a') + 10
-		case c >= 'A' && c <= 'F':
-			n += int(c-'A') + 10
-		default:
-			return 0, fmt.Errorf("invalid hex character: %c", c)
-		}
+	n, err := strconv.ParseUint(s, 16, 32)
+	if err != nil {
+		return 0, fmt.Errorf("invalid hex length %q: %w", s, err)
 	}
-	return n, nil
+	return int(n), nil
 }

@@ -80,12 +80,12 @@ func (u *Upstream) FetchInfoRefs(ctx context.Context, repo RepoRef, gitProtocol 
 
 // FetchUploadPack sends a git-upload-pack request to the upstream repository.
 // The gitProtocol parameter is forwarded as the Git-Protocol header if non-empty.
-func (u *Upstream) FetchUploadPack(ctx context.Context, repo RepoRef, gitProtocol string, body io.Reader) (io.ReadCloser, string, error) {
+func (u *Upstream) FetchUploadPack(ctx context.Context, repo RepoRef, gitProtocol string, body io.Reader) (io.ReadCloser, error) {
 	url := fmt.Sprintf("%s/git-upload-pack", repo.UpstreamURL())
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
 	if err != nil {
-		return nil, "", fmt.Errorf("creating upload-pack request: %w", err)
+		return nil, fmt.Errorf("creating upload-pack request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", ContentTypeUploadPackRequest)
@@ -101,7 +101,7 @@ func (u *Upstream) FetchUploadPack(ctx context.Context, repo RepoRef, gitProtoco
 
 	resp, err := u.client.Do(req)
 	if err != nil {
-		return nil, "", fmt.Errorf("fetching upload-pack: %w", err)
+		return nil, fmt.Errorf("fetching upload-pack: %w", err)
 	}
 
 	u.logger.Debug("upstream upload-pack response",
@@ -113,7 +113,7 @@ func (u *Upstream) FetchUploadPack(ctx context.Context, repo RepoRef, gitProtoco
 
 	if resp.StatusCode == http.StatusNotFound {
 		_ = resp.Body.Close()
-		return nil, "", ErrNotFound
+		return nil, ErrNotFound
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -128,8 +128,8 @@ func (u *Upstream) FetchUploadPack(ctx context.Context, repo RepoRef, gitProtoco
 			"response_body", string(respBody),
 		)
 
-		return nil, "", fmt.Errorf("upstream upload-pack returned %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("upstream upload-pack returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	return resp.Body, resp.Header.Get("Content-Type"), nil
+	return resp.Body, nil
 }

@@ -20,17 +20,10 @@ const (
 
 	// DefaultMaxRequestBodySize is the maximum size of a git-upload-pack request body (100MB).
 	DefaultMaxRequestBodySize int64 = 100 * 1024 * 1024
-
-	// DefaultUpstreamTimeout is the default timeout for upstream git requests.
-	// Large repos need long timeouts for pack data transfer.
-	DefaultUpstreamTimeout = 10 * time.Minute
 )
 
 // ErrNotFound is returned when a cached pack is not found.
 var ErrNotFound = errors.New("not found")
-
-// ErrForbidden is returned when an operation is rejected (e.g., push).
-var ErrForbidden = errors.New("forbidden")
 
 // RepoRef identifies a Git repository by host and path.
 type RepoRef struct {
