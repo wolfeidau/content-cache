@@ -187,6 +187,8 @@ Configuration is available via command-line flags or environment variables. Envi
 |------|---------------------|---------|-------------|
 | `--listen` | `LISTEN_ADDRESS` | `:8080` | HTTP server listen address |
 | `--storage` | `CACHE_STORAGE` | `./cache` | Local storage directory path |
+| `--tls-cert` | `TLS_CERT_FILE` | | Path to TLS certificate file (enables HTTPS) |
+| `--tls-key` | `TLS_KEY_FILE` | | Path to TLS private key file (enables HTTPS) |
 
 ### Upstream Registry Options
 

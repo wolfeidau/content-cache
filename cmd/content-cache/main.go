@@ -28,6 +28,8 @@ type CLI struct {
 type ServeCmd struct {
 	ListenAddress string `kong:"name='listen',default=':8080',env='LISTEN_ADDRESS',help='Address to listen on',group='Server'"`
 	Storage       string `kong:"name='storage',default='./cache',env='CACHE_STORAGE',help='Storage directory path',group='Server'"`
+	TLSCertFile   string `kong:"name='tls-cert',env='TLS_CERT_FILE',type='existingfile',help='Path to TLS certificate file (enables HTTPS)',group='Server'"`
+	TLSKeyFile    string `kong:"name='tls-key',env='TLS_KEY_FILE',type='existingfile',help='Path to TLS private key file (enables HTTPS)',group='Server'"`
 
 	GoUpstream       string `kong:"name='go-upstream',env='GO_UPSTREAM',help='Upstream Go module proxy URL (default: proxy.golang.org)',group='Upstream'"`
 	NPMUpstream      string `kong:"name='npm-upstream',env='NPM_UPSTREAM',help='Upstream NPM registry URL (default: registry.npmjs.org)',group='Upstream'"`
@@ -145,6 +147,8 @@ func (cmd *ServeCmd) Run() error {
 	cfg := server.Config{
 		Address:               cmd.ListenAddress,
 		StoragePath:           cmd.Storage,
+		TLSCertFile:           cmd.TLSCertFile,
+		TLSKeyFile:            cmd.TLSKeyFile,
 		UpstreamGoProxy:       cmd.GoUpstream,
 		UpstreamNPMRegistry:   cmd.NPMUpstream,
 		UpstreamOCIRegistry:   cmd.OCIUpstream,

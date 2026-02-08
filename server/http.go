@@ -113,6 +113,13 @@ type Config struct {
 	// GCStartupDelay is the delay before first GC run.
 	GCStartupDelay time.Duration
 
+	// TLSCertFile is the path to the TLS certificate file.
+	// When both TLSCertFile and TLSKeyFile are set, the server starts with TLS.
+	TLSCertFile string
+
+	// TLSKeyFile is the path to the TLS private key file.
+	TLSKeyFile string
+
 	// Logger for the server
 	Logger *slog.Logger
 }
@@ -657,6 +664,11 @@ func (s *Server) Start() error {
 			"max_size", s.config.CacheMaxSize,
 		)
 		s.gcManager.Start(context.Background())
+	}
+
+	if s.config.TLSCertFile != "" && s.config.TLSKeyFile != "" {
+		s.logger.Info("starting server with TLS", "address", s.config.Address)
+		return s.httpServer.ListenAndServeTLS(s.config.TLSCertFile, s.config.TLSKeyFile)
 	}
 
 	s.logger.Info("starting server", "address", s.config.Address)
