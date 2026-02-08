@@ -394,7 +394,7 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("creating git pack index: %w", err)
 	}
 	gitIndex := git.NewIndex(gitPackIndex)
-	gitUpstream := git.NewUpstream()
+	gitUpstream := git.NewUpstream(git.WithUpstreamLogger(cfg.Logger.With("component", "git")))
 	gitHandlerOpts := []git.HandlerOption{
 		git.WithUpstream(gitUpstream),
 		git.WithLogger(cfg.Logger.With("component", "git")),

@@ -31,6 +31,11 @@ func (idx *Index) GetCachedPack(ctx context.Context, cacheKey string) (*CachedPa
 	return &cached, nil
 }
 
+// DeleteCachedPack removes a cached pack entry by its cache key.
+func (idx *Index) DeleteCachedPack(ctx context.Context, cacheKey string) error {
+	return idx.packIndex.Delete(ctx, cacheKey)
+}
+
 // PutCachedPack stores a cached pack with a blob reference.
 func (idx *Index) PutCachedPack(ctx context.Context, cacheKey string, pack *CachedPack) error {
 	var refs []string

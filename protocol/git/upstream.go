@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 )
 
 // Upstream fetches from upstream Git repositories over HTTPS.
 type Upstream struct {
 	client *http.Client
+	logger *slog.Logger
 }
 
 // UpstreamOption configures an Upstream.
@@ -22,12 +24,20 @@ func WithHTTPClient(client *http.Client) UpstreamOption {
 	}
 }
 
+// WithUpstreamLogger sets the logger for the upstream client.
+func WithUpstreamLogger(logger *slog.Logger) UpstreamOption {
+	return func(u *Upstream) {
+		u.logger = logger
+	}
+}
+
 // NewUpstream creates a new upstream Git client.
 // The default HTTP client uses no Client.Timeout — it relies on context
 // deadlines instead, since large repo clones can take minutes.
 func NewUpstream(opts ...UpstreamOption) *Upstream {
 	u := &Upstream{
 		client: &http.Client{},
+		logger: slog.Default(),
 	}
 	for _, opt := range opts {
 		opt(u)
@@ -83,10 +93,23 @@ func (u *Upstream) FetchUploadPack(ctx context.Context, repo RepoRef, gitProtoco
 		req.Header.Set("Git-Protocol", gitProtocol)
 	}
 
+	u.logger.Debug("sending upload-pack request to upstream",
+		"url", url,
+		"git_protocol", gitProtocol,
+		"content_type", req.Header.Get("Content-Type"),
+	)
+
 	resp, err := u.client.Do(req)
 	if err != nil {
 		return nil, "", fmt.Errorf("fetching upload-pack: %w", err)
 	}
+
+	u.logger.Debug("upstream upload-pack response",
+		"url", url,
+		"status", resp.StatusCode,
+		"content_type", resp.Header.Get("Content-Type"),
+		"content_length", resp.ContentLength,
+	)
 
 	if resp.StatusCode == http.StatusNotFound {
 		_ = resp.Body.Close()
@@ -94,9 +117,18 @@ func (u *Upstream) FetchUploadPack(ctx context.Context, repo RepoRef, gitProtoco
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
-		return nil, "", fmt.Errorf("upstream upload-pack returned %d: %s", resp.StatusCode, string(body))
+
+		u.logger.Error("upstream upload-pack error response",
+			"url", url,
+			"status", resp.StatusCode,
+			"response_headers", resp.Header,
+			"response_body_length", len(respBody),
+			"response_body", string(respBody),
+		)
+
+		return nil, "", fmt.Errorf("upstream upload-pack returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	return resp.Body, resp.Header.Get("Content-Type"), nil
