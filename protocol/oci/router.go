@@ -7,7 +7,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode"
 )
 
 // ErrNoMatchingRegistry is returned when no registry prefix matches the request path.
@@ -26,16 +25,24 @@ type Router struct {
 	logger     *slog.Logger
 }
 
+// RouterOption configures a Router.
+type RouterOption func(*Router)
+
+// WithRouterLogger sets the logger for the router.
+func WithRouterLogger(logger *slog.Logger) RouterOption {
+	return func(r *Router) {
+		if logger != nil {
+			r.logger = logger
+		}
+	}
+}
+
 // NewRouter creates a new Router with the given registries.
 // It validates that prefixes are non-empty, lowercase, contain no slashes,
 // are unique, and that no prefix is a prefix of another.
-func NewRouter(registries []Registry, logger *slog.Logger) (*Router, error) {
+func NewRouter(registries []Registry, opts ...RouterOption) (*Router, error) {
 	if len(registries) == 0 {
 		return nil, errors.New("at least one registry is required")
-	}
-
-	if logger == nil {
-		logger = slog.Default()
 	}
 
 	// Validate prefixes
@@ -49,11 +56,6 @@ func NewRouter(registries []Registry, logger *slog.Logger) (*Router, error) {
 		}
 		if strings.Contains(r.Prefix, "/") {
 			return nil, fmt.Errorf("registry prefix %q must not contain slashes", r.Prefix)
-		}
-		for _, ch := range r.Prefix {
-			if unicode.IsUpper(ch) {
-				return nil, fmt.Errorf("registry prefix %q must be lowercase", r.Prefix)
-			}
 		}
 		if seen[r.Prefix] {
 			return nil, fmt.Errorf("duplicate registry prefix %q", r.Prefix)
@@ -80,10 +82,14 @@ func NewRouter(registries []Registry, logger *slog.Logger) (*Router, error) {
 		return len(sorted[i].Prefix) > len(sorted[j].Prefix)
 	})
 
-	return &Router{
+	rt := &Router{
 		registries: sorted,
-		logger:     logger,
-	}, nil
+		logger:     slog.Default(),
+	}
+	for _, opt := range opts {
+		opt(rt)
+	}
+	return rt, nil
 }
 
 // Route matches a request path to a registry.

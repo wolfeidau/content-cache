@@ -1,19 +1,16 @@
 package oci
 
 import (
-	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
 func TestNewRouter(t *testing.T) {
-	logger := slog.Default()
-
 	t.Run("single registry", func(t *testing.T) {
 		r, err := NewRouter([]Registry{
 			{Prefix: "docker-hub", Upstream: NewUpstream()},
-		}, logger)
+		})
 		require.NoError(t, err)
 		require.NotNil(t, r)
 	})
@@ -22,13 +19,13 @@ func TestNewRouter(t *testing.T) {
 		r, err := NewRouter([]Registry{
 			{Prefix: "docker-hub", Upstream: NewUpstream()},
 			{Prefix: "ghcr", Upstream: NewUpstream()},
-		}, logger)
+		})
 		require.NoError(t, err)
 		require.NotNil(t, r)
 	})
 
 	t.Run("empty registries", func(t *testing.T) {
-		_, err := NewRouter([]Registry{}, logger)
+		_, err := NewRouter([]Registry{})
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "at least one registry")
 	})
@@ -36,7 +33,7 @@ func TestNewRouter(t *testing.T) {
 	t.Run("empty prefix", func(t *testing.T) {
 		_, err := NewRouter([]Registry{
 			{Prefix: "", Upstream: NewUpstream()},
-		}, logger)
+		})
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "must not be empty")
 	})
@@ -44,7 +41,7 @@ func TestNewRouter(t *testing.T) {
 	t.Run("uppercase prefix rejected", func(t *testing.T) {
 		_, err := NewRouter([]Registry{
 			{Prefix: "DockerHub", Upstream: NewUpstream()},
-		}, logger)
+		})
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "must be lowercase")
 	})
@@ -52,7 +49,7 @@ func TestNewRouter(t *testing.T) {
 	t.Run("slash in prefix rejected", func(t *testing.T) {
 		_, err := NewRouter([]Registry{
 			{Prefix: "docker/hub", Upstream: NewUpstream()},
-		}, logger)
+		})
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "must not contain slashes")
 	})
@@ -61,7 +58,7 @@ func TestNewRouter(t *testing.T) {
 		_, err := NewRouter([]Registry{
 			{Prefix: "docker-hub", Upstream: NewUpstream()},
 			{Prefix: "docker-hub", Upstream: NewUpstream()},
-		}, logger)
+		})
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "duplicate")
 	})
@@ -70,27 +67,25 @@ func TestNewRouter(t *testing.T) {
 		_, err := NewRouter([]Registry{
 			{Prefix: "ecr", Upstream: NewUpstream()},
 			{Prefix: "ecr-public", Upstream: NewUpstream()},
-		}, logger)
+		})
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "overlapping")
 	})
 
-	t.Run("nil logger uses default", func(t *testing.T) {
+	t.Run("custom logger", func(t *testing.T) {
 		r, err := NewRouter([]Registry{
 			{Prefix: "docker-hub", Upstream: NewUpstream()},
-		}, nil)
+		}, WithRouterLogger(nil))
 		require.NoError(t, err)
 		require.NotNil(t, r)
 	})
 }
 
 func TestRouterRoute(t *testing.T) {
-	logger := slog.Default()
-
 	t.Run("single prefix match", func(t *testing.T) {
 		r, err := NewRouter([]Registry{
 			{Prefix: "docker-hub", Upstream: NewUpstream()},
-		}, logger)
+		})
 		require.NoError(t, err)
 
 		reg, remainder, err := r.Route("/v2/docker-hub/library/nginx/manifests/latest")
@@ -103,7 +98,7 @@ func TestRouterRoute(t *testing.T) {
 		r, err := NewRouter([]Registry{
 			{Prefix: "ghcr", Upstream: NewUpstream()},
 			{Prefix: "docker-hub", Upstream: NewUpstream()},
-		}, logger)
+		})
 		require.NoError(t, err)
 
 		reg, remainder, err := r.Route("/v2/docker-hub/library/nginx/manifests/latest")
@@ -120,7 +115,7 @@ func TestRouterRoute(t *testing.T) {
 	t.Run("no match returns error", func(t *testing.T) {
 		r, err := NewRouter([]Registry{
 			{Prefix: "docker-hub", Upstream: NewUpstream()},
-		}, logger)
+		})
 		require.NoError(t, err)
 
 		_, _, err = r.Route("/v2/ghcr/myorg/myimage/manifests/v1.0")
@@ -130,7 +125,7 @@ func TestRouterRoute(t *testing.T) {
 	t.Run("blob path", func(t *testing.T) {
 		r, err := NewRouter([]Registry{
 			{Prefix: "docker-hub", Upstream: NewUpstream()},
-		}, logger)
+		})
 		require.NoError(t, err)
 
 		reg, remainder, err := r.Route("/v2/docker-hub/library/alpine/blobs/sha256:abc123")
@@ -142,7 +137,7 @@ func TestRouterRoute(t *testing.T) {
 	t.Run("prefix without trailing content does not match", func(t *testing.T) {
 		r, err := NewRouter([]Registry{
 			{Prefix: "docker-hub", Upstream: NewUpstream()},
-		}, logger)
+		})
 		require.NoError(t, err)
 
 		// "/v2/docker-hub" without trailing slash+content should not match

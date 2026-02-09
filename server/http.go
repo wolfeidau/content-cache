@@ -289,13 +289,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	ociUpstream := oci.NewUpstream(ociUpstreamOpts...)
 
-	ociPrefix := cfg.OCIPrefix
-	if ociPrefix == "" {
-		ociPrefix = "docker-hub"
-	}
 	ociRouter, err := oci.NewRouter([]oci.Registry{
-		{Prefix: ociPrefix, Upstream: ociUpstream},
-	}, cfg.Logger.With("component", "oci-router"))
+		{Prefix: cfg.OCIPrefix, Upstream: ociUpstream},
+	}, oci.WithRouterLogger(cfg.Logger.With("component", "oci-router")))
 	if err != nil {
 		return nil, fmt.Errorf("creating oci router: %w", err)
 	}

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -31,7 +30,7 @@ func newTestRouter(t *testing.T, upstreamURL string) *Router {
 	}
 	router, err := NewRouter([]Registry{
 		{Prefix: testPrefix, Upstream: NewUpstream(upstreamOpts...)},
-	}, slog.Default())
+	})
 	require.NoError(t, err)
 	return router
 }
@@ -816,6 +815,113 @@ func TestHandlerTagScopedByPrefix(t *testing.T) {
 	require.Equal(t, manifestDigest2, d2)
 }
 
+func TestHandlerMultiRegistry(t *testing.T) {
+	manifest1 := `{"schemaVersion":2,"config":{"digest":"sha256:aaa"}}`
+	manifest2 := `{"schemaVersion":2,"config":{"digest":"sha256:bbb"}}`
+	digest1 := ComputeSHA256([]byte(manifest1))
+	digest2 := ComputeSHA256([]byte(manifest2))
+
+	// Upstream server 1 (docker-hub)
+	server1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v2/library/nginx/manifests/latest" {
+			w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+			w.Header().Set("Docker-Content-Digest", digest1)
+			_, _ = w.Write([]byte(manifest1))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server1.Close()
+
+	// Upstream server 2 (ghcr)
+	server2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v2/library/nginx/manifests/latest" {
+			w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+			w.Header().Set("Docker-Content-Digest", digest2)
+			_, _ = w.Write([]byte(manifest2))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server2.Close()
+
+	// Create handler with two registries
+	tmpDir, err := os.MkdirTemp("", "oci-multi-registry-test-*")
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	idx, st, _, cleanupDB := newTestIndexWithStore(t, tmpDir)
+	defer cleanupDB()
+
+	router, err := NewRouter([]Registry{
+		{Prefix: "docker-hub", Upstream: NewUpstream(WithRegistryURL(server1.URL))},
+		{Prefix: "ghcr", Upstream: NewUpstream(WithRegistryURL(server2.URL))},
+	})
+	require.NoError(t, err)
+
+	h := NewHandler(idx, st,
+		WithTagTTL(1*time.Hour),
+		WithRouter(router),
+	)
+	defer h.Close()
+
+	t.Run("docker-hub routes to server1", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v2/docker-hub/library/nginx/manifests/latest", nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code)
+		require.Equal(t, digest1, w.Header().Get("Docker-Content-Digest"))
+		require.Equal(t, manifest1, w.Body.String())
+	})
+
+	t.Run("ghcr routes to server2", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v2/ghcr/library/nginx/manifests/latest", nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code)
+		require.Equal(t, digest2, w.Header().Get("Docker-Content-Digest"))
+		require.Equal(t, manifest2, w.Body.String())
+	})
+
+	// Wait for background caching to finish
+	h.Close()
+
+	t.Run("tag isolation between registries", func(t *testing.T) {
+		// Verify the index stored different digests for the same image name under different prefixes
+		ctx := context.Background()
+
+		d1, _, err := idx.GetTagDigest(ctx, "docker-hub/library/nginx", "latest")
+		require.NoError(t, err)
+		require.Equal(t, digest1, d1)
+
+		d2, _, err := idx.GetTagDigest(ctx, "ghcr/library/nginx", "latest")
+		require.NoError(t, err)
+		require.Equal(t, digest2, d2)
+	})
+}
+
+func TestHandlerNilRouter(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "oci-nil-router-test-*")
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	idx, st, _, cleanupDB := newTestIndexWithStore(t, tmpDir)
+	defer cleanupDB()
+
+	// Create handler WITHOUT a router
+	h := NewHandler(idx, st)
+	defer h.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/v2/docker-hub/library/nginx/manifests/latest", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "no registry configured")
+}
+
 // newBenchIndexWithStore creates an OCI index and store for benchmarks.
 func newBenchIndexWithStore(b *testing.B, tmpDir string) (*Index, store.Store, metadb.MetaDB) {
 	b.Helper()
@@ -862,7 +968,7 @@ func newBenchRouter(b *testing.B) *Router {
 	b.Helper()
 	router, err := NewRouter([]Registry{
 		{Prefix: testPrefix, Upstream: NewUpstream()},
-	}, slog.Default())
+	})
 	if err != nil {
 		b.Fatal(err)
 	}
