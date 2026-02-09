@@ -47,6 +47,10 @@ type Config struct {
 	// UpstreamOCIRegistry is the upstream OCI registry URL
 	UpstreamOCIRegistry string
 
+	// OCIPrefix is the routing prefix for the OCI registry.
+	// Default: "docker-hub"
+	OCIPrefix string
+
 	// OCIUsername for registry authentication (optional)
 	OCIUsername string
 
@@ -284,8 +288,16 @@ func New(cfg Config) (*Server, error) {
 		ociUpstreamOpts = append(ociUpstreamOpts, oci.WithBasicAuth(cfg.OCIUsername, cfg.OCIPassword))
 	}
 	ociUpstream := oci.NewUpstream(ociUpstreamOpts...)
+
+	ociRouter, err := oci.NewRouter([]oci.Registry{
+		{Prefix: cfg.OCIPrefix, Upstream: ociUpstream},
+	}, oci.WithRouterLogger(cfg.Logger.With("component", "oci-router")))
+	if err != nil {
+		return nil, fmt.Errorf("creating oci router: %w", err)
+	}
+
 	ociHandlerOpts := []oci.HandlerOption{
-		oci.WithUpstream(ociUpstream),
+		oci.WithRouter(ociRouter),
 		oci.WithLogger(cfg.Logger.With("component", "oci")),
 		oci.WithDownloader(dl),
 	}

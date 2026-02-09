@@ -41,6 +41,7 @@ type ServeCmd struct {
 	GitAllowedHosts       []string `kong:"name='git-allowed-hosts',env='GIT_ALLOWED_HOSTS',help='Comma-separated list of allowed Git upstream hosts (e.g. github.com,gitlab.com)',group='Git'"`
 	GitMaxRequestBodySize int64    `kong:"name='git-max-request-body',default='104857600',env='GIT_MAX_REQUEST_BODY',help='Maximum git-upload-pack request body size in bytes (default: 100MB)',group='Git'"`
 
+	OCIPrefix       string        `kong:"name='oci-prefix',default='docker-hub',env='OCI_PREFIX',help='Routing prefix for the OCI registry',group='OCI'"`
 	OCIUsername     string        `kong:"name='oci-username',env='OCI_USERNAME',help='OCI registry username for authentication',group='OCI'"`
 	OCIPassword     string        `kong:"name='oci-password',env='OCI_PASSWORD',help='OCI registry password for authentication',group='OCI'"`
 	OCIPasswordFile string        `kong:"name='oci-password-file',env='OCI_PASSWORD_FILE',type='existingfile',help='Path to file containing OCI registry password',group='OCI'"`
@@ -152,6 +153,7 @@ func (cmd *ServeCmd) Run() error {
 		UpstreamGoProxy:       cmd.GoUpstream,
 		UpstreamNPMRegistry:   cmd.NPMUpstream,
 		UpstreamOCIRegistry:   cmd.OCIUpstream,
+		OCIPrefix:             cmd.OCIPrefix,
 		OCIUsername:           cmd.OCIUsername,
 		OCIPassword:           ociPassword,
 		OCITagTTL:             cmd.OCITagTTL,

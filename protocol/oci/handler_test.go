@@ -19,6 +19,22 @@ import (
 	"github.com/wolfeidau/content-cache/store/metadb"
 )
 
+const testPrefix = "docker-hub"
+
+// newTestRouter creates a Router with a single registry for testing.
+func newTestRouter(t *testing.T, upstreamURL string) *Router {
+	t.Helper()
+	upstreamOpts := []UpstreamOption{}
+	if upstreamURL != "" {
+		upstreamOpts = append(upstreamOpts, WithRegistryURL(upstreamURL))
+	}
+	router, err := NewRouter([]Registry{
+		{Prefix: testPrefix, Upstream: NewUpstream(upstreamOpts...)},
+	})
+	require.NoError(t, err)
+	return router
+}
+
 func newTestHandler(t *testing.T, upstreamURL string) (*Handler, func()) {
 	t.Helper()
 	tmpDir, err := os.MkdirTemp("", "oci-handler-test-*")
@@ -48,9 +64,7 @@ func newTestHandler(t *testing.T, upstreamURL string) (*Handler, func()) {
 
 	opts := []HandlerOption{
 		WithTagTTL(1 * time.Hour),
-	}
-	if upstreamURL != "" {
-		opts = append(opts, WithUpstream(NewUpstream(WithRegistryURL(upstreamURL))))
+		WithRouter(newTestRouter(t, upstreamURL)),
 	}
 
 	h := NewHandler(idx, st, opts...)
@@ -148,7 +162,27 @@ func TestHandlerNotFound(t *testing.T) {
 	paths := []string{
 		"/v3/",
 		"/v2/something",
-		"/v2/library/alpine/tags/list",
+		"/v2/docker-hub/library/alpine/tags/list",
+	}
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+
+			require.Equal(t, http.StatusNotFound, w.Code)
+		})
+	}
+}
+
+func TestHandlerUnprefixedRequestReturns404(t *testing.T) {
+	h, cleanup := newTestHandler(t, "")
+	defer cleanup()
+
+	// Request without the prefix should return 404
+	paths := []string{
+		"/v2/library/nginx/manifests/latest",
+		"/v2/library/alpine/blobs/sha256:abc123def456789012345678901234567890123456789012345678901234abcd",
 	}
 	for _, path := range paths {
 		t.Run(path, func(t *testing.T) {
@@ -187,7 +221,7 @@ func TestHandlerGetManifest(t *testing.T) {
 	defer cleanup()
 
 	t.Run("fetch by tag", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil)
+		req := httptest.NewRequest(http.MethodGet, "/v2/docker-hub/library/alpine/manifests/latest", nil)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 
@@ -198,7 +232,7 @@ func TestHandlerGetManifest(t *testing.T) {
 	})
 
 	t.Run("fetch by digest", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/"+manifestDigest, nil)
+		req := httptest.NewRequest(http.MethodGet, "/v2/docker-hub/library/alpine/manifests/"+manifestDigest, nil)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 
@@ -206,7 +240,7 @@ func TestHandlerGetManifest(t *testing.T) {
 	})
 
 	t.Run("not found", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/v2/library/notfound/manifests/latest", nil)
+		req := httptest.NewRequest(http.MethodGet, "/v2/docker-hub/library/notfound/manifests/latest", nil)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 
@@ -222,7 +256,7 @@ func TestHandlerGetManifest(t *testing.T) {
 		defer cleanup2()
 
 		// Verify the first handler cached it - create new handler with same storage
-		req := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil)
+		req := httptest.NewRequest(http.MethodGet, "/v2/docker-hub/library/alpine/manifests/latest", nil)
 		w := httptest.NewRecorder()
 		h2.ServeHTTP(w, req)
 
@@ -254,7 +288,7 @@ func TestHandlerHeadManifest(t *testing.T) {
 	defer cleanup()
 
 	t.Run("success", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodHead, "/v2/library/alpine/manifests/latest", nil)
+		req := httptest.NewRequest(http.MethodHead, "/v2/docker-hub/library/alpine/manifests/latest", nil)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 
@@ -264,7 +298,7 @@ func TestHandlerHeadManifest(t *testing.T) {
 	})
 
 	t.Run("not found", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodHead, "/v2/library/notfound/manifests/latest", nil)
+		req := httptest.NewRequest(http.MethodHead, "/v2/docker-hub/library/notfound/manifests/latest", nil)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 
@@ -294,7 +328,7 @@ func TestHandlerGetBlob(t *testing.T) {
 	defer cleanup()
 
 	t.Run("success", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/blobs/"+blobDigest, nil)
+		req := httptest.NewRequest(http.MethodGet, "/v2/docker-hub/library/alpine/blobs/"+blobDigest, nil)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 
@@ -305,7 +339,7 @@ func TestHandlerGetBlob(t *testing.T) {
 	})
 
 	t.Run("not found", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/blobs/sha256:0000000000000000000000000000000000000000000000000000000000000000", nil)
+		req := httptest.NewRequest(http.MethodGet, "/v2/docker-hub/library/alpine/blobs/sha256:0000000000000000000000000000000000000000000000000000000000000000", nil)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 
@@ -313,7 +347,7 @@ func TestHandlerGetBlob(t *testing.T) {
 	})
 
 	t.Run("invalid digest format", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/blobs/invalid", nil)
+		req := httptest.NewRequest(http.MethodGet, "/v2/docker-hub/library/alpine/blobs/invalid", nil)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 
@@ -344,7 +378,7 @@ func TestHandlerHeadBlob(t *testing.T) {
 	defer cleanup()
 
 	t.Run("success", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodHead, "/v2/library/alpine/blobs/"+validDigest, nil)
+		req := httptest.NewRequest(http.MethodHead, "/v2/docker-hub/library/alpine/blobs/"+validDigest, nil)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 
@@ -354,7 +388,7 @@ func TestHandlerHeadBlob(t *testing.T) {
 	})
 
 	t.Run("not found", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodHead, "/v2/library/alpine/blobs/sha256:0000000000000000000000000000000000000000000000000000000000000000", nil)
+		req := httptest.NewRequest(http.MethodHead, "/v2/docker-hub/library/alpine/blobs/sha256:0000000000000000000000000000000000000000000000000000000000000000", nil)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 
@@ -379,7 +413,7 @@ func TestHandlerCaching(t *testing.T) {
 	defer cleanup()
 
 	// First request - cache miss
-	req := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v2/docker-hub/library/alpine/manifests/latest", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -427,7 +461,7 @@ func TestHandlerWithAuth(t *testing.T) {
 	defer cleanup()
 
 	// Request should succeed after auth
-	req := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v2/docker-hub/library/alpine/manifests/latest", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -448,7 +482,7 @@ func TestHandlerDigestVerification(t *testing.T) {
 	h, cleanup := newTestHandler(t, upstream.URL)
 	defer cleanup()
 
-	req := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/blobs/"+claimedDigest, nil)
+	req := httptest.NewRequest(http.MethodGet, "/v2/docker-hub/library/alpine/blobs/"+claimedDigest, nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -477,14 +511,16 @@ func TestHandlerManifestCacheHit(t *testing.T) {
 	idx, st, db, cleanupDB := newTestIndexWithStore(t, tmpDir)
 	defer cleanupDB()
 
+	router := newTestRouter(t, upstream.URL)
+
 	h := NewHandler(idx, st,
 		WithTagTTL(1*time.Hour),
-		WithUpstream(NewUpstream(WithRegistryURL(upstream.URL))),
+		WithRouter(router),
 	)
 	defer h.Close()
 
 	// First request - cache miss
-	req := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v2/docker-hub/library/alpine/manifests/latest", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -496,12 +532,12 @@ func TestHandlerManifestCacheHit(t *testing.T) {
 	// Create new handler with same storage
 	h2 := NewHandler(idx, st,
 		WithTagTTL(1*time.Hour),
-		WithUpstream(NewUpstream(WithRegistryURL(upstream.URL))),
+		WithRouter(newTestRouter(t, upstream.URL)),
 	)
 	defer h2.Close()
 
 	// Second request - should be cache hit
-	req2 := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil)
+	req2 := httptest.NewRequest(http.MethodGet, "/v2/docker-hub/library/alpine/manifests/latest", nil)
 	w2 := httptest.NewRecorder()
 	h2.ServeHTTP(w2, req2)
 
@@ -531,11 +567,11 @@ func TestHandlerBlobCacheHit(t *testing.T) {
 	defer cleanupDB()
 
 	h := NewHandler(idx, st,
-		WithUpstream(NewUpstream(WithRegistryURL(upstream.URL))),
+		WithRouter(newTestRouter(t, upstream.URL)),
 	)
 
 	// First request
-	req := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/blobs/"+blobDigest, nil)
+	req := httptest.NewRequest(http.MethodGet, "/v2/docker-hub/library/alpine/blobs/"+blobDigest, nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -546,12 +582,12 @@ func TestHandlerBlobCacheHit(t *testing.T) {
 
 	// Second handler with same storage
 	h2 := NewHandler(idx, st,
-		WithUpstream(NewUpstream(WithRegistryURL(upstream.URL))),
+		WithRouter(newTestRouter(t, upstream.URL)),
 	)
 	defer h2.Close()
 
 	// Second request - should hit cache
-	req2 := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/blobs/"+blobDigest, nil)
+	req2 := httptest.NewRequest(http.MethodGet, "/v2/docker-hub/library/alpine/blobs/"+blobDigest, nil)
 	w2 := httptest.NewRecorder()
 	h2.ServeHTTP(w2, req2)
 
@@ -569,7 +605,7 @@ func TestHandlerUpstreamError(t *testing.T) {
 	h, cleanup := newTestHandler(t, upstream.URL)
 	defer cleanup()
 
-	req := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v2/docker-hub/library/alpine/manifests/latest", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -592,7 +628,7 @@ func TestHandlerNestedImageName(t *testing.T) {
 	h, cleanup := newTestHandler(t, upstream.URL)
 	defer cleanup()
 
-	req := httptest.NewRequest(http.MethodGet, "/v2/myorg/myrepo/myimage/manifests/v1.0.0", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v2/docker-hub/myorg/myrepo/myimage/manifests/v1.0.0", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -643,18 +679,18 @@ func TestHandlerHeadManifestCacheHit(t *testing.T) {
 	idx, st, _, cleanupDB := newTestIndexWithStore(t, tmpDir)
 	defer cleanupDB()
 
-	// Pre-populate cache
+	// Pre-populate cache (using prefix-scoped name for tag index)
 	ctx := context.Background()
 	manifestDigest := "sha256:abc123def456789012345678901234567890123456789012345678901234abcd"
 	hash := contentcache.Hash{1, 2, 3, 4}
 	_ = idx.PutManifest(ctx, manifestDigest, "application/vnd.oci.image.manifest.v1+json", hash, 1024)
-	_ = idx.SetTagDigest(ctx, "library/alpine", "latest", manifestDigest)
+	_ = idx.SetTagDigest(ctx, testPrefix+"/library/alpine", "latest", manifestDigest)
 
-	h := NewHandler(idx, st, WithUpstream(NewUpstream(WithRegistryURL(upstream.URL))))
+	h := NewHandler(idx, st, WithRouter(newTestRouter(t, upstream.URL)))
 	defer h.Close()
 
 	// HEAD by tag - should hit cache
-	req := httptest.NewRequest(http.MethodHead, "/v2/library/alpine/manifests/latest", nil)
+	req := httptest.NewRequest(http.MethodHead, "/v2/docker-hub/library/alpine/manifests/latest", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -663,7 +699,7 @@ func TestHandlerHeadManifestCacheHit(t *testing.T) {
 	require.Equal(t, "1024", w.Header().Get("Content-Length"))
 
 	// HEAD by digest - should also hit cache
-	req2 := httptest.NewRequest(http.MethodHead, "/v2/library/alpine/manifests/"+manifestDigest, nil)
+	req2 := httptest.NewRequest(http.MethodHead, "/v2/docker-hub/library/alpine/manifests/"+manifestDigest, nil)
 	w2 := httptest.NewRecorder()
 	h.ServeHTTP(w2, req2)
 
@@ -689,10 +725,10 @@ func TestHandlerHeadBlobCacheHit(t *testing.T) {
 	hash := contentcache.Hash{5, 6, 7, 8}
 	_ = idx.PutBlob(ctx, blobDigest, hash, 4096)
 
-	h := NewHandler(idx, st, WithUpstream(NewUpstream(WithRegistryURL(upstream.URL))))
+	h := NewHandler(idx, st, WithRouter(newTestRouter(t, upstream.URL)))
 	defer h.Close()
 
-	req := httptest.NewRequest(http.MethodHead, "/v2/library/alpine/blobs/"+blobDigest, nil)
+	req := httptest.NewRequest(http.MethodHead, "/v2/docker-hub/library/alpine/blobs/"+blobDigest, nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -723,11 +759,11 @@ func TestHandlerTagTTLExpiry(t *testing.T) {
 	// Very short TTL
 	h := NewHandler(idx, st,
 		WithTagTTL(1*time.Millisecond),
-		WithUpstream(NewUpstream(WithRegistryURL(upstream.URL))),
+		WithRouter(newTestRouter(t, upstream.URL)),
 	)
 
 	// First request
-	req := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v2/docker-hub/library/alpine/manifests/latest", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -740,17 +776,150 @@ func TestHandlerTagTTLExpiry(t *testing.T) {
 	// Second request with expired TTL - should revalidate
 	h2 := NewHandler(idx, st,
 		WithTagTTL(1*time.Millisecond),
-		WithUpstream(NewUpstream(WithRegistryURL(upstream.URL))),
+		WithRouter(newTestRouter(t, upstream.URL)),
 	)
 	defer h2.Close()
 
-	req2 := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil)
+	req2 := httptest.NewRequest(http.MethodGet, "/v2/docker-hub/library/alpine/manifests/latest", nil)
 	w2 := httptest.NewRecorder()
 	h2.ServeHTTP(w2, req2)
 
 	require.Equal(t, http.StatusOK, w2.Code)
 	// Should have made 2 upstream requests (TTL expired)
 	require.Equal(t, 2, requestCount)
+}
+
+func TestHandlerTagScopedByPrefix(t *testing.T) {
+	// Verify that tag->digest mappings are scoped by prefix
+	tmpDir, _ := os.MkdirTemp("", "oci-prefix-scope-test-*")
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	idx, _, _, cleanupDB := newTestIndexWithStore(t, tmpDir)
+	defer cleanupDB()
+
+	ctx := context.Background()
+	manifestDigest1 := "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	manifestDigest2 := "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+
+	// Set tag for different "registries" (prefixes)
+	_ = idx.SetTagDigest(ctx, "docker-hub/library/nginx", "latest", manifestDigest1)
+	_ = idx.SetTagDigest(ctx, "ghcr/library/nginx", "latest", manifestDigest2)
+
+	// Verify they are independent
+	d1, _, err := idx.GetTagDigest(ctx, "docker-hub/library/nginx", "latest")
+	require.NoError(t, err)
+	require.Equal(t, manifestDigest1, d1)
+
+	d2, _, err := idx.GetTagDigest(ctx, "ghcr/library/nginx", "latest")
+	require.NoError(t, err)
+	require.Equal(t, manifestDigest2, d2)
+}
+
+func TestHandlerMultiRegistry(t *testing.T) {
+	manifest1 := `{"schemaVersion":2,"config":{"digest":"sha256:aaa"}}`
+	manifest2 := `{"schemaVersion":2,"config":{"digest":"sha256:bbb"}}`
+	digest1 := ComputeSHA256([]byte(manifest1))
+	digest2 := ComputeSHA256([]byte(manifest2))
+
+	// Upstream server 1 (docker-hub)
+	server1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v2/library/nginx/manifests/latest" {
+			w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+			w.Header().Set("Docker-Content-Digest", digest1)
+			_, _ = w.Write([]byte(manifest1))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server1.Close()
+
+	// Upstream server 2 (ghcr)
+	server2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v2/library/nginx/manifests/latest" {
+			w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+			w.Header().Set("Docker-Content-Digest", digest2)
+			_, _ = w.Write([]byte(manifest2))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server2.Close()
+
+	// Create handler with two registries
+	tmpDir, err := os.MkdirTemp("", "oci-multi-registry-test-*")
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	idx, st, _, cleanupDB := newTestIndexWithStore(t, tmpDir)
+	defer cleanupDB()
+
+	router, err := NewRouter([]Registry{
+		{Prefix: "docker-hub", Upstream: NewUpstream(WithRegistryURL(server1.URL))},
+		{Prefix: "ghcr", Upstream: NewUpstream(WithRegistryURL(server2.URL))},
+	})
+	require.NoError(t, err)
+
+	h := NewHandler(idx, st,
+		WithTagTTL(1*time.Hour),
+		WithRouter(router),
+	)
+	defer h.Close()
+
+	t.Run("docker-hub routes to server1", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v2/docker-hub/library/nginx/manifests/latest", nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code)
+		require.Equal(t, digest1, w.Header().Get("Docker-Content-Digest"))
+		require.Equal(t, manifest1, w.Body.String())
+	})
+
+	t.Run("ghcr routes to server2", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v2/ghcr/library/nginx/manifests/latest", nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code)
+		require.Equal(t, digest2, w.Header().Get("Docker-Content-Digest"))
+		require.Equal(t, manifest2, w.Body.String())
+	})
+
+	// Wait for background caching to finish
+	h.Close()
+
+	t.Run("tag isolation between registries", func(t *testing.T) {
+		// Verify the index stored different digests for the same image name under different prefixes
+		ctx := context.Background()
+
+		d1, _, err := idx.GetTagDigest(ctx, "docker-hub/library/nginx", "latest")
+		require.NoError(t, err)
+		require.Equal(t, digest1, d1)
+
+		d2, _, err := idx.GetTagDigest(ctx, "ghcr/library/nginx", "latest")
+		require.NoError(t, err)
+		require.Equal(t, digest2, d2)
+	})
+}
+
+func TestHandlerNilRouter(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "oci-nil-router-test-*")
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	idx, st, _, cleanupDB := newTestIndexWithStore(t, tmpDir)
+	defer cleanupDB()
+
+	// Create handler WITHOUT a router
+	h := NewHandler(idx, st)
+	defer h.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/v2/docker-hub/library/nginx/manifests/latest", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "no registry configured")
 }
 
 // newBenchIndexWithStore creates an OCI index and store for benchmarks.
@@ -795,12 +964,23 @@ func newBenchIndexWithStore(b *testing.B, tmpDir string) (*Index, store.Store, m
 	return idx, st, db
 }
 
+func newBenchRouter(b *testing.B) *Router {
+	b.Helper()
+	router, err := NewRouter([]Registry{
+		{Prefix: testPrefix, Upstream: NewUpstream()},
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	return router
+}
+
 func BenchmarkHandlerVersionCheck(b *testing.B) {
 	tmpDir, _ := os.MkdirTemp("", "oci-bench-*")
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	idx, st, _ := newBenchIndexWithStore(b, tmpDir)
-	h := NewHandler(idx, st)
+	h := NewHandler(idx, st, WithRouter(newBenchRouter(b)))
 	defer h.Close()
 
 	b.ResetTimer()
@@ -817,20 +997,20 @@ func BenchmarkHandlerManifestCacheHit(b *testing.B) {
 
 	idx, st, _ := newBenchIndexWithStore(b, tmpDir)
 
-	// Pre-populate cache
+	// Pre-populate cache (using prefix-scoped name)
 	ctx := context.Background()
 	manifestContent := `{"schemaVersion":2}`
 	manifestDigest := ComputeSHA256([]byte(manifestContent))
 	hash, _ := st.Put(ctx, io.NopCloser(nil))
 	_ = idx.PutManifest(ctx, manifestDigest, "application/vnd.oci.image.manifest.v1+json", hash, int64(len(manifestContent)))
-	_ = idx.SetTagDigest(ctx, "library/alpine", "latest", manifestDigest)
+	_ = idx.SetTagDigest(ctx, testPrefix+"/library/alpine", "latest", manifestDigest)
 
-	h := NewHandler(idx, st)
+	h := NewHandler(idx, st, WithRouter(newBenchRouter(b)))
 	defer h.Close()
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		req := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil)
+		req := httptest.NewRequest(http.MethodGet, "/v2/docker-hub/library/alpine/manifests/latest", nil)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 	}

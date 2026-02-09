@@ -27,20 +27,30 @@ const (
 	DefaultTagTTL = 5 * time.Minute
 )
 
-// Path patterns for OCI Distribution API.
+// Path patterns for OCI Distribution API — applied to remainder after prefix stripping.
 var (
-	// Matches /v2/{name}/manifests/{reference}
-	manifestPathRegex = regexp.MustCompile(`^/v2/(.+)/manifests/(.+)$`)
+	// Matches {name}/manifests/{reference}
+	manifestRemainderRegex = regexp.MustCompile(`^(.+)/manifests/(.+)$`)
 
-	// Matches /v2/{name}/blobs/{digest}
-	blobPathRegex = regexp.MustCompile(`^/v2/(.+)/blobs/(sha256:[a-f0-9]{64}|sha512:[a-f0-9]{128})$`)
+	// Matches {name}/blobs/{digest}
+	blobRemainderRegex = regexp.MustCompile(`^(.+)/blobs/(sha256:[a-f0-9]{64}|sha512:[a-f0-9]{128})$`)
 )
+
+// routeResult holds the parsed routing result for an OCI request.
+type routeResult struct {
+	Registry  *Registry
+	Name      string        // upstream image name (without prefix)
+	IndexName string        // prefix-scoped name for index operations
+	Reference string        // tag or digest (manifest requests)
+	Digest    string        // digest string (blob requests)
+	TagTTL    time.Duration // effective tag TTL for this request
+}
 
 // Handler implements the OCI Distribution v2 protocol as an HTTP handler.
 type Handler struct {
 	index      *Index
 	store      store.Store
-	upstream   *Upstream
+	router     *Router
 	logger     *slog.Logger
 	downloader *download.Downloader
 
@@ -63,10 +73,10 @@ func WithLogger(logger *slog.Logger) HandlerOption {
 	}
 }
 
-// WithUpstream sets the upstream registry.
-func WithUpstream(upstream *Upstream) HandlerOption {
+// WithRouter sets the registry router for prefix-based upstream routing.
+func WithRouter(router *Router) HandlerOption {
 	return func(h *Handler) {
-		h.upstream = upstream
+		h.router = router
 	}
 }
 
@@ -88,13 +98,12 @@ func WithTagTTL(ttl time.Duration) HandlerOption {
 func NewHandler(index *Index, store store.Store, opts ...HandlerOption) *Handler {
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &Handler{
-		index:    index,
-		store:    store,
-		upstream: NewUpstream(),
-		logger:   slog.Default(),
-		tagTTL:   DefaultTagTTL,
-		ctx:      ctx,
-		cancel:   cancel,
+		index:  index,
+		store:  store,
+		logger: slog.Default(),
+		tagTTL: DefaultTagTTL,
+		ctx:    ctx,
+		cancel: cancel,
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -123,26 +132,54 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Route to the appropriate registry based on prefix
+	if h.router == nil {
+		http.Error(w, "no registry configured", http.StatusInternalServerError)
+		return
+	}
+
+	reg, remainder, err := h.router.Route(path)
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	// Determine the tag TTL — use registry-specific if set, otherwise handler default
+	tagTTL := h.tagTTL
+	if reg.TagTTL > 0 {
+		tagTTL = reg.TagTTL
+	}
+
 	// Handle manifest requests
-	if matches := manifestPathRegex.FindStringSubmatch(path); matches != nil {
-		name := matches[1]
-		reference := matches[2]
+	if matches := manifestRemainderRegex.FindStringSubmatch(remainder); matches != nil {
+		rr := routeResult{
+			Registry:  reg,
+			Name:      matches[1],
+			IndexName: reg.Prefix + "/" + matches[1],
+			Reference: matches[2],
+			TagTTL:    tagTTL,
+		}
 		if r.Method == http.MethodHead {
-			h.handleHeadManifest(w, r, name, reference)
+			h.handleHeadManifest(w, r, rr)
 		} else {
-			h.handleGetManifest(w, r, name, reference)
+			h.handleGetManifest(w, r, rr)
 		}
 		return
 	}
 
 	// Handle blob requests
-	if matches := blobPathRegex.FindStringSubmatch(path); matches != nil {
-		name := matches[1]
-		digest := matches[2]
+	if matches := blobRemainderRegex.FindStringSubmatch(remainder); matches != nil {
+		rr := routeResult{
+			Registry:  reg,
+			Name:      matches[1],
+			IndexName: reg.Prefix + "/" + matches[1],
+			Digest:    matches[2],
+			TagTTL:    tagTTL,
+		}
 		if r.Method == http.MethodHead {
-			h.handleHeadBlob(w, r, name, digest)
+			h.handleHeadBlob(w, r, rr)
 		} else {
-			h.handleGetBlob(w, r, name, digest)
+			h.handleGetBlob(w, r, rr)
 		}
 		return
 	}
@@ -160,31 +197,31 @@ func (h *Handler) handleVersionCheck(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("{}"))
 }
 
-// handleGetManifest handles GET /v2/{name}/manifests/{reference} requests.
-func (h *Handler) handleGetManifest(w http.ResponseWriter, r *http.Request, name, reference string) {
+// handleGetManifest handles GET /v2/{prefix}/{name}/manifests/{reference} requests.
+func (h *Handler) handleGetManifest(w http.ResponseWriter, r *http.Request, rr routeResult) {
 	telemetry.SetEndpoint(r, "manifest")
 	ctx := r.Context()
-	logger := h.logger.With("name", name, "reference", reference, "endpoint", "manifest")
+	logger := h.logger.With("name", rr.IndexName, "reference", rr.Reference, "endpoint", "manifest")
 
 	// Determine if reference is a digest or tag
-	isDigest := IsDigestReference(reference)
+	isDigest := IsDigestReference(rr.Reference)
 
 	var digest string
 	var cachedManifest *CachedManifest
 
 	if isDigest {
 		// Direct digest lookup - immutable, no TTL needed
-		digest = reference
+		digest = rr.Reference
 		cached, err := h.index.GetManifest(ctx, digest)
 		if err == nil {
 			cachedManifest = cached
 		}
 	} else {
-		// Tag lookup - check cache with TTL
-		cachedDigest, refreshedAt, err := h.index.GetTagDigest(ctx, name, reference)
+		// Tag lookup - check cache with TTL (uses indexName for prefix scoping)
+		cachedDigest, refreshedAt, err := h.index.GetTagDigest(ctx, rr.IndexName, rr.Reference)
 		if err == nil {
 			// Check if tag mapping is still fresh
-			if time.Since(refreshedAt) < h.tagTTL {
+			if time.Since(refreshedAt) < rr.TagTTL {
 				digest = cachedDigest
 				cached, err := h.index.GetManifest(ctx, digest)
 				if err == nil {
@@ -214,10 +251,10 @@ func (h *Handler) handleGetManifest(w http.ResponseWriter, r *http.Request, name
 		logger.Warn("manifest hash in index but not in store", "hash", cachedManifest.ContentHash.ShortString(), "error", err)
 	}
 
-	// Fetch from upstream
+	// Fetch from upstream (using upstream name without prefix)
 	telemetry.SetCacheResult(r, telemetry.CacheMiss)
 	logger.Debug("cache miss, fetching from upstream")
-	content, mediaType, upstreamDigest, err := h.upstream.FetchManifest(ctx, name, reference)
+	content, mediaType, upstreamDigest, err := rr.Registry.Upstream.FetchManifest(ctx, rr.Name, rr.Reference)
 	if err != nil {
 		if err == ErrNotFound {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -230,7 +267,7 @@ func (h *Handler) handleGetManifest(w http.ResponseWriter, r *http.Request, name
 
 	// Verify digest if we're fetching by digest
 	if isDigest {
-		d, err := ParseDigest(reference)
+		d, err := ParseDigest(rr.Reference)
 		if err == nil {
 			if err := d.Verify(content); err != nil {
 				logger.Error("digest verification failed", "error", err)
@@ -248,27 +285,29 @@ func (h *Handler) handleGetManifest(w http.ResponseWriter, r *http.Request, name
 		return
 	}
 
-	// Cache asynchronously
+	// Cache asynchronously (uses indexName for tag scoping)
+	indexName := rr.IndexName
+	reference := rr.Reference
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
 		cacheCtx, cancel := context.WithTimeout(h.ctx, cacheTimeout)
 		defer cancel()
-		h.cacheManifest(cacheCtx, name, reference, upstreamDigest, mediaType, content, logger)
+		h.cacheManifest(cacheCtx, indexName, reference, upstreamDigest, mediaType, content, logger)
 	}()
 }
 
-// handleHeadManifest handles HEAD /v2/{name}/manifests/{reference} requests.
-func (h *Handler) handleHeadManifest(w http.ResponseWriter, r *http.Request, name, reference string) {
+// handleHeadManifest handles HEAD /v2/{prefix}/{name}/manifests/{reference} requests.
+func (h *Handler) handleHeadManifest(w http.ResponseWriter, r *http.Request, rr routeResult) {
 	telemetry.SetEndpoint(r, "manifest-head")
 	ctx := r.Context()
-	logger := h.logger.With("name", name, "reference", reference, "endpoint", "manifest-head")
+	logger := h.logger.With("name", rr.IndexName, "reference", rr.Reference, "endpoint", "manifest-head")
 
-	isDigest := IsDigestReference(reference)
+	isDigest := IsDigestReference(rr.Reference)
 
 	if isDigest {
 		// Check cache for digest
-		cached, err := h.index.GetManifest(ctx, reference)
+		cached, err := h.index.GetManifest(ctx, rr.Reference)
 		if err == nil {
 			telemetry.SetCacheResult(r, telemetry.CacheHit)
 			w.Header().Set("Content-Type", cached.MediaType)
@@ -278,9 +317,9 @@ func (h *Handler) handleHeadManifest(w http.ResponseWriter, r *http.Request, nam
 			return
 		}
 	} else {
-		// Check tag cache
-		digest, refreshedAt, err := h.index.GetTagDigest(ctx, name, reference)
-		if err == nil && time.Since(refreshedAt) < h.tagTTL {
+		// Check tag cache (uses indexName for prefix scoping)
+		digest, refreshedAt, err := h.index.GetTagDigest(ctx, rr.IndexName, rr.Reference)
+		if err == nil && time.Since(refreshedAt) < rr.TagTTL {
 			cached, err := h.index.GetManifest(ctx, digest)
 			if err == nil {
 				telemetry.SetCacheResult(r, telemetry.CacheHit)
@@ -293,9 +332,9 @@ func (h *Handler) handleHeadManifest(w http.ResponseWriter, r *http.Request, nam
 		}
 	}
 
-	// Fetch from upstream
+	// Fetch from upstream (using upstream name without prefix)
 	telemetry.SetCacheResult(r, telemetry.CacheMiss)
-	digest, size, mediaType, err := h.upstream.HeadManifest(ctx, name, reference)
+	digest, size, mediaType, err := rr.Registry.Upstream.HeadManifest(ctx, rr.Name, rr.Reference)
 	if err != nil {
 		if err == ErrNotFound {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -316,14 +355,14 @@ func (h *Handler) handleHeadManifest(w http.ResponseWriter, r *http.Request, nam
 	w.WriteHeader(http.StatusOK)
 }
 
-// handleGetBlob handles GET /v2/{name}/blobs/{digest} requests.
-func (h *Handler) handleGetBlob(w http.ResponseWriter, r *http.Request, name, digestStr string) {
+// handleGetBlob handles GET /v2/{prefix}/{name}/blobs/{digest} requests.
+func (h *Handler) handleGetBlob(w http.ResponseWriter, r *http.Request, rr routeResult) {
 	telemetry.SetEndpoint(r, "blob")
 	ctx := r.Context()
-	logger := h.logger.With("name", name, "digest", digestStr, "endpoint", "blob")
+	logger := h.logger.With("name", rr.IndexName, "digest", rr.Digest, "prefix", rr.Registry.Prefix, "endpoint", "blob")
 
 	// Check cache first
-	cached, err := h.index.GetBlob(ctx, digestStr)
+	cached, err := h.index.GetBlob(ctx, rr.Digest)
 	if err == nil {
 		rc, err := h.store.Get(ctx, cached.ContentHash)
 		if err == nil {
@@ -331,7 +370,7 @@ func (h *Handler) handleGetBlob(w http.ResponseWriter, r *http.Request, name, di
 			logger.Debug("cache hit")
 			telemetry.SetCacheResult(r, telemetry.CacheHit)
 			w.Header().Set("Content-Type", "application/octet-stream")
-			w.Header().Set(DockerContentDigestHeader, digestStr)
+			w.Header().Set(DockerContentDigestHeader, rr.Digest)
 			if cached.Size > 0 {
 				w.Header().Set("Content-Length", fmt.Sprintf("%d", cached.Size))
 			}
@@ -348,19 +387,19 @@ func (h *Handler) handleGetBlob(w http.ResponseWriter, r *http.Request, name, di
 	logger.Debug("cache miss, fetching from upstream")
 
 	if h.downloader != nil {
-		h.handleGetBlobWithDownloader(w, r, name, digestStr, logger)
+		h.handleGetBlobWithDownloader(w, r, rr.Registry.Upstream, rr.Name, rr.Digest, logger)
 		return
 	}
 
-	h.handleGetBlobDirect(w, r, name, digestStr, logger)
+	h.handleGetBlobDirect(w, r, rr.Registry.Upstream, rr.Name, rr.Digest, logger)
 }
 
 // handleGetBlobWithDownloader uses the singleflight downloader to deduplicate concurrent blob fetches.
-func (h *Handler) handleGetBlobWithDownloader(w http.ResponseWriter, r *http.Request, name, digestStr string, logger *slog.Logger) {
+func (h *Handler) handleGetBlobWithDownloader(w http.ResponseWriter, r *http.Request, upstream *Upstream, name, digestStr string, logger *slog.Logger) {
 	key := fmt.Sprintf("oci:blob:%s", digestStr)
 
 	result, _, err := h.downloader.Do(r.Context(), key, func(dlCtx context.Context) (*download.Result, error) {
-		return h.fetchAndStoreBlob(dlCtx, name, digestStr, logger)
+		return h.fetchAndStoreBlob(dlCtx, upstream, name, digestStr, logger)
 	})
 
 	download.HandleResult(download.HandleResultParams{
@@ -381,8 +420,8 @@ func (h *Handler) handleGetBlobWithDownloader(w http.ResponseWriter, r *http.Req
 }
 
 // fetchAndStoreBlob fetches a blob from upstream, verifies its digest, stores in CAFS, and updates the index.
-func (h *Handler) fetchAndStoreBlob(ctx context.Context, name, digestStr string, logger *slog.Logger) (*download.Result, error) {
-	rc, _, err := h.upstream.FetchBlob(ctx, name, digestStr)
+func (h *Handler) fetchAndStoreBlob(ctx context.Context, upstream *Upstream, name, digestStr string, logger *slog.Logger) (*download.Result, error) {
+	rc, _, err := upstream.FetchBlob(ctx, name, digestStr)
 	if err != nil {
 		return nil, err
 	}
@@ -454,10 +493,10 @@ func (h *Handler) fetchAndStoreBlob(ctx context.Context, name, digestStr string,
 }
 
 // handleGetBlobDirect handles blob requests without singleflight deduplication (legacy path).
-func (h *Handler) handleGetBlobDirect(w http.ResponseWriter, r *http.Request, name, digestStr string, logger *slog.Logger) {
+func (h *Handler) handleGetBlobDirect(w http.ResponseWriter, r *http.Request, upstream *Upstream, name, digestStr string, logger *slog.Logger) {
 	ctx := r.Context()
 
-	rc, size, err := h.upstream.FetchBlob(ctx, name, digestStr)
+	rc, size, err := upstream.FetchBlob(ctx, name, digestStr)
 	if err != nil {
 		if err == ErrNotFound {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -543,18 +582,18 @@ func (h *Handler) handleGetBlobDirect(w http.ResponseWriter, r *http.Request, na
 	}()
 }
 
-// handleHeadBlob handles HEAD /v2/{name}/blobs/{digest} requests.
-func (h *Handler) handleHeadBlob(w http.ResponseWriter, r *http.Request, name, digestStr string) {
+// handleHeadBlob handles HEAD /v2/{prefix}/{name}/blobs/{digest} requests.
+func (h *Handler) handleHeadBlob(w http.ResponseWriter, r *http.Request, rr routeResult) {
 	telemetry.SetEndpoint(r, "blob-head")
 	ctx := r.Context()
-	logger := h.logger.With("name", name, "digest", digestStr, "endpoint", "blob-head")
+	logger := h.logger.With("name", rr.IndexName, "digest", rr.Digest, "prefix", rr.Registry.Prefix, "endpoint", "blob-head")
 
 	// Check cache first
-	cached, err := h.index.GetBlob(ctx, digestStr)
+	cached, err := h.index.GetBlob(ctx, rr.Digest)
 	if err == nil {
 		telemetry.SetCacheResult(r, telemetry.CacheHit)
 		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set(DockerContentDigestHeader, digestStr)
+		w.Header().Set(DockerContentDigestHeader, rr.Digest)
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", cached.Size))
 		w.WriteHeader(http.StatusOK)
 		return
@@ -562,7 +601,7 @@ func (h *Handler) handleHeadBlob(w http.ResponseWriter, r *http.Request, name, d
 
 	// Check upstream
 	telemetry.SetCacheResult(r, telemetry.CacheMiss)
-	size, err := h.upstream.HeadBlob(ctx, name, digestStr)
+	size, err := rr.Registry.Upstream.HeadBlob(ctx, rr.Name, rr.Digest)
 	if err != nil {
 		if err == ErrNotFound {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -574,7 +613,7 @@ func (h *Handler) handleHeadBlob(w http.ResponseWriter, r *http.Request, name, d
 	}
 
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set(DockerContentDigestHeader, digestStr)
+	w.Header().Set(DockerContentDigestHeader, rr.Digest)
 	if size > 0 {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
 	}

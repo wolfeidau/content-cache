@@ -39,8 +39,8 @@ npm config set registry http://localhost:8080/npm/
 npm install express  # First request: fetches from upstream
 npm install express  # Second request: served from cache
 
-# Use as an OCI registry mirror
-docker pull localhost:8080/library/alpine:latest
+# Use as an OCI registry mirror (prefix-based routing, default prefix: docker-hub)
+docker pull localhost:8080/docker-hub/library/alpine:latest
 
 # Configure pip to use the cache
 pip install --index-url http://localhost:8080/pypi/simple/ requests
@@ -210,10 +210,11 @@ Configuration is available via command-line flags or environment variables. Envi
 | `--maven-upstream` | `MAVEN_UPSTREAM` | `repo.maven.apache.org/maven2` | Upstream Maven repository URL |
 | `--rubygems-upstream` | `RUBYGEMS_UPSTREAM` | `rubygems.org` | Upstream RubyGems registry URL |
 
-### OCI Authentication
+### OCI Options
 
 | Flag | Environment Variable | Default | Description |
 |------|---------------------|---------|-------------|
+| `--oci-prefix` | `OCI_PREFIX` | `docker-hub` | Routing prefix for the OCI registry (appears in URL path as `/v2/{prefix}/...`) |
 | `--oci-username` | `OCI_USERNAME` | | OCI registry username |
 | `--oci-password` | `OCI_PASSWORD` | | OCI registry password |
 | `--oci-password-file` | `OCI_PASSWORD_FILE` | | Path to file containing OCI password (for k8s secrets) |
@@ -366,13 +367,14 @@ stringData:
 │   │   └── specs.4.8.gz     # Legacy specs files
 │   └── gems/
 │       └── rails-7.1.0.gem.json  # Gem file references
-├── oci/                     # OCI image index
-    └── library/
-        └── alpine/
-            ├── manifests/
-            │   └── sha256:abc...    # Image manifests
-            └── blobs/
-                └── sha256:def...    # Layer references
+├── oci/                     # OCI image index (prefix-scoped)
+│   └── docker-hub/
+│       └── library/
+│           └── alpine/
+│               ├── manifests/
+│               │   └── sha256:abc...    # Image manifests
+│               └── blobs/
+│                   └── sha256:def...    # Layer references
 └── meta.db                  # BoltDB metadata index (git pack cache, etc.)
 ```
 
@@ -404,8 +406,11 @@ curl http://localhost:8080/rubygems/info/rails
 # Test the Git proxy endpoint (requires --git-allowed-hosts github.com)
 git clone http://localhost:8080/git/github.com/wolfeidau/content-cache.git /tmp/test-clone
 
-# Test the OCI registry endpoint
+# Test the OCI registry endpoint (version check)
 curl http://localhost:8080/v2/
+
+# Test an OCI manifest request (uses prefix-based routing)
+curl http://localhost:8080/v2/docker-hub/library/alpine/manifests/latest
 
 # Health check
 curl http://localhost:8080/health
