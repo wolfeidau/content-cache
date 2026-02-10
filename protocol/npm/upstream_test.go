@@ -165,6 +165,31 @@ func TestUpstreamFetchTarball(t *testing.T) {
 	})
 }
 
+func TestShouldAttachAuth_HostMatch(t *testing.T) {
+	u := NewUpstream(
+		WithRegistryURL("https://npm.pkg.github.com"),
+		WithBearerToken("secret-token"),
+	)
+
+	require.True(t, u.shouldAttachAuth("https://npm.pkg.github.com/@scope/pkg/-/pkg-1.0.0.tgz"))
+}
+
+func TestShouldAttachAuth_HostMismatch(t *testing.T) {
+	u := NewUpstream(
+		WithRegistryURL("https://npm.pkg.github.com"),
+		WithBearerToken("secret-token"),
+	)
+
+	// Tarball hosted on a different registry — auth must NOT be attached.
+	require.False(t, u.shouldAttachAuth("https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz"))
+}
+
+func TestShouldAttachAuth_NoToken(t *testing.T) {
+	u := NewUpstream(WithRegistryURL("https://npm.pkg.github.com"))
+
+	require.False(t, u.shouldAttachAuth("https://npm.pkg.github.com/@scope/pkg/-/pkg-1.0.0.tgz"))
+}
+
 func TestWithRegistryURL(t *testing.T) {
 	u := NewUpstream(WithRegistryURL("https://custom.registry.com/"))
 

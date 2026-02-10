@@ -13,13 +13,19 @@ func TestNewRouter_EmptyRoutes(t *testing.T) {
 	require.Equal(t, fallback, r.Match("react"))
 }
 
+func TestNewRouter_EmptyRoutesNoFallback(t *testing.T) {
+	_, err := NewRouter(nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no fallback upstream")
+}
+
 func TestNewRouter_ScopeMatching(t *testing.T) {
 	privateUpstream := NewUpstream(WithRegistryURL("https://npm.pkg.github.com"))
 	publicUpstream := NewUpstream(WithRegistryURL("https://registry.npmjs.org"))
 
 	r, err := NewRouter([]Route{
-		{Match: RouteMatch{Scope: "@mycompany"}, Registry: privateUpstream},
-		{Match: RouteMatch{Any: true}, Registry: publicUpstream},
+		{Match: RouteMatch{Scope: "@mycompany"}, Upstream: privateUpstream},
+		{Match: RouteMatch{Any: true}, Upstream: publicUpstream},
 	})
 	require.NoError(t, err)
 
@@ -34,9 +40,9 @@ func TestNewRouter_MultipleScopes(t *testing.T) {
 	catchAll := NewUpstream(WithRegistryURL("https://registry.npmjs.org"))
 
 	r, err := NewRouter([]Route{
-		{Match: RouteMatch{Scope: "@orgA"}, Registry: upstreamA},
-		{Match: RouteMatch{Scope: "@orgB"}, Registry: upstreamB},
-		{Match: RouteMatch{Any: true}, Registry: catchAll},
+		{Match: RouteMatch{Scope: "@orgA"}, Upstream: upstreamA},
+		{Match: RouteMatch{Scope: "@orgB"}, Upstream: upstreamB},
+		{Match: RouteMatch{Any: true}, Upstream: catchAll},
 	})
 	require.NoError(t, err)
 
@@ -48,7 +54,7 @@ func TestNewRouter_MultipleScopes(t *testing.T) {
 
 func TestNewRouter_Validation_NoCatchAll(t *testing.T) {
 	_, err := NewRouter([]Route{
-		{Match: RouteMatch{Scope: "@mycompany"}, Registry: NewUpstream()},
+		{Match: RouteMatch{Scope: "@mycompany"}, Upstream: NewUpstream()},
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "catch-all required")
@@ -56,8 +62,8 @@ func TestNewRouter_Validation_NoCatchAll(t *testing.T) {
 
 func TestNewRouter_Validation_CatchAllNotLast(t *testing.T) {
 	_, err := NewRouter([]Route{
-		{Match: RouteMatch{Any: true}, Registry: NewUpstream()},
-		{Match: RouteMatch{Scope: "@mycompany"}, Registry: NewUpstream()},
+		{Match: RouteMatch{Any: true}, Upstream: NewUpstream()},
+		{Match: RouteMatch{Scope: "@mycompany"}, Upstream: NewUpstream()},
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "only the last route")
@@ -65,9 +71,9 @@ func TestNewRouter_Validation_CatchAllNotLast(t *testing.T) {
 
 func TestNewRouter_Validation_DuplicateScope(t *testing.T) {
 	_, err := NewRouter([]Route{
-		{Match: RouteMatch{Scope: "@mycompany"}, Registry: NewUpstream()},
-		{Match: RouteMatch{Scope: "@mycompany"}, Registry: NewUpstream()},
-		{Match: RouteMatch{Any: true}, Registry: NewUpstream()},
+		{Match: RouteMatch{Scope: "@mycompany"}, Upstream: NewUpstream()},
+		{Match: RouteMatch{Scope: "@mycompany"}, Upstream: NewUpstream()},
+		{Match: RouteMatch{Any: true}, Upstream: NewUpstream()},
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "duplicate scope")
@@ -75,8 +81,8 @@ func TestNewRouter_Validation_DuplicateScope(t *testing.T) {
 
 func TestNewRouter_Validation_ScopeWithoutAt(t *testing.T) {
 	_, err := NewRouter([]Route{
-		{Match: RouteMatch{Scope: "mycompany"}, Registry: NewUpstream()},
-		{Match: RouteMatch{Any: true}, Registry: NewUpstream()},
+		{Match: RouteMatch{Scope: "mycompany"}, Upstream: NewUpstream()},
+		{Match: RouteMatch{Any: true}, Upstream: NewUpstream()},
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "must start with @")
@@ -84,8 +90,8 @@ func TestNewRouter_Validation_ScopeWithoutAt(t *testing.T) {
 
 func TestNewRouter_Validation_EmptyScope(t *testing.T) {
 	_, err := NewRouter([]Route{
-		{Match: RouteMatch{}, Registry: NewUpstream()},
-		{Match: RouteMatch{Any: true}, Registry: NewUpstream()},
+		{Match: RouteMatch{}, Upstream: NewUpstream()},
+		{Match: RouteMatch{Any: true}, Upstream: NewUpstream()},
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "scope is required")

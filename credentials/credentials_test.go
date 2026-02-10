@@ -58,6 +58,14 @@ func TestResolveReader_FileFunction(t *testing.T) {
 	require.Equal(t, "file-secret", creds.AuthToken)
 }
 
+func TestResolveReader_FileFunction_NotFound(t *testing.T) {
+	input := `{"auth_token": {{ file "/nonexistent/path/token.txt" | json }}}`
+	r := NewResolver()
+	_, err := r.ResolveReader(context.Background(), strings.NewReader(input))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "reading file")
+}
+
 func TestResolveReader_JSONEscaping(t *testing.T) {
 	t.Setenv("TEST_SPECIAL", `value with "quotes" and \backslash`)
 

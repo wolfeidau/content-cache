@@ -168,6 +168,8 @@ func (cmd *ServeCmd) Run() error {
 		authToken = creds.AuthToken
 	}
 
+	logger.Info("inbound auth", "enabled", authToken != "")
+
 	// Warn if auth enabled without TLS
 	if authToken != "" && cmd.TLSCertFile == "" {
 		logger.Warn("auth token configured without TLS — bearer tokens will be transmitted in plaintext")

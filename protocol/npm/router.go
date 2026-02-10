@@ -9,7 +9,7 @@ import (
 // Route defines a routing rule that maps package scopes to upstream registries.
 type Route struct {
 	Match    RouteMatch
-	Registry *Upstream // pre-constructed upstream with credentials
+	Upstream *Upstream // pre-constructed upstream with credentials
 }
 
 // RouteMatch defines the matching criteria for an NPM route.
@@ -58,6 +58,9 @@ func NewRouter(routes []Route, opts ...RouterOption) (*Router, error) {
 	}
 
 	if len(routes) == 0 {
+		if r.fallback == nil {
+			return nil, fmt.Errorf("npm router: routes are empty and no fallback upstream is configured")
+		}
 		return r, nil
 	}
 
@@ -107,16 +110,16 @@ func (r *Router) Match(packageName string) *Upstream {
 
 	for _, route := range r.routes {
 		if route.Match.Any {
-			return route.Registry
+			return route.Upstream
 		}
 		if scope != "" && route.Match.Scope == scope {
-			return route.Registry
+			return route.Upstream
 		}
 	}
 
 	// Should not reach here if validation passed (catch-all required),
 	// but return last route's registry as safety net.
-	return r.routes[len(r.routes)-1].Registry
+	return r.routes[len(r.routes)-1].Upstream
 }
 
 // extractScope returns the scope from a package name (e.g., "@mycompany/pkg" → "@mycompany").

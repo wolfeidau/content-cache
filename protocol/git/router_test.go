@@ -13,15 +13,21 @@ func TestGitNewRouter_EmptyRoutes(t *testing.T) {
 	require.Equal(t, fallback, r.Match(RepoRef{Host: "github.com", RepoPath: "org/repo"}))
 }
 
+func TestGitNewRouter_EmptyRoutesNoFallback(t *testing.T) {
+	_, err := NewRouter(nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no fallback upstream")
+}
+
 func TestGitNewRouter_PrefixMatching(t *testing.T) {
 	orgAUpstream := NewUpstream(WithBasicAuth("x-access-token", "pat-A"))
 	orgBUpstream := NewUpstream(WithBasicAuth("x-access-token", "pat-B"))
 	catchAll := NewUpstream()
 
 	r, err := NewRouter([]Route{
-		{Match: GitRouteMatch{RepoPrefix: "github.com/orgA/"}, Upstream: orgAUpstream},
-		{Match: GitRouteMatch{RepoPrefix: "github.com/orgB/"}, Upstream: orgBUpstream},
-		{Match: GitRouteMatch{Any: true}, Upstream: catchAll},
+		{Match: RouteMatch{RepoPrefix: "github.com/orgA/"}, Upstream: orgAUpstream},
+		{Match: RouteMatch{RepoPrefix: "github.com/orgB/"}, Upstream: orgBUpstream},
+		{Match: RouteMatch{Any: true}, Upstream: catchAll},
 	})
 	require.NoError(t, err)
 
@@ -36,8 +42,8 @@ func TestGitNewRouter_CaseInsensitive(t *testing.T) {
 	catchAll := NewUpstream()
 
 	r, err := NewRouter([]Route{
-		{Match: GitRouteMatch{RepoPrefix: "GitHub.com/OrgA/"}, Upstream: orgUpstream},
-		{Match: GitRouteMatch{Any: true}, Upstream: catchAll},
+		{Match: RouteMatch{RepoPrefix: "GitHub.com/OrgA/"}, Upstream: orgUpstream},
+		{Match: RouteMatch{Any: true}, Upstream: catchAll},
 	})
 	require.NoError(t, err)
 
@@ -48,7 +54,7 @@ func TestGitNewRouter_CaseInsensitive(t *testing.T) {
 
 func TestGitNewRouter_Validation_NoCatchAll(t *testing.T) {
 	_, err := NewRouter([]Route{
-		{Match: GitRouteMatch{RepoPrefix: "github.com/org/"}, Upstream: NewUpstream()},
+		{Match: RouteMatch{RepoPrefix: "github.com/org/"}, Upstream: NewUpstream()},
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "catch-all required")
@@ -56,8 +62,8 @@ func TestGitNewRouter_Validation_NoCatchAll(t *testing.T) {
 
 func TestGitNewRouter_Validation_CatchAllNotLast(t *testing.T) {
 	_, err := NewRouter([]Route{
-		{Match: GitRouteMatch{Any: true}, Upstream: NewUpstream()},
-		{Match: GitRouteMatch{RepoPrefix: "github.com/org/"}, Upstream: NewUpstream()},
+		{Match: RouteMatch{Any: true}, Upstream: NewUpstream()},
+		{Match: RouteMatch{RepoPrefix: "github.com/org/"}, Upstream: NewUpstream()},
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "only the last route")
@@ -65,8 +71,8 @@ func TestGitNewRouter_Validation_CatchAllNotLast(t *testing.T) {
 
 func TestGitNewRouter_Validation_MissingTrailingSlash(t *testing.T) {
 	_, err := NewRouter([]Route{
-		{Match: GitRouteMatch{RepoPrefix: "github.com/org"}, Upstream: NewUpstream()},
-		{Match: GitRouteMatch{Any: true}, Upstream: NewUpstream()},
+		{Match: RouteMatch{RepoPrefix: "github.com/org"}, Upstream: NewUpstream()},
+		{Match: RouteMatch{Any: true}, Upstream: NewUpstream()},
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "must end with /")
@@ -74,9 +80,9 @@ func TestGitNewRouter_Validation_MissingTrailingSlash(t *testing.T) {
 
 func TestGitNewRouter_Validation_DuplicatePrefix(t *testing.T) {
 	_, err := NewRouter([]Route{
-		{Match: GitRouteMatch{RepoPrefix: "github.com/org/"}, Upstream: NewUpstream()},
-		{Match: GitRouteMatch{RepoPrefix: "github.com/org/"}, Upstream: NewUpstream()},
-		{Match: GitRouteMatch{Any: true}, Upstream: NewUpstream()},
+		{Match: RouteMatch{RepoPrefix: "github.com/org/"}, Upstream: NewUpstream()},
+		{Match: RouteMatch{RepoPrefix: "github.com/org/"}, Upstream: NewUpstream()},
+		{Match: RouteMatch{Any: true}, Upstream: NewUpstream()},
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "duplicate repo_prefix")
@@ -84,8 +90,8 @@ func TestGitNewRouter_Validation_DuplicatePrefix(t *testing.T) {
 
 func TestGitNewRouter_Validation_EmptyPrefix(t *testing.T) {
 	_, err := NewRouter([]Route{
-		{Match: GitRouteMatch{}, Upstream: NewUpstream()},
-		{Match: GitRouteMatch{Any: true}, Upstream: NewUpstream()},
+		{Match: RouteMatch{}, Upstream: NewUpstream()},
+		{Match: RouteMatch{Any: true}, Upstream: NewUpstream()},
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "repo_prefix is required")
@@ -97,8 +103,8 @@ func TestGitNewRouter_PrefixSecurity(t *testing.T) {
 	catchAll := NewUpstream()
 
 	r, err := NewRouter([]Route{
-		{Match: GitRouteMatch{RepoPrefix: "github.com/orgA/"}, Upstream: orgAUpstream},
-		{Match: GitRouteMatch{Any: true}, Upstream: catchAll},
+		{Match: RouteMatch{RepoPrefix: "github.com/orgA/"}, Upstream: orgAUpstream},
+		{Match: RouteMatch{Any: true}, Upstream: catchAll},
 	})
 	require.NoError(t, err)
 

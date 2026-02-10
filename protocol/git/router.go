@@ -8,12 +8,12 @@ import (
 
 // Route defines a routing rule that maps repo prefixes to upstream credentials.
 type Route struct {
-	Match    GitRouteMatch
+	Match    RouteMatch
 	Upstream *Upstream // pre-constructed upstream with credentials
 }
 
-// GitRouteMatch defines the matching criteria for a Git route.
-type GitRouteMatch struct {
+// RouteMatch defines the matching criteria for a Git route.
+type RouteMatch struct {
 	RepoPrefix string // e.g., "github.com/orgA/" — prefix match against repo ref
 	Any        bool   // catch-all route
 }
@@ -59,6 +59,9 @@ func NewRouter(routes []Route, opts ...RouterOption) (*Router, error) {
 	}
 
 	if len(routes) == 0 {
+		if r.fallback == nil {
+			return nil, fmt.Errorf("git router: routes are empty and no fallback upstream is configured")
+		}
 		r.routes = routes
 		return r, nil
 	}
@@ -95,7 +98,7 @@ func NewRouter(routes []Route, opts ...RouterOption) (*Router, error) {
 		seenPrefixes[lowerPrefix] = true
 
 		normalized[i] = Route{
-			Match:    GitRouteMatch{RepoPrefix: lowerPrefix},
+			Match:    RouteMatch{RepoPrefix: lowerPrefix},
 			Upstream: route.Upstream,
 		}
 	}

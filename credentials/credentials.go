@@ -80,15 +80,6 @@ type GitRouteMatch struct {
 // SecretProvider resolves a secret reference to its value.
 type SecretProvider func(ctx context.Context, ref string) (string, error)
 
-// ErrUnknownProvider is returned when a template calls an unregistered provider.
-type ErrUnknownProvider struct {
-	Name string
-}
-
-func (e *ErrUnknownProvider) Error() string {
-	return fmt.Sprintf("unknown credential provider: %q (not registered)", e.Name)
-}
-
 // ResolverOption configures a Resolver.
 type ResolverOption func(*Resolver)
 
@@ -209,7 +200,7 @@ func (r *Resolver) buildFuncMap(ctx context.Context, cache map[string]string) te
 		},
 	}
 
-	// Register provider functions. For unregistered providers, return a typed error.
+	// Register provider functions.
 	for name, provider := range r.providers {
 		fm[name] = r.makeProviderFunc(ctx, name, provider, cache)
 	}

@@ -273,7 +273,7 @@ func New(cfg Config) (*Server, error) {
 			}
 			npmRoutes = append(npmRoutes, npm.Route{
 				Match:    npm.RouteMatch{Scope: r.Match.Scope, Any: r.Match.Any},
-				Registry: npm.NewUpstream(upOpts...),
+				Upstream: npm.NewUpstream(upOpts...),
 			})
 		}
 		npmRouter, err := npm.NewRouter(npmRoutes, npm.WithRouterLogger(cfg.Logger.With("component", "npm-router")))
@@ -483,7 +483,7 @@ func New(cfg Config) (*Server, error) {
 				upOpts = append(upOpts, git.WithBasicAuth(r.Username, r.Password))
 			}
 			gitRoutes = append(gitRoutes, git.Route{
-				Match:    git.GitRouteMatch{RepoPrefix: r.Match.RepoPrefix, Any: r.Match.Any},
+				Match:    git.RouteMatch{RepoPrefix: r.Match.RepoPrefix, Any: r.Match.Any},
 				Upstream: git.NewUpstream(upOpts...),
 			})
 		}
