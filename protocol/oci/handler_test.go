@@ -486,8 +486,11 @@ func TestHandlerDigestVerification(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	// Should fail with bad gateway due to digest mismatch
-	require.Equal(t, http.StatusBadGateway, w.Code)
+	// With stream-through, the client receives content before digest verification.
+	// On mismatch, we don't cache but the response is already 200.
+	// OCI clients verify digests client-side per the OCI Distribution Spec.
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, wrongContent, w.Body.Bytes())
 }
 
 func TestHandlerManifestCacheHit(t *testing.T) {

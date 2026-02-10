@@ -492,13 +492,15 @@ func (h *Handler) fetchAndStoreBlob(ctx context.Context, upstream *Upstream, nam
 	return &download.Result{Hash: blake3Hash, Size: written}, nil
 }
 
-// handleGetBlobDirect handles blob requests without singleflight deduplication (legacy path).
+// handleGetBlobDirect handles blob requests without singleflight deduplication.
+// It uses StreamThrough to simultaneously stream the upstream blob to the client
+// and a temp file for hashing/verification/caching.
 func (h *Handler) handleGetBlobDirect(w http.ResponseWriter, r *http.Request, upstream *Upstream, name, digestStr string, logger *slog.Logger) {
 	ctx := r.Context()
 
 	rc, size, err := upstream.FetchBlob(ctx, name, digestStr)
 	if err != nil {
-		if err == ErrNotFound {
+		if errors.Is(err, ErrNotFound) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -515,71 +517,47 @@ func (h *Handler) handleGetBlobDirect(w http.ResponseWriter, r *http.Request, up
 		return
 	}
 
-	tmpFile, err := os.CreateTemp("", "oci-blob-*")
-	if err != nil {
-		logger.Error("failed to create temp file", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	tmpPath := tmpFile.Name()
-
-	blake3Reader := contentcache.NewHashingReader(rc)
 	digestHasher, err := expectedDigest.NewHasher()
 	if err != nil {
-		_ = tmpFile.Close()
 		logger.Error("unsupported digest algorithm", "error", err)
 		http.Error(w, "unsupported digest", http.StatusBadRequest)
 		return
 	}
-	teeReader := io.TeeReader(blake3Reader, digestHasher)
 
-	written, err := io.Copy(tmpFile, teeReader)
-	if err != nil {
-		_ = tmpFile.Close()
-		logger.Error("failed to read blob", "error", err)
-		http.Error(w, "upstream error", http.StatusBadGateway)
-		return
+	if err := download.StreamThrough(w, r, rc,
+		download.StreamThroughOptions{
+			ContentType:   "application/octet-stream",
+			ExtraHeaders:  map[string]string{DockerContentDigestHeader: digestStr},
+			ContentLength: size,
+			ExtraWriters:  []io.Writer{digestHasher},
+		},
+		func(result *download.StreamThroughResult, tmpPath string) error {
+			// Verify OCI digest.
+			computedHex := fmt.Sprintf("%x", digestHasher.Sum(nil))
+			if computedHex != expectedDigest.Hex {
+				logger.Warn("digest verification failed, not caching",
+					"expected", expectedDigest.Hex,
+					"computed", computedHex,
+				)
+				return fmt.Errorf("digest mismatch: expected %s, got %s", expectedDigest.Hex, computedHex)
+			}
+
+			logger.Debug("digest verified", "digest", digestStr)
+
+			// Store in CAFS async — caller owns tmpPath deletion.
+			h.wg.Add(1)
+			go func() {
+				defer h.wg.Done()
+				cacheCtx, cancel := context.WithTimeout(h.ctx, cacheTimeout)
+				defer cancel()
+				h.cacheBlob(cacheCtx, digestStr, result.Hash, result.Size, tmpPath, logger)
+			}()
+			return nil
+		},
+		logger,
+	); err != nil {
+		logger.Error("stream-through failed", "error", err)
 	}
-	blake3Hash := blake3Reader.Sum()
-
-	computedHex := fmt.Sprintf("%x", digestHasher.Sum(nil))
-	if computedHex != expectedDigest.Hex {
-		_ = tmpFile.Close()
-		logger.Error("digest verification failed",
-			"expected", expectedDigest.Hex,
-			"computed", computedHex,
-		)
-		http.Error(w, "digest mismatch", http.StatusBadGateway)
-		return
-	}
-
-	logger.Debug("digest verified", "digest", digestStr)
-
-	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
-		_ = tmpFile.Close()
-		logger.Error("failed to seek temp file", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set(DockerContentDigestHeader, digestStr)
-	if size > 0 {
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
-	}
-
-	if _, err := io.Copy(w, tmpFile); err != nil {
-		logger.Error("failed to write response", "error", err)
-	}
-	_ = tmpFile.Close()
-
-	h.wg.Add(1)
-	go func() {
-		defer h.wg.Done()
-		cacheCtx, cancel := context.WithTimeout(h.ctx, cacheTimeout)
-		defer cancel()
-		h.cacheBlob(cacheCtx, digestStr, blake3Hash, written, tmpPath, logger)
-	}()
 }
 
 // handleHeadBlob handles HEAD /v2/{prefix}/{name}/blobs/{digest} requests.
