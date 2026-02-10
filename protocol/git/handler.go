@@ -24,7 +24,7 @@ import (
 type Handler struct {
 	index              *Index
 	store              store.Store
-	upstream           *Upstream
+	router             *Router
 	logger             *slog.Logger
 	downloader         *download.Downloader
 	allowedHosts       map[string]bool
@@ -41,10 +41,19 @@ func WithLogger(logger *slog.Logger) HandlerOption {
 	}
 }
 
-// WithUpstream sets the upstream Git client.
+// WithUpstream sets a single upstream Git client (for backward compatibility).
+// This creates a router with the given upstream as the fallback.
 func WithUpstream(upstream *Upstream) HandlerOption {
 	return func(h *Handler) {
-		h.upstream = upstream
+		r, _ := NewRouter(nil, WithFallback(upstream))
+		h.router = r
+	}
+}
+
+// WithRouter sets the Git router for prefix-based upstream selection.
+func WithRouter(router *Router) HandlerOption {
+	return func(h *Handler) {
+		h.router = router
 	}
 }
 
@@ -74,10 +83,11 @@ func WithMaxRequestBodySize(size int64) HandlerOption {
 
 // NewHandler creates a new Git proxy handler.
 func NewHandler(index *Index, store store.Store, opts ...HandlerOption) *Handler {
+	defaultRouter, _ := NewRouter(nil, WithFallback(NewUpstream()))
 	h := &Handler{
 		index:              index,
 		store:              store,
-		upstream:           NewUpstream(),
+		router:             defaultRouter,
 		logger:             slog.Default(),
 		allowedHosts:       make(map[string]bool),
 		maxRequestBodySize: DefaultMaxRequestBodySize,
@@ -198,7 +208,8 @@ func (h *Handler) handleInfoRefs(w http.ResponseWriter, r *http.Request, repo Re
 
 	gitProtocol := r.Header.Get("Git-Protocol")
 
-	rc, contentType, err := h.upstream.FetchInfoRefs(ctx, repo, gitProtocol)
+	upstream := h.router.Match(repo)
+	rc, contentType, err := upstream.FetchInfoRefs(ctx, repo, gitProtocol)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			http.Error(w, "repository not found", http.StatusNotFound)
@@ -332,7 +343,8 @@ func (h *Handler) fetchAndStorePack(ctx context.Context, repo RepoRef, gitProtoc
 		"git_protocol", gitProtocol,
 	)
 
-	rc, err := h.upstream.FetchUploadPack(ctx, repo, gitProtocol, bytes.NewReader(body))
+	upstream := h.router.Match(repo)
+	rc, err := upstream.FetchUploadPack(ctx, repo, gitProtocol, bytes.NewReader(body))
 	if err != nil {
 		logger.Error("download failed", "error", err)
 		return nil, err

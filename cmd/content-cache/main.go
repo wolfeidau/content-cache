@@ -13,6 +13,8 @@ import (
 
 	"github.com/alecthomas/kong"
 	"github.com/lmittmann/tint"
+	"github.com/wolfeidau/content-cache/credentials"
+	"github.com/wolfeidau/content-cache/credentials/opprovider"
 	"github.com/wolfeidau/content-cache/server"
 	"github.com/wolfeidau/content-cache/telemetry"
 )
@@ -31,6 +33,10 @@ type ServeCmd struct {
 	TLSCertFile   string `kong:"name='tls-cert',env='TLS_CERT_FILE',type='existingfile',help='Path to TLS certificate file (enables HTTPS)',group='Server'"`
 	TLSKeyFile    string `kong:"name='tls-key',env='TLS_KEY_FILE',type='existingfile',help='Path to TLS private key file (enables HTTPS)',group='Server'"`
 
+	AuthToken       string `kong:"name='auth-token',env='AUTH_TOKEN',help='Bearer token for inbound authentication',group='Auth'"`
+	AuthTokenFile   string `kong:"name='auth-token-file',env='AUTH_TOKEN_FILE',type='existingfile',help='Path to file containing auth token (for k8s secret mounts)',group='Auth'"`
+	CredentialsFile string `kong:"name='credentials-file',env='CREDENTIALS_FILE',type='existingfile',help='Path to credentials template file for upstream auth',group='Auth'"`
+
 	GoUpstream       string `kong:"name='go-upstream',env='GO_UPSTREAM',help='Upstream Go module proxy URL (default: proxy.golang.org)',group='Upstream'"`
 	NPMUpstream      string `kong:"name='npm-upstream',env='NPM_UPSTREAM',help='Upstream NPM registry URL (default: registry.npmjs.org)',group='Upstream'"`
 	OCIUpstream      string `kong:"name='oci-upstream',env='OCI_UPSTREAM',help='Upstream OCI registry URL (default: registry-1.docker.io)',group='Upstream'"`
@@ -41,11 +47,8 @@ type ServeCmd struct {
 	GitAllowedHosts       []string `kong:"name='git-allowed-hosts',env='GIT_ALLOWED_HOSTS',help='Comma-separated list of allowed Git upstream hosts (e.g. github.com,gitlab.com)',group='Git'"`
 	GitMaxRequestBodySize int64    `kong:"name='git-max-request-body',default='104857600',env='GIT_MAX_REQUEST_BODY',help='Maximum git-upload-pack request body size in bytes (default: 100MB)',group='Git'"`
 
-	OCIPrefix       string        `kong:"name='oci-prefix',default='docker-hub',env='OCI_PREFIX',help='Routing prefix for the OCI registry',group='OCI'"`
-	OCIUsername     string        `kong:"name='oci-username',env='OCI_USERNAME',help='OCI registry username for authentication',group='OCI'"`
-	OCIPassword     string        `kong:"name='oci-password',env='OCI_PASSWORD',help='OCI registry password for authentication',group='OCI'"`
-	OCIPasswordFile string        `kong:"name='oci-password-file',env='OCI_PASSWORD_FILE',type='existingfile',help='Path to file containing OCI registry password',group='OCI'"`
-	OCITagTTL       time.Duration `kong:"name='oci-tag-ttl',default='5m',env='OCI_TAG_TTL',help='TTL for OCI tag->digest cache mappings',group='OCI'"`
+	OCIPrefix string        `kong:"name='oci-prefix',default='docker-hub',env='OCI_PREFIX',help='Routing prefix for the OCI registry',group='OCI'"`
+	OCITagTTL time.Duration `kong:"name='oci-tag-ttl',default='5m',env='OCI_TAG_TTL',help='TTL for OCI tag->digest cache mappings',group='OCI'"`
 
 	PyPIMetadataTTL     time.Duration `kong:"name='pypi-metadata-ttl',default='5m',env='PYPI_METADATA_TTL',help='TTL for PyPI project metadata cache',group='TTL'"`
 	MavenMetadataTTL    time.Duration `kong:"name='maven-metadata-ttl',default='5m',env='MAVEN_METADATA_TTL',help='TTL for maven-metadata.xml cache',group='TTL'"`
@@ -90,14 +93,14 @@ func run() error {
 }
 
 func (cmd *ServeCmd) Run() error {
-	// Resolve OCI password from file if specified
-	ociPassword := cmd.OCIPassword
-	if cmd.OCIPasswordFile != "" {
-		data, err := os.ReadFile(cmd.OCIPasswordFile)
+	// Resolve auth token from file if specified
+	authToken := cmd.AuthToken
+	if cmd.AuthTokenFile != "" {
+		data, err := os.ReadFile(cmd.AuthTokenFile)
 		if err != nil {
-			return fmt.Errorf("reading OCI password file: %w", err)
+			return fmt.Errorf("reading auth token file: %w", err)
 		}
-		ociPassword = strings.TrimSpace(string(data))
+		authToken = strings.TrimSpace(string(data))
 	}
 
 	// Setup logger
@@ -144,18 +147,48 @@ func (cmd *ServeCmd) Run() error {
 		logger.Info("metrics Prometheus endpoint enabled", "path", "/metrics")
 	}
 
+	// Resolve credentials file if specified
+	var creds *credentials.Credentials
+	if cmd.CredentialsFile != "" {
+		resolver := credentials.NewResolver(
+			credentials.WithLogger(logger),
+			opprovider.WithOnePassword(),
+		)
+
+		credCtx, credCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer credCancel()
+
+		creds, err = resolver.ResolveFile(credCtx, cmd.CredentialsFile)
+		if err != nil {
+			return fmt.Errorf("resolving credentials: %w", err)
+		}
+		logger.Info("credentials file resolved", "path", cmd.CredentialsFile)
+	}
+
+	// Auth token: CLI flag takes precedence over credentials file
+	if authToken == "" && creds != nil {
+		authToken = creds.AuthToken
+	}
+
+	logger.Info("inbound auth", "enabled", authToken != "")
+
+	// Warn if auth enabled without TLS
+	if authToken != "" && cmd.TLSCertFile == "" {
+		logger.Warn("auth token configured without TLS — bearer tokens will be transmitted in plaintext")
+	}
+
 	// Create server
 	cfg := server.Config{
 		Address:               cmd.ListenAddress,
 		StoragePath:           cmd.Storage,
 		TLSCertFile:           cmd.TLSCertFile,
 		TLSKeyFile:            cmd.TLSKeyFile,
+		AuthToken:             authToken,
+		Credentials:           creds,
 		UpstreamGoProxy:       cmd.GoUpstream,
 		UpstreamNPMRegistry:   cmd.NPMUpstream,
 		UpstreamOCIRegistry:   cmd.OCIUpstream,
 		OCIPrefix:             cmd.OCIPrefix,
-		OCIUsername:           cmd.OCIUsername,
-		OCIPassword:           ociPassword,
 		OCITagTTL:             cmd.OCITagTTL,
 		UpstreamPyPI:          cmd.PyPIUpstream,
 		PyPIMetadataTTL:       cmd.PyPIMetadataTTL,

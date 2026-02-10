@@ -36,7 +36,7 @@ var tarballPathRegex = regexp.MustCompile(`^/(.+?)/-/(.+)\.tgz$`)
 type Handler struct {
 	index      *Index
 	store      store.Store
-	upstream   *Upstream
+	router     *Router
 	logger     *slog.Logger
 	downloader *download.Downloader
 
@@ -56,10 +56,19 @@ func WithLogger(logger *slog.Logger) HandlerOption {
 	}
 }
 
-// WithUpstream sets the upstream registry.
+// WithUpstream sets a single upstream registry (for backward compatibility).
+// This creates a router with the given upstream as the fallback.
 func WithUpstream(upstream *Upstream) HandlerOption {
 	return func(h *Handler) {
-		h.upstream = upstream
+		r, _ := NewRouter(nil, WithFallback(upstream))
+		h.router = r
+	}
+}
+
+// WithRouter sets the NPM router for scope-based upstream selection.
+func WithRouter(router *Router) HandlerOption {
+	return func(h *Handler) {
+		h.router = router
 	}
 }
 
@@ -73,13 +82,14 @@ func WithDownloader(dl *download.Downloader) HandlerOption {
 // NewHandler creates a new NPM registry handler.
 func NewHandler(index *Index, store store.Store, opts ...HandlerOption) *Handler {
 	ctx, cancel := context.WithCancel(context.Background())
+	defaultRouter, _ := NewRouter(nil, WithFallback(NewUpstream()))
 	h := &Handler{
-		index:    index,
-		store:    store,
-		upstream: NewUpstream(),
-		logger:   slog.Default(),
-		ctx:      ctx,
-		cancel:   cancel,
+		index:  index,
+		store:  store,
+		router: defaultRouter,
+		logger: slog.Default(),
+		ctx:    ctx,
+		cancel: cancel,
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -152,7 +162,8 @@ func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request, name st
 	// Fetch from upstream
 	logger.Debug("cache miss, fetching from upstream")
 	telemetry.SetCacheResult(r, telemetry.CacheMiss)
-	rawMeta, err := h.upstream.FetchPackageMetadataRaw(ctx, name)
+	upstream := h.router.Match(name)
+	rawMeta, err := upstream.FetchPackageMetadataRaw(ctx, name)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -329,20 +340,22 @@ func (h *Handler) handleTarball(w http.ResponseWriter, r *http.Request, packageN
 	logger.Debug("cache miss, fetching from upstream", "version", version)
 	telemetry.SetCacheResult(r, telemetry.CacheMiss)
 
+	upstream := h.router.Match(packageName)
+
 	if h.downloader != nil {
-		h.handleTarballWithDownloader(w, r, packageName, version, logger)
+		h.handleTarballWithDownloader(w, r, packageName, version, upstream, logger)
 		return
 	}
 
-	h.handleTarballDirect(w, r, packageName, version, logger)
+	h.handleTarballDirect(w, r, packageName, version, upstream, logger)
 }
 
 // handleTarballWithDownloader uses the singleflight downloader to deduplicate concurrent fetches.
-func (h *Handler) handleTarballWithDownloader(w http.ResponseWriter, r *http.Request, packageName, version string, logger *slog.Logger) {
+func (h *Handler) handleTarballWithDownloader(w http.ResponseWriter, r *http.Request, packageName, version string, upstream *Upstream, logger *slog.Logger) {
 	key := fmt.Sprintf("npm:tarball:%s:%s", packageName, version)
 
 	result, _, err := h.downloader.Do(r.Context(), key, func(dlCtx context.Context) (*download.Result, error) {
-		return h.fetchAndStoreTarball(dlCtx, packageName, version, logger)
+		return h.fetchAndStoreTarball(dlCtx, packageName, version, upstream, logger)
 	})
 
 	download.HandleResult(download.HandleResultParams{
@@ -360,12 +373,12 @@ func (h *Handler) handleTarballWithDownloader(w http.ResponseWriter, r *http.Req
 }
 
 // fetchAndStoreTarball fetches a tarball from upstream, verifies integrity, stores in CAFS, and updates the index.
-func (h *Handler) fetchAndStoreTarball(ctx context.Context, packageName, version string, logger *slog.Logger) (*download.Result, error) {
+func (h *Handler) fetchAndStoreTarball(ctx context.Context, packageName, version string, upstream *Upstream, logger *slog.Logger) (*download.Result, error) {
 	// Fetch package metadata to get expected shasum for integrity verification
 	var expectedShasum string
 	var expectedIntegrity string
 	if version != "" {
-		meta, err := h.upstream.FetchPackageMetadata(ctx, packageName)
+		meta, err := upstream.FetchPackageMetadata(ctx, packageName)
 		if err == nil {
 			if versionMeta, ok := meta.Versions[version]; ok && versionMeta.Dist != nil {
 				expectedShasum = versionMeta.Dist.Shasum
@@ -376,9 +389,9 @@ func (h *Handler) fetchAndStoreTarball(ctx context.Context, packageName, version
 		}
 	}
 
-	tarballURL := h.upstream.TarballURL(packageName, version)
+	tarballURL := upstream.TarballURL(packageName, version)
 
-	rc, err := h.upstream.FetchTarball(ctx, tarballURL)
+	rc, err := upstream.FetchTarball(ctx, tarballURL)
 	if err != nil {
 		return nil, err
 	}
@@ -444,14 +457,14 @@ func (h *Handler) fetchAndStoreTarball(ctx context.Context, packageName, version
 }
 
 // handleTarballDirect fetches from upstream without singleflight deduplication (legacy path).
-func (h *Handler) handleTarballDirect(w http.ResponseWriter, r *http.Request, packageName, version string, logger *slog.Logger) {
+func (h *Handler) handleTarballDirect(w http.ResponseWriter, r *http.Request, packageName, version string, upstream *Upstream, logger *slog.Logger) {
 	ctx := r.Context()
 
 	// Fetch package metadata to get expected shasum for integrity verification
 	var expectedShasum string
 	var expectedIntegrity string
 	if version != "" {
-		meta, err := h.upstream.FetchPackageMetadata(ctx, packageName)
+		meta, err := upstream.FetchPackageMetadata(ctx, packageName)
 		if err == nil {
 			if versionMeta, ok := meta.Versions[version]; ok && versionMeta.Dist != nil {
 				expectedShasum = versionMeta.Dist.Shasum
@@ -462,9 +475,9 @@ func (h *Handler) handleTarballDirect(w http.ResponseWriter, r *http.Request, pa
 		}
 	}
 
-	tarballURL := h.upstream.TarballURL(packageName, version)
+	tarballURL := upstream.TarballURL(packageName, version)
 
-	rc, err := h.upstream.FetchTarball(ctx, tarballURL)
+	rc, err := upstream.FetchTarball(ctx, tarballURL)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			http.Error(w, "not found", http.StatusNotFound)

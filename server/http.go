@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/wolfeidau/content-cache/backend"
+	"github.com/wolfeidau/content-cache/credentials"
 	"github.com/wolfeidau/content-cache/download"
 	"github.com/wolfeidau/content-cache/protocol/git"
 	"github.com/wolfeidau/content-cache/protocol/goproxy"
@@ -38,6 +39,14 @@ type Config struct {
 	// StoragePath is the root path for storage
 	StoragePath string
 
+	// AuthToken is the bearer token for inbound authentication.
+	// When empty, authentication is disabled.
+	AuthToken string
+
+	// Credentials holds resolved upstream credentials from the credentials file.
+	// When nil, all protocols use their default upstreams with no auth.
+	Credentials *credentials.Credentials
+
 	// UpstreamGoProxy is the upstream Go module proxy URL
 	UpstreamGoProxy string
 
@@ -50,12 +59,6 @@ type Config struct {
 	// OCIPrefix is the routing prefix for the OCI registry.
 	// Default: "docker-hub"
 	OCIPrefix string
-
-	// OCIUsername for registry authentication (optional)
-	OCIUsername string
-
-	// OCIPassword for registry authentication (optional)
-	OCIPassword string
 
 	// OCITagTTL is how long to cache tag->digest mappings.
 	// Default: 5 minutes (tags can change, unlike digests)
@@ -253,18 +256,41 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("creating npm cache index: %w", err)
 	}
 	npmIndex := npm.NewIndex(npmMetadataIndex, npmCacheIndex)
-	npmUpstreamOpts := []npm.UpstreamOption{}
-	if cfg.UpstreamNPMRegistry != "" {
-		npmUpstreamOpts = append(npmUpstreamOpts, npm.WithRegistryURL(cfg.UpstreamNPMRegistry))
-	}
-	npmUpstream := npm.NewUpstream(npmUpstreamOpts...)
-	npmHandler := npm.NewHandler(
-		npmIndex,
-		cafsStore,
-		npm.WithUpstream(npmUpstream),
+	npmHandlerOpts := []npm.HandlerOption{
 		npm.WithLogger(cfg.Logger.With("component", "npm")),
 		npm.WithDownloader(dl),
-	)
+	}
+	if cfg.Credentials != nil && cfg.Credentials.NPM != nil && len(cfg.Credentials.NPM.Routes) > 0 {
+		// Build NPM router from credentials file routes.
+		npmRoutes := make([]npm.Route, 0, len(cfg.Credentials.NPM.Routes))
+		for _, r := range cfg.Credentials.NPM.Routes {
+			upOpts := []npm.UpstreamOption{}
+			if r.RegistryURL != "" {
+				upOpts = append(upOpts, npm.WithRegistryURL(r.RegistryURL))
+			}
+			if r.Token != "" {
+				upOpts = append(upOpts, npm.WithBearerToken(r.Token))
+			}
+			npmRoutes = append(npmRoutes, npm.Route{
+				Match:    npm.RouteMatch{Scope: r.Match.Scope, Any: r.Match.Any},
+				Upstream: npm.NewUpstream(upOpts...),
+			})
+		}
+		npmRouter, err := npm.NewRouter(npmRoutes, npm.WithRouterLogger(cfg.Logger.With("component", "npm-router")))
+		if err != nil {
+			return nil, fmt.Errorf("creating npm router: %w", err)
+		}
+		npmHandlerOpts = append(npmHandlerOpts, npm.WithRouter(npmRouter))
+		cfg.Logger.Info("npm routing configured", "routes", len(npmRoutes))
+	} else {
+		// Default single upstream, no auth.
+		npmUpstreamOpts := []npm.UpstreamOption{}
+		if cfg.UpstreamNPMRegistry != "" {
+			npmUpstreamOpts = append(npmUpstreamOpts, npm.WithRegistryURL(cfg.UpstreamNPMRegistry))
+		}
+		npmHandlerOpts = append(npmHandlerOpts, npm.WithUpstream(npm.NewUpstream(npmUpstreamOpts...)))
+	}
+	npmHandler := npm.NewHandler(npmIndex, cafsStore, npmHandlerOpts...)
 
 	// Initialize OCI components using metadb EnvelopeIndex
 	ociImageIndex, err := metadb.NewEnvelopeIndex(boltDB, "oci", "image", 24*time.Hour)
@@ -280,18 +306,47 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("creating oci blob index: %w", err)
 	}
 	ociIndex := oci.NewIndex(ociImageIndex, ociManifestIndex, ociBlobIndex)
-	ociUpstreamOpts := []oci.UpstreamOption{}
-	if cfg.UpstreamOCIRegistry != "" {
-		ociUpstreamOpts = append(ociUpstreamOpts, oci.WithRegistryURL(cfg.UpstreamOCIRegistry))
-	}
-	if cfg.OCIUsername != "" && cfg.OCIPassword != "" {
-		ociUpstreamOpts = append(ociUpstreamOpts, oci.WithBasicAuth(cfg.OCIUsername, cfg.OCIPassword))
-	}
-	ociUpstream := oci.NewUpstream(ociUpstreamOpts...)
 
-	ociRouter, err := oci.NewRouter([]oci.Registry{
-		{Prefix: cfg.OCIPrefix, Upstream: ociUpstream},
-	}, oci.WithRouterLogger(cfg.Logger.With("component", "oci-router")))
+	var ociRegistries []oci.Registry
+	if cfg.Credentials != nil && cfg.Credentials.OCI != nil && len(cfg.Credentials.OCI.Registries) > 0 {
+		// Build OCI registries from credentials file.
+		if cfg.UpstreamOCIRegistry != "" || cfg.OCIPrefix != "" {
+			cfg.Logger.Info("credentials file defines OCI registries, ignoring --oci-upstream and --oci-prefix CLI flags")
+		}
+		for _, reg := range cfg.Credentials.OCI.Registries {
+			upOpts := []oci.UpstreamOption{}
+			if reg.Upstream != "" {
+				upOpts = append(upOpts, oci.WithRegistryURL(reg.Upstream))
+			}
+			if reg.Username != "" && reg.Password != "" {
+				upOpts = append(upOpts, oci.WithBasicAuth(reg.Username, reg.Password))
+			}
+			ociReg := oci.Registry{
+				Prefix:   reg.Prefix,
+				Upstream: oci.NewUpstream(upOpts...),
+			}
+			if reg.TagTTL != "" {
+				if ttl, err := time.ParseDuration(reg.TagTTL); err == nil {
+					ociReg.TagTTL = ttl
+				} else {
+					cfg.Logger.Warn("invalid tag_ttl in OCI registry config", "prefix", reg.Prefix, "tag_ttl", reg.TagTTL, "error", err)
+				}
+			}
+			ociRegistries = append(ociRegistries, ociReg)
+		}
+		cfg.Logger.Info("oci routing configured from credentials file", "registries", len(ociRegistries))
+	} else {
+		// Default single registry from CLI flags, no auth.
+		ociUpstreamOpts := []oci.UpstreamOption{}
+		if cfg.UpstreamOCIRegistry != "" {
+			ociUpstreamOpts = append(ociUpstreamOpts, oci.WithRegistryURL(cfg.UpstreamOCIRegistry))
+		}
+		ociRegistries = []oci.Registry{
+			{Prefix: cfg.OCIPrefix, Upstream: oci.NewUpstream(ociUpstreamOpts...)},
+		}
+	}
+
+	ociRouter, err := oci.NewRouter(ociRegistries, oci.WithRouterLogger(cfg.Logger.With("component", "oci-router")))
 	if err != nil {
 		return nil, fmt.Errorf("creating oci router: %w", err)
 	}
@@ -413,11 +468,34 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("creating git pack index: %w", err)
 	}
 	gitIndex := git.NewIndex(gitPackIndex)
-	gitUpstream := git.NewUpstream(git.WithUpstreamLogger(cfg.Logger.With("component", "git")))
 	gitHandlerOpts := []git.HandlerOption{
-		git.WithUpstream(gitUpstream),
 		git.WithLogger(cfg.Logger.With("component", "git")),
 		git.WithDownloader(dl),
+	}
+	if cfg.Credentials != nil && cfg.Credentials.Git != nil && len(cfg.Credentials.Git.Routes) > 0 {
+		// Build Git router from credentials file routes.
+		gitRoutes := make([]git.Route, 0, len(cfg.Credentials.Git.Routes))
+		for _, r := range cfg.Credentials.Git.Routes {
+			upOpts := []git.UpstreamOption{
+				git.WithUpstreamLogger(cfg.Logger.With("component", "git")),
+			}
+			if r.Username != "" {
+				upOpts = append(upOpts, git.WithBasicAuth(r.Username, r.Password))
+			}
+			gitRoutes = append(gitRoutes, git.Route{
+				Match:    git.RouteMatch{RepoPrefix: r.Match.RepoPrefix, Any: r.Match.Any},
+				Upstream: git.NewUpstream(upOpts...),
+			})
+		}
+		gitRouter, err := git.NewRouter(gitRoutes, git.WithRouterLogger(cfg.Logger.With("component", "git-router")))
+		if err != nil {
+			return nil, fmt.Errorf("creating git router: %w", err)
+		}
+		gitHandlerOpts = append(gitHandlerOpts, git.WithRouter(gitRouter))
+		cfg.Logger.Info("git routing configured", "routes", len(gitRoutes))
+	} else {
+		gitUpstream := git.NewUpstream(git.WithUpstreamLogger(cfg.Logger.With("component", "git")))
+		gitHandlerOpts = append(gitHandlerOpts, git.WithUpstream(gitUpstream))
 	}
 	if len(cfg.GitAllowedHosts) > 0 {
 		gitHandlerOpts = append(gitHandlerOpts, git.WithAllowedHosts(cfg.GitAllowedHosts))
@@ -481,7 +559,7 @@ func New(cfg Config) (*Server, error) {
 
 	s.httpServer = &http.Server{
 		Addr:         cfg.Address,
-		Handler:      s.loggingMiddleware(mux),
+		Handler:      s.loggingMiddleware(s.authMiddleware(mux)),
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 5 * time.Minute, // Long timeout for large zip downloads
 		IdleTimeout:  60 * time.Second,

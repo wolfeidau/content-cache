@@ -10,8 +10,10 @@ import (
 
 // Upstream fetches from upstream Git repositories over HTTPS.
 type Upstream struct {
-	client *http.Client
-	logger *slog.Logger
+	client   *http.Client
+	logger   *slog.Logger
+	username string
+	password string
 }
 
 // UpstreamOption configures an Upstream.
@@ -28,6 +30,24 @@ func WithHTTPClient(client *http.Client) UpstreamOption {
 func WithUpstreamLogger(logger *slog.Logger) UpstreamOption {
 	return func(u *Upstream) {
 		u.logger = logger
+	}
+}
+
+// WithBasicAuth sets the username and password for upstream authentication.
+// This covers GitHub PATs (username=x-access-token, password=<PAT>),
+// GitLab tokens, and Bitbucket app passwords.
+func WithBasicAuth(username, password string) UpstreamOption {
+	return func(u *Upstream) {
+		u.username = username
+		u.password = password
+	}
+}
+
+// setAuth sets Basic Auth on the request if credentials are configured.
+// Auth is applied if username is set (password may be empty, which is valid for some providers).
+func (u *Upstream) setAuth(req *http.Request) {
+	if u.username != "" {
+		req.SetBasicAuth(u.username, u.password)
 	}
 }
 
@@ -58,6 +78,7 @@ func (u *Upstream) FetchInfoRefs(ctx context.Context, repo RepoRef, gitProtocol 
 	if gitProtocol != "" {
 		req.Header.Set("Git-Protocol", gitProtocol)
 	}
+	u.setAuth(req)
 
 	resp, err := u.client.Do(req)
 	if err != nil {
@@ -92,6 +113,7 @@ func (u *Upstream) FetchUploadPack(ctx context.Context, repo RepoRef, gitProtoco
 	if gitProtocol != "" {
 		req.Header.Set("Git-Protocol", gitProtocol)
 	}
+	u.setAuth(req)
 
 	u.logger.Debug("sending upload-pack request to upstream",
 		"url", url,
@@ -117,13 +139,14 @@ func (u *Upstream) FetchUploadPack(ctx context.Context, repo RepoRef, gitProtoco
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		_ = resp.Body.Close()
 
 		u.logger.Error("upstream upload-pack error response",
 			"url", url,
 			"status", resp.StatusCode,
-			"response_headers", resp.Header,
+			"content_type", resp.Header.Get("Content-Type"),
+			"content_length", resp.Header.Get("Content-Length"),
 			"response_body_length", len(respBody),
 			"response_body", string(respBody),
 		)

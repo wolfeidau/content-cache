@@ -25,8 +25,10 @@ var ErrNotFound = errors.New("not found")
 
 // Upstream fetches packages from an upstream NPM registry.
 type Upstream struct {
-	baseURL string
-	client  *http.Client
+	baseURL      string
+	upstreamHost string // parsed from baseURL, for auth host-matching
+	token        string
+	client       *http.Client
 }
 
 // UpstreamOption configures an Upstream.
@@ -46,6 +48,13 @@ func WithHTTPClient(client *http.Client) UpstreamOption {
 	}
 }
 
+// WithBearerToken sets the bearer token for upstream authentication.
+func WithBearerToken(token string) UpstreamOption {
+	return func(u *Upstream) {
+		u.token = token
+	}
+}
+
 // NewUpstream creates a new upstream registry client.
 func NewUpstream(opts ...UpstreamOption) *Upstream {
 	u := &Upstream{
@@ -57,7 +66,31 @@ func NewUpstream(opts ...UpstreamOption) *Upstream {
 	for _, opt := range opts {
 		opt(u)
 	}
+	// Parse upstream host for auth host-matching.
+	if parsed, err := url.Parse(u.baseURL); err == nil {
+		u.upstreamHost = parsed.Hostname()
+	}
 	return u
+}
+
+// shouldAttachAuth returns true if the auth token should be sent to the given URL.
+// Only attaches auth when the target URL's host matches the configured upstream host.
+func (u *Upstream) shouldAttachAuth(targetURL string) bool {
+	if u.token == "" {
+		return false
+	}
+	parsed, err := url.Parse(targetURL)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(parsed.Hostname(), u.upstreamHost)
+}
+
+// setAuth sets the Authorization header if a token is configured.
+func (u *Upstream) setAuth(req *http.Request) {
+	if u.token != "" {
+		req.Header.Set("Authorization", "Bearer "+u.token)
+	}
 }
 
 // FetchPackageMetadata fetches full metadata for a package.
@@ -71,6 +104,7 @@ func (u *Upstream) FetchPackageMetadata(ctx context.Context, name string) (*Pack
 
 	// Request full metadata
 	req.Header.Set("Accept", "application/json")
+	u.setAuth(req)
 
 	resp, err := u.client.Do(req)
 	if err != nil {
@@ -105,6 +139,7 @@ func (u *Upstream) FetchPackageMetadataRaw(ctx context.Context, name string) ([]
 	}
 
 	req.Header.Set("Accept", "application/json")
+	u.setAuth(req)
 
 	resp, err := u.client.Do(req)
 	if err != nil {
@@ -136,6 +171,7 @@ func (u *Upstream) FetchAbbreviatedMetadata(ctx context.Context, name string) (*
 
 	// Request abbreviated metadata
 	req.Header.Set("Accept", "application/vnd.npm.install-v1+json")
+	u.setAuth(req)
 
 	resp, err := u.client.Do(req)
 	if err != nil {
@@ -162,10 +198,15 @@ func (u *Upstream) FetchAbbreviatedMetadata(ctx context.Context, name string) (*
 
 // FetchTarball fetches a package tarball.
 // Returns a ReadCloser that must be closed by the caller.
+// Auth is only attached if the tarball URL host matches the upstream registry host.
 func (u *Upstream) FetchTarball(ctx context.Context, tarballURL string) (io.ReadCloser, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, tarballURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
+	}
+
+	if u.shouldAttachAuth(tarballURL) {
+		u.setAuth(req)
 	}
 
 	resp, err := u.client.Do(req)
