@@ -14,6 +14,7 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/lmittmann/tint"
 	"github.com/wolfeidau/content-cache/credentials"
+	"github.com/wolfeidau/content-cache/credentials/opprovider"
 	"github.com/wolfeidau/content-cache/server"
 	"github.com/wolfeidau/content-cache/telemetry"
 )
@@ -151,6 +152,7 @@ func (cmd *ServeCmd) Run() error {
 	if cmd.CredentialsFile != "" {
 		resolver := credentials.NewResolver(
 			credentials.WithLogger(logger),
+			opprovider.WithOnePassword(),
 		)
 
 		credCtx, credCancel := context.WithTimeout(context.Background(), 30*time.Second)
