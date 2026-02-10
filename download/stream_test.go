@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -269,6 +270,92 @@ func TestStreamThrough_OnCompleteErrorCleansUpTmpFile(t *testing.T) {
 	// Temp file should be cleaned up since onComplete returned an error.
 	_, statErr := os.Stat(tmpPathSeen)
 	require.True(t, os.IsNotExist(statErr), "temp file should be deleted when onComplete returns error")
+}
+
+func TestStreamThrough_Concurrent(t *testing.T) {
+	const goroutines = 10
+
+	errs := make(chan error, goroutines)
+	for i := range goroutines {
+		go func() {
+			content := []byte(fmt.Sprintf("concurrent content %d", i))
+
+			r := httptest.NewRequest(http.MethodGet, "/blob", nil)
+			w := httptest.NewRecorder()
+
+			err := StreamThrough(w, r, bytes.NewReader(content),
+				StreamThroughOptions{
+					ContentType:   "application/octet-stream",
+					ContentLength: int64(len(content)),
+				},
+				func(_ *StreamThroughResult, tmpPath string) error {
+					defer os.Remove(tmpPath)
+					return nil
+				},
+				testLogger(),
+			)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if !bytes.Equal(content, w.Body.Bytes()) {
+				errs <- fmt.Errorf("body mismatch: got %q, want %q", w.Body.String(), content)
+				return
+			}
+			errs <- nil
+		}()
+	}
+
+	for range goroutines {
+		require.NoError(t, <-errs)
+	}
+}
+
+func TestStreamThrough_TempFileCleanedUpOnStreamError(t *testing.T) {
+	// Use a dedicated temp dir so we can observe cleanup.
+	tmpDir, err := os.MkdirTemp("", "stream-cleanup-test-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	// Count files before.
+	entriesBefore, err := os.ReadDir(tmpDir)
+	require.NoError(t, err)
+
+	// Patch: we can't control the temp dir used by StreamThrough directly,
+	// but we can verify via a mid-stream error that reads the tmp path.
+	// Instead, use a reader that errors after some bytes so onComplete is
+	// never called, then verify no temp files linger in os.TempDir().
+	//
+	// More targeted approach: list temp files matching the pattern before/after.
+	pattern := "download-stream-*"
+	matchesBefore, _ := filepath.Glob(filepath.Join(os.TempDir(), pattern))
+
+	errReader := io.MultiReader(
+		bytes.NewReader([]byte("some data")),
+		&errorReader{err: errors.New("connection reset")},
+	)
+
+	r := httptest.NewRequest(http.MethodGet, "/blob", nil)
+	w := httptest.NewRecorder()
+
+	err = StreamThrough(w, r, errReader,
+		StreamThroughOptions{
+			ContentType: "application/octet-stream",
+		},
+		func(_ *StreamThroughResult, _ string) error {
+			t.Fatal("should not be called")
+			return nil
+		},
+		testLogger(),
+	)
+	require.Error(t, err)
+
+	// Verify no new temp files were left behind.
+	matchesAfter, _ := filepath.Glob(filepath.Join(os.TempDir(), pattern))
+	require.Equal(t, len(matchesBefore), len(matchesAfter),
+		"temp file should be cleaned up after stream error")
+
+	_ = entriesBefore // used only for the dedicated tmpDir approach
 }
 
 // errorReader is a reader that always returns an error.
