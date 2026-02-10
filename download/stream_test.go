@@ -93,33 +93,33 @@ func TestStreamThrough_ExtraWriters(t *testing.T) {
 }
 
 func TestStreamThrough_HeadRequest(t *testing.T) {
-	content := []byte("head request test")
-
 	r := httptest.NewRequest(http.MethodHead, "/blob", nil)
 	w := httptest.NewRecorder()
 
-	var gotResult *StreamThroughResult
+	onCompleteCalled := false
 
-	err := StreamThrough(w, r, bytes.NewReader(content),
+	// Upstream reader should not be consumed for HEAD requests.
+	err := StreamThrough(w, r, bytes.NewReader([]byte("should not be read")),
 		StreamThroughOptions{
 			ContentType:   "application/octet-stream",
-			ContentLength: int64(len(content)),
+			ContentLength: 42,
+			ExtraHeaders:  map[string]string{"X-Test": "head"},
 		},
-		func(result *StreamThroughResult, tmpPath string) error {
-			gotResult = result
-			defer os.Remove(tmpPath)
+		func(_ *StreamThroughResult, _ string) error {
+			onCompleteCalled = true
 			return nil
 		},
 		testLogger(),
 	)
 
 	require.NoError(t, err)
-	require.NotNil(t, gotResult)
-	require.Equal(t, int64(len(content)), gotResult.Size)
+	require.False(t, onCompleteCalled, "onComplete should not be called for HEAD requests")
 
 	// HEAD response should have headers but no body.
+	require.Equal(t, http.StatusOK, w.Code)
 	require.Equal(t, "application/octet-stream", w.Header().Get("Content-Type"))
-	require.Equal(t, fmt.Sprintf("%d", len(content)), w.Header().Get("Content-Length"))
+	require.Equal(t, "42", w.Header().Get("Content-Length"))
+	require.Equal(t, "head", w.Header().Get("X-Test"))
 	require.Empty(t, w.Body.Bytes())
 }
 

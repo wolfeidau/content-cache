@@ -79,21 +79,20 @@ func StreamThrough(
 		w.Header().Set(k, v)
 	}
 
-	// For HEAD requests, consume upstream to hash/verify but don't write body.
-	var dest io.Writer
+	// For HEAD requests, respond with headers only — don't download from upstream.
+	// The caller already has the metadata needed for HEAD responses.
 	if r.Method == http.MethodHead {
-		dest = io.Discard
-	} else {
-		dest = w
+		w.WriteHeader(http.StatusOK)
+		return nil
 	}
 
-	n, copyErr := io.Copy(dest, teeReader)
+	n, copyErr := io.Copy(w, teeReader)
 
 	if copyErr != nil {
 		if n == 0 {
-			// Headers may not be committed yet — we can still send an error response.
-			// Note: if Content-Type was already set, WriteHeader from http.Error will
-			// still work since no bytes were written to the body.
+			// No bytes written to the response body yet, so headers haven't been
+			// committed. http.Error will call WriteHeader(502), overriding the
+			// implicit 200 and the previously set headers (Content-Type, etc.).
 			http.Error(w, "upstream error", http.StatusBadGateway)
 		} else {
 			// Bytes already sent to client — can't change the response, just log.
