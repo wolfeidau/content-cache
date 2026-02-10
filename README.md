@@ -130,7 +130,9 @@ git config --global --unset url."http://localhost:8080/git/github.com/".insteadO
 - **Download Deduplication**: Singleflight-based coalescing of concurrent requests for the same uncached resource
 - **Pull-Through Caching**: Fetches from upstream on cache miss, caches for future requests
 - **Cache Expiration**: TTL-based and size-based (LRU) eviction with configurable intervals
-- **Authentication**: Support for OCI registry authentication with username/password
+- **Inbound Authentication**: Bearer token auth middleware protecting all endpoints (except `/health` and `/metrics`), configurable via `--auth-token` or `--auth-token-file`
+- **Upstream Credentials**: Template-based credentials file (`--credentials-file`) with routing tables for per-scope (NPM) and per-repo-prefix (Git) credential selection, plus multi-registry OCI auth. Supports pluggable secret providers (environment variables, files, 1Password CLI)
+- **Routing Tables**: NPM scope-based and Git repo-prefix-based routing with catch-all fallback, validated at startup
 - **Health & Stats Endpoints**: `/health` for liveness checks, `/stats` for cache statistics
 - **OpenTelemetry Metrics**: Request counts, bytes served, and latency histograms with cache hit/miss breakdown
 - **Prometheus Integration**: Optional `/metrics` endpoint for Prometheus scraping
@@ -199,6 +201,18 @@ Configuration is available via command-line flags or environment variables. Envi
 | `--tls-cert` | `TLS_CERT_FILE` | | Path to TLS certificate file (enables HTTPS) |
 | `--tls-key` | `TLS_KEY_FILE` | | Path to TLS private key file (enables HTTPS) |
 
+### Authentication Options
+
+| Flag | Environment Variable | Default | Description |
+|------|---------------------|---------|-------------|
+| `--auth-token` | `AUTH_TOKEN` | | Bearer token for inbound authentication |
+| `--auth-token-file` | `AUTH_TOKEN_FILE` | | Path to file containing auth token (for k8s secret mounts) |
+| `--credentials-file` | `CREDENTIALS_FILE` | | Path to credentials template file for upstream auth |
+
+When `--auth-token` is set, all requests (except `/health` and `/metrics`) require an `Authorization: Bearer <token>` header. The token can also be provided via the `auth_token` field in the credentials file; the CLI flag takes precedence.
+
+When `--credentials-file` is set, the file is parsed as a Go template that produces JSON. Template functions resolve secrets from environment variables (`env`), files (`file`), or external stores like 1Password CLI (`op`). See the [Credentials File](#credentials-file) section for the full schema.
+
 ### Upstream Registry Options
 
 | Flag | Environment Variable | Default | Description |
@@ -215,10 +229,9 @@ Configuration is available via command-line flags or environment variables. Envi
 | Flag | Environment Variable | Default | Description |
 |------|---------------------|---------|-------------|
 | `--oci-prefix` | `OCI_PREFIX` | `docker-hub` | Routing prefix for the OCI registry (appears in URL path as `/v2/{prefix}/...`) |
-| `--oci-username` | `OCI_USERNAME` | | OCI registry username |
-| `--oci-password` | `OCI_PASSWORD` | | OCI registry password |
-| `--oci-password-file` | `OCI_PASSWORD_FILE` | | Path to file containing OCI password (for k8s secrets) |
 | `--oci-tag-ttl` | `OCI_TAG_TTL` | `5m` | TTL for OCI tag→digest cache mappings |
+
+OCI registry credentials (username/password) are configured via the credentials file. When the credentials file defines `oci.registries[]`, the `--oci-upstream` and `--oci-prefix` CLI flags are ignored.
 
 ### Metadata TTL Options
 
@@ -261,13 +274,24 @@ Configuration is available via command-line flags or environment variables. Envi
 ### Example: Command Line
 
 ```bash
+# Basic usage with inbound auth
 ./content-cache serve \
   --listen :8080 \
   --storage /var/cache/content-cache \
-  --oci-username myuser \
-  --oci-password-file /run/secrets/oci-password \
+  --auth-token-file /run/secrets/auth-token \
   --cache-ttl 336h \
   --log-level debug \
+  --log-format json \
+  --metrics-prometheus
+
+# With upstream credentials via credentials file
+./content-cache serve \
+  --listen :8080 \
+  --storage /var/cache/content-cache \
+  --auth-token-file /run/secrets/auth-token \
+  --credentials-file /etc/content-cache/credentials.json.tmpl \
+  --git-allowed-hosts github.com,gitlab.com \
+  --cache-ttl 336h \
   --log-format json \
   --metrics-prometheus
 ```
@@ -284,7 +308,8 @@ services:
       - "8080:8080"
     volumes:
       - cache-data:/data
-      - ./secrets/oci-password:/run/secrets/oci-password:ro
+      - ./secrets/auth-token:/run/secrets/auth-token:ro
+      - ./config/credentials.json.tmpl:/etc/content-cache/credentials.json.tmpl:ro
     environment:
       LISTEN_ADDRESS: ":8080"
       CACHE_STORAGE: "/data"
@@ -293,8 +318,9 @@ services:
       LOG_LEVEL: "info"
       LOG_FORMAT: "json"
       METRICS_PROMETHEUS: "true"
-      OCI_USERNAME: "myuser"
-      OCI_PASSWORD_FILE: "/run/secrets/oci-password"
+      AUTH_TOKEN_FILE: "/run/secrets/auth-token"
+      CREDENTIALS_FILE: "/etc/content-cache/credentials.json.tmpl"
+      GIT_ALLOWED_HOSTS: "github.com"
 
 volumes:
   cache-data:
@@ -313,6 +339,7 @@ data:
   LOG_LEVEL: "info"
   LOG_FORMAT: "json"
   METRICS_PROMETHEUS: "true"
+  GIT_ALLOWED_HOSTS: "github.com"
 ---
 apiVersion: v1
 kind: Secret
@@ -320,8 +347,80 @@ metadata:
   name: content-cache-secrets
 type: Opaque
 stringData:
-  oci-password: "my-registry-password"
+  auth-token: "my-inbound-auth-token"
 ```
+
+## Credentials File
+
+The credentials file is a Go `text/template` that produces JSON. Template functions resolve secrets from external stores at startup. All upstream credentials (NPM, Git, OCI) are configured here — there are no per-protocol credential CLI flags.
+
+### Template Functions
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `env "KEY"` | Read environment variable (error if unset) | `{{ env "NPM_TOKEN" \| json }}` |
+| `envDefault "KEY" "fallback"` | Read env var with default | `{{ envDefault "REGION" "us-east-1" }}` |
+| `file "/path"` | Read and trim file contents | `{{ file "/run/secrets/token" \| json }}` |
+| `json` | JSON-encode a string value (pipe) | `{{ env "TOKEN" \| json }}` |
+| `op "reference"` | Read from 1Password CLI | `{{ op "op://vault/item/field" \| json }}` |
+
+### Example Credentials File
+
+```json
+{
+  "auth_token": {{ env "AUTH_TOKEN" | json }},
+
+  "npm": {
+    "routes": [
+      {
+        "match": { "scope": "@mycompany" },
+        "registry_url": "https://npm.pkg.github.com",
+        "token": {{ env "NPM_TOKEN" | json }}
+      },
+      {
+        "match": { "any": true },
+        "registry_url": "https://registry.npmjs.org"
+      }
+    ]
+  },
+
+  "git": {
+    "routes": [
+      {
+        "match": { "repo_prefix": "github.com/orgA/" },
+        "username": "x-access-token",
+        "password": {{ env "GIT_PAT" | json }}
+      },
+      {
+        "match": { "any": true }
+      }
+    ]
+  },
+
+  "oci": {
+    "registries": [
+      {
+        "prefix": "docker-hub",
+        "upstream": "https://registry-1.docker.io"
+      },
+      {
+        "prefix": "ghcr",
+        "upstream": "https://ghcr.io",
+        "username": {{ env "GHCR_USER" | json }},
+        "password": {{ env "GHCR_PASS" | json }}
+      }
+    ]
+  }
+}
+```
+
+### Routing Rules
+
+- **NPM**: Routes match by package scope (e.g., `@mycompany`). The last route must have `"any": true` as a catch-all. Scopes must start with `@` and must not be duplicated.
+- **Git**: Routes match by repo prefix (e.g., `github.com/orgA/`). Prefixes must end with `/` to prevent ambiguous matching. The last route must have `"any": true` as a catch-all.
+- **OCI**: Uses prefix-based routing (e.g., `docker-hub`, `ghcr`). Each registry entry defines its own upstream URL and optional credentials.
+
+All sections are optional — omit any protocol section to use the default upstream with no auth.
 
 ## Storage Layout
 
