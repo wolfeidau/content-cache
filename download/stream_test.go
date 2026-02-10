@@ -352,7 +352,7 @@ func TestStreamThrough_TempFileCleanedUpOnStreamError(t *testing.T) {
 
 	// Verify no new temp files were left behind.
 	matchesAfter, _ := filepath.Glob(filepath.Join(os.TempDir(), pattern))
-	require.Equal(t, len(matchesBefore), len(matchesAfter),
+	require.Len(t, matchesAfter, len(matchesBefore),
 		"temp file should be cleaned up after stream error")
 
 	_ = entriesBefore // used only for the dedicated tmpDir approach

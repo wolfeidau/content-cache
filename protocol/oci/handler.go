@@ -432,19 +432,18 @@ func (h *Handler) fetchAndStoreBlob(ctx context.Context, upstream *Upstream, nam
 		return nil, fmt.Errorf("invalid digest: %w", err)
 	}
 
-	// Create temp file
 	tmpFile, err := os.CreateTemp("", "oci-blob-*")
 	if err != nil {
 		return nil, fmt.Errorf("creating temp file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
 
-	// Stream to temp file while computing hashes
+	// Stream to temp file while computing hashes.
 	blake3Reader := contentcache.NewHashingReader(rc)
 	digestHasher, err := expectedDigest.NewHasher()
 	if err != nil {
 		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
 		return nil, fmt.Errorf("unsupported digest algorithm: %w", err)
 	}
 	teeReader := io.TeeReader(blake3Reader, digestHasher)
@@ -452,42 +451,24 @@ func (h *Handler) fetchAndStoreBlob(ctx context.Context, upstream *Upstream, nam
 	written, err := io.Copy(tmpFile, teeReader)
 	if err != nil {
 		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
 		return nil, fmt.Errorf("reading blob: %w", err)
 	}
+	_ = tmpFile.Close()
+
 	blake3Hash := blake3Reader.Sum()
 
-	// Verify digest
+	// Verify digest.
 	computedHex := fmt.Sprintf("%x", digestHasher.Sum(nil))
 	if computedHex != expectedDigest.Hex {
-		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
 		return nil, fmt.Errorf("digest verification failed: expected %s, got %s", expectedDigest.Hex, computedHex)
 	}
 
 	logger.Debug("digest verified", "digest", digestStr)
 
-	// Seek to beginning for storing in CAFS
-	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
-		_ = tmpFile.Close()
-		return nil, fmt.Errorf("seeking temp file: %w", err)
-	}
-
-	storedHash, err := h.store.Put(ctx, tmpFile)
-	if err != nil {
-		_ = tmpFile.Close()
-		return nil, fmt.Errorf("storing blob: %w", err)
-	}
-	_ = tmpFile.Close()
-
-	if storedHash != blake3Hash {
-		logger.Warn("hash mismatch during storage", "expected", blake3Hash.ShortString(), "got", storedHash.ShortString())
-	}
-
-	// Update blob index
-	if err := h.index.PutBlob(ctx, digestStr, blake3Hash, written); err != nil {
-		logger.Error("failed to update blob index", "error", err)
-	} else {
-		logger.Info("cached blob", "digest", digestStr, "hash", blake3Hash.ShortString(), "size", written)
-	}
+	// Delegate storage and index update to cacheBlob, which owns tmpPath cleanup.
+	h.cacheBlob(ctx, digestStr, blake3Hash, written, tmpPath, logger)
 
 	return &download.Result{Hash: blake3Hash, Size: written}, nil
 }
