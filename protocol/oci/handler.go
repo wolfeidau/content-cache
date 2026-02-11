@@ -432,19 +432,18 @@ func (h *Handler) fetchAndStoreBlob(ctx context.Context, upstream *Upstream, nam
 		return nil, fmt.Errorf("invalid digest: %w", err)
 	}
 
-	// Create temp file
 	tmpFile, err := os.CreateTemp("", "oci-blob-*")
 	if err != nil {
 		return nil, fmt.Errorf("creating temp file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
 
-	// Stream to temp file while computing hashes
+	// Stream to temp file while computing hashes.
 	blake3Reader := contentcache.NewHashingReader(rc)
 	digestHasher, err := expectedDigest.NewHasher()
 	if err != nil {
 		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
 		return nil, fmt.Errorf("unsupported digest algorithm: %w", err)
 	}
 	teeReader := io.TeeReader(blake3Reader, digestHasher)
@@ -452,53 +451,37 @@ func (h *Handler) fetchAndStoreBlob(ctx context.Context, upstream *Upstream, nam
 	written, err := io.Copy(tmpFile, teeReader)
 	if err != nil {
 		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
 		return nil, fmt.Errorf("reading blob: %w", err)
 	}
+	_ = tmpFile.Close()
+
 	blake3Hash := blake3Reader.Sum()
 
-	// Verify digest
+	// Verify digest.
 	computedHex := fmt.Sprintf("%x", digestHasher.Sum(nil))
 	if computedHex != expectedDigest.Hex {
-		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
 		return nil, fmt.Errorf("digest verification failed: expected %s, got %s", expectedDigest.Hex, computedHex)
 	}
 
 	logger.Debug("digest verified", "digest", digestStr)
 
-	// Seek to beginning for storing in CAFS
-	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
-		_ = tmpFile.Close()
-		return nil, fmt.Errorf("seeking temp file: %w", err)
-	}
-
-	storedHash, err := h.store.Put(ctx, tmpFile)
-	if err != nil {
-		_ = tmpFile.Close()
-		return nil, fmt.Errorf("storing blob: %w", err)
-	}
-	_ = tmpFile.Close()
-
-	if storedHash != blake3Hash {
-		logger.Warn("hash mismatch during storage", "expected", blake3Hash.ShortString(), "got", storedHash.ShortString())
-	}
-
-	// Update blob index
-	if err := h.index.PutBlob(ctx, digestStr, blake3Hash, written); err != nil {
-		logger.Error("failed to update blob index", "error", err)
-	} else {
-		logger.Info("cached blob", "digest", digestStr, "hash", blake3Hash.ShortString(), "size", written)
-	}
+	// Delegate storage and index update to cacheBlob, which owns tmpPath cleanup.
+	h.cacheBlob(ctx, digestStr, blake3Hash, written, tmpPath, logger)
 
 	return &download.Result{Hash: blake3Hash, Size: written}, nil
 }
 
-// handleGetBlobDirect handles blob requests without singleflight deduplication (legacy path).
+// handleGetBlobDirect handles blob requests without singleflight deduplication.
+// It uses StreamThrough to simultaneously stream the upstream blob to the client
+// and a temp file for hashing/verification/caching.
 func (h *Handler) handleGetBlobDirect(w http.ResponseWriter, r *http.Request, upstream *Upstream, name, digestStr string, logger *slog.Logger) {
 	ctx := r.Context()
 
 	rc, size, err := upstream.FetchBlob(ctx, name, digestStr)
 	if err != nil {
-		if err == ErrNotFound {
+		if errors.Is(err, ErrNotFound) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -515,71 +498,47 @@ func (h *Handler) handleGetBlobDirect(w http.ResponseWriter, r *http.Request, up
 		return
 	}
 
-	tmpFile, err := os.CreateTemp("", "oci-blob-*")
-	if err != nil {
-		logger.Error("failed to create temp file", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	tmpPath := tmpFile.Name()
-
-	blake3Reader := contentcache.NewHashingReader(rc)
 	digestHasher, err := expectedDigest.NewHasher()
 	if err != nil {
-		_ = tmpFile.Close()
 		logger.Error("unsupported digest algorithm", "error", err)
 		http.Error(w, "unsupported digest", http.StatusBadRequest)
 		return
 	}
-	teeReader := io.TeeReader(blake3Reader, digestHasher)
 
-	written, err := io.Copy(tmpFile, teeReader)
-	if err != nil {
-		_ = tmpFile.Close()
-		logger.Error("failed to read blob", "error", err)
-		http.Error(w, "upstream error", http.StatusBadGateway)
-		return
+	if err := download.StreamThrough(w, r, rc,
+		download.StreamThroughOptions{
+			ContentType:   "application/octet-stream",
+			ExtraHeaders:  map[string]string{DockerContentDigestHeader: digestStr},
+			ContentLength: size,
+			ExtraWriters:  []io.Writer{digestHasher},
+		},
+		func(result *download.StreamThroughResult, tmpPath string) error {
+			// Verify OCI digest.
+			computedHex := fmt.Sprintf("%x", digestHasher.Sum(nil))
+			if computedHex != expectedDigest.Hex {
+				logger.Warn("digest verification failed, not caching",
+					"expected", expectedDigest.Hex,
+					"computed", computedHex,
+				)
+				return fmt.Errorf("digest mismatch: expected %s, got %s", expectedDigest.Hex, computedHex)
+			}
+
+			logger.Debug("digest verified", "digest", digestStr)
+
+			// Store in CAFS async — caller owns tmpPath deletion.
+			h.wg.Add(1)
+			go func() {
+				defer h.wg.Done()
+				cacheCtx, cancel := context.WithTimeout(h.ctx, cacheTimeout)
+				defer cancel()
+				h.cacheBlob(cacheCtx, digestStr, result.Hash, result.Size, tmpPath, logger)
+			}()
+			return nil
+		},
+		logger,
+	); err != nil {
+		logger.Error("stream-through failed", "error", err)
 	}
-	blake3Hash := blake3Reader.Sum()
-
-	computedHex := fmt.Sprintf("%x", digestHasher.Sum(nil))
-	if computedHex != expectedDigest.Hex {
-		_ = tmpFile.Close()
-		logger.Error("digest verification failed",
-			"expected", expectedDigest.Hex,
-			"computed", computedHex,
-		)
-		http.Error(w, "digest mismatch", http.StatusBadGateway)
-		return
-	}
-
-	logger.Debug("digest verified", "digest", digestStr)
-
-	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
-		_ = tmpFile.Close()
-		logger.Error("failed to seek temp file", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set(DockerContentDigestHeader, digestStr)
-	if size > 0 {
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
-	}
-
-	if _, err := io.Copy(w, tmpFile); err != nil {
-		logger.Error("failed to write response", "error", err)
-	}
-	_ = tmpFile.Close()
-
-	h.wg.Add(1)
-	go func() {
-		defer h.wg.Done()
-		cacheCtx, cancel := context.WithTimeout(h.ctx, cacheTimeout)
-		defer cancel()
-		h.cacheBlob(cacheCtx, digestStr, blake3Hash, written, tmpPath, logger)
-	}()
 }
 
 // handleHeadBlob handles HEAD /v2/{prefix}/{name}/blobs/{digest} requests.

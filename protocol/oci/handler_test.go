@@ -472,22 +472,53 @@ func TestHandlerDigestVerification(t *testing.T) {
 	// Wrong content for the claimed digest
 	wrongContent := []byte("wrong content")
 	claimedDigest := "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" // SHA256 of empty string
+	requestCount := 0
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
 		w.Header().Set("Content-Type", "application/octet-stream")
 		_, _ = w.Write(wrongContent)
 	}))
 	defer upstream.Close()
 
-	h, cleanup := newTestHandler(t, upstream.URL)
-	defer cleanup()
+	tmpDir, err := os.MkdirTemp("", "oci-digest-verify-test-*")
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	idx, st, _, cleanupDB := newTestIndexWithStore(t, tmpDir)
+	defer cleanupDB()
+
+	h := NewHandler(idx, st,
+		WithRouter(newTestRouter(t, upstream.URL)),
+	)
 
 	req := httptest.NewRequest(http.MethodGet, "/v2/docker-hub/library/alpine/blobs/"+claimedDigest, nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	// Should fail with bad gateway due to digest mismatch
-	require.Equal(t, http.StatusBadGateway, w.Code)
+	// With stream-through, the client receives content before digest verification.
+	// On mismatch, we don't cache but the response is already 200.
+	// OCI clients verify digests client-side per the OCI Distribution Spec.
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, wrongContent, w.Body.Bytes())
+
+	// Wait for any background caching goroutines to finish.
+	h.Close()
+	require.Equal(t, 1, requestCount)
+
+	// Second request with same shared storage — should NOT be served from cache
+	// since the mismatched blob must not have been stored.
+	h2 := NewHandler(idx, st,
+		WithRouter(newTestRouter(t, upstream.URL)),
+	)
+	defer h2.Close()
+
+	req2 := httptest.NewRequest(http.MethodGet, "/v2/docker-hub/library/alpine/blobs/"+claimedDigest, nil)
+	w2 := httptest.NewRecorder()
+	h2.ServeHTTP(w2, req2)
+
+	require.Equal(t, http.StatusOK, w2.Code)
+	require.Equal(t, 2, requestCount, "second request should hit upstream, not cache")
 }
 
 func TestHandlerManifestCacheHit(t *testing.T) {
