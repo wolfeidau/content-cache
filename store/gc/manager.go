@@ -36,13 +36,14 @@ func DefaultConfig() Config {
 
 // Result contains the results of a GC run.
 type Result struct {
-	StartedAt          time.Time     `json:"started_at"`
-	Duration           time.Duration `json:"duration"`
-	OrphanBlobsDeleted int           `json:"orphan_blobs_deleted"`
-	ExpiredMetaDeleted int           `json:"expired_meta_deleted"`
-	LRUBlobsEvicted    int           `json:"lru_blobs_evicted"`
-	BytesReclaimed     int64         `json:"bytes_reclaimed"`
-	Errors             []string      `json:"errors,omitempty"`
+	StartedAt                time.Time     `json:"started_at"`
+	Duration                 time.Duration `json:"duration"`
+	UnreferencedBlobsDeleted int           `json:"unreferenced_blobs_deleted"`
+	OrphanBlobsDeleted       int           `json:"orphan_blobs_deleted"`
+	ExpiredMetaDeleted       int           `json:"expired_meta_deleted"`
+	LRUBlobsEvicted          int           `json:"lru_blobs_evicted"`
+	BytesReclaimed           int64         `json:"bytes_reclaimed"`
+	Errors                   []string      `json:"errors,omitempty"`
 }
 
 // Manager manages garbage collection for the content cache.
@@ -202,6 +203,7 @@ func (m *Manager) runGC(ctx context.Context) *Result {
 
 	m.logger.Info("gc run completed",
 		"duration", result.Duration,
+		"unreferenced_blobs_deleted", result.UnreferencedBlobsDeleted,
 		"orphan_blobs_deleted", result.OrphanBlobsDeleted,
 		"expired_meta_deleted", result.ExpiredMetaDeleted,
 		"lru_blobs_evicted", result.LRUBlobsEvicted,
@@ -219,6 +221,7 @@ func (m *Manager) recordMetrics(ctx context.Context, result *Result) {
 
 	m.metrics.runsTotal.Add(ctx, 1)
 	m.metrics.runDuration.Record(ctx, result.Duration.Seconds())
+	m.metrics.unreferencedBlobsDeleted.Add(ctx, int64(result.UnreferencedBlobsDeleted))
 	m.metrics.orphanBlobsDeleted.Add(ctx, int64(result.OrphanBlobsDeleted))
 	m.metrics.expiredMetaDeleted.Add(ctx, int64(result.ExpiredMetaDeleted))
 	m.metrics.lruBlobsEvicted.Add(ctx, int64(result.LRUBlobsEvicted))

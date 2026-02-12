@@ -2,10 +2,12 @@ package gc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/wolfeidau/content-cache/backend"
 	"github.com/wolfeidau/content-cache/store/metadb"
 )
 
@@ -73,7 +75,7 @@ func (m *Manager) phaseDeleteUnreferenced(ctx context.Context, result *Result) {
 			continue
 		}
 
-		result.OrphanBlobsDeleted++
+		result.UnreferencedBlobsDeleted++
 		result.BytesReclaimed += bytesReclaimed
 
 		m.logger.Debug("deleted unreferenced blob", "hash", hash, "size", bytesReclaimed)
@@ -230,7 +232,7 @@ func (m *Manager) deleteBlob(ctx context.Context, hash string) (int64, error) {
 	}
 
 	key := blobKey(hash)
-	if err := m.backend.Delete(ctx, key); err != nil {
+	if err := m.backend.Delete(ctx, key); err != nil && !errors.Is(err, backend.ErrNotFound) {
 		return 0, fmt.Errorf("delete from backend: %w", err)
 	}
 
@@ -255,5 +257,23 @@ func extractHashFromKey(key string) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	return parts[len(parts)-1]
+	hash := parts[len(parts)-1]
+	if !isValidHexHash(hash) {
+		return ""
+	}
+	return hash
+}
+
+const minHashLength = 32
+
+func isValidHexHash(s string) bool {
+	if len(s) < minHashLength {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
 }

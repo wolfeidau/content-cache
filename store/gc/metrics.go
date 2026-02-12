@@ -6,15 +6,16 @@ import (
 
 // Metrics holds GC-related OpenTelemetry metric instruments.
 type Metrics struct {
-	runsTotal          metric.Int64Counter
-	runDuration        metric.Float64Histogram
-	orphanBlobsDeleted metric.Int64Counter
-	expiredMetaDeleted metric.Int64Counter
-	lruBlobsEvicted    metric.Int64Counter
-	bytesReclaimed     metric.Int64Counter
-	errorsTotal        metric.Int64Counter
-	lastRunTimestamp   metric.Float64Gauge
-	lastRunSuccess     metric.Float64Gauge
+	runsTotal                metric.Int64Counter
+	runDuration              metric.Float64Histogram
+	unreferencedBlobsDeleted metric.Int64Counter
+	orphanBlobsDeleted       metric.Int64Counter
+	expiredMetaDeleted       metric.Int64Counter
+	lruBlobsEvicted          metric.Int64Counter
+	bytesReclaimed           metric.Int64Counter
+	errorsTotal              metric.Int64Counter
+	lastRunTimestamp         metric.Float64Gauge
+	lastRunSuccess           metric.Float64Gauge
 }
 
 // NewMetrics creates a new Metrics instance with the given meter.
@@ -38,9 +39,18 @@ func NewMetrics(meter metric.Meter) (*Metrics, error) {
 		return nil, err
 	}
 
+	unreferencedBlobsDeleted, err := meter.Int64Counter(
+		"content_cache_gc_unreferenced_blobs_deleted_total",
+		metric.WithDescription("Total number of unreferenced blobs deleted (RefCount==0)"),
+		metric.WithUnit("{blob}"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	orphanBlobsDeleted, err := meter.Int64Counter(
 		"content_cache_gc_orphan_blobs_deleted_total",
-		metric.WithDescription("Total number of orphan blobs deleted"),
+		metric.WithDescription("Total number of orphan blobs deleted (on disk but missing from DB)"),
 		metric.WithUnit("{blob}"),
 	)
 	if err != nil {
@@ -102,14 +112,15 @@ func NewMetrics(meter metric.Meter) (*Metrics, error) {
 	}
 
 	return &Metrics{
-		runsTotal:          runsTotal,
-		runDuration:        runDuration,
-		orphanBlobsDeleted: orphanBlobsDeleted,
-		expiredMetaDeleted: expiredMetaDeleted,
-		lruBlobsEvicted:    lruBlobsEvicted,
-		bytesReclaimed:     bytesReclaimed,
-		errorsTotal:        errorsTotal,
-		lastRunTimestamp:   lastRunTimestamp,
-		lastRunSuccess:     lastRunSuccess,
+		runsTotal:                runsTotal,
+		runDuration:              runDuration,
+		unreferencedBlobsDeleted: unreferencedBlobsDeleted,
+		orphanBlobsDeleted:       orphanBlobsDeleted,
+		expiredMetaDeleted:       expiredMetaDeleted,
+		lruBlobsEvicted:          lruBlobsEvicted,
+		bytesReclaimed:           bytesReclaimed,
+		errorsTotal:              errorsTotal,
+		lastRunTimestamp:         lastRunTimestamp,
+		lastRunSuccess:           lastRunSuccess,
 	}, nil
 }

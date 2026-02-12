@@ -124,7 +124,6 @@ func (c *CAFS) PutWithResult(ctx context.Context, r io.Reader) (*PutResult, erro
 		return nil, fmt.Errorf("writing content: %w", err)
 	}
 
-	// Track metadata for new blob (best effort, don't fail the operation)
 	if c.metaDB != nil {
 		entry := &metadb.BlobEntry{
 			Hash:       hash.String(),
@@ -133,7 +132,9 @@ func (c *CAFS) PutWithResult(ctx context.Context, r io.Reader) (*PutResult, erro
 			LastAccess: time.Now(),
 			RefCount:   0,
 		}
-		_ = c.metaDB.PutBlob(ctx, entry)
+		if err := c.metaDB.PutBlob(ctx, entry); err != nil {
+			return nil, fmt.Errorf("tracking blob metadata: %w", err)
+		}
 	} else if c.metadata != nil {
 		_ = c.metadata.Create(ctx, hash, size)
 	}
@@ -335,7 +336,9 @@ func (c *CAFS) PutFramed(ctx context.Context, header *backend.BlobHeader, body i
 			LastAccess: time.Now(),
 			RefCount:   0,
 		}
-		_ = c.metaDB.PutBlob(ctx, entry)
+		if err := c.metaDB.PutBlob(ctx, entry); err != nil {
+			return contentcache.Hash{}, fmt.Errorf("tracking blob metadata: %w", err)
+		}
 	}
 
 	return hash, nil
