@@ -59,7 +59,7 @@ func TestManager_RunNow(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.Equal(t, 1, result.ExpiredMetaDeleted, "should delete 1 expired metadata")
-	assert.Equal(t, 1, result.OrphanBlobsDeleted, "should delete 1 orphan blob")
+	assert.Equal(t, 1, result.UnreferencedBlobsDeleted, "should delete 1 unreferenced blob")
 	assert.Greater(t, result.Duration, time.Duration(0))
 }
 
@@ -164,7 +164,7 @@ func TestManager_PhaseDeleteUnreferenced(t *testing.T) {
 	result, err := mgr.RunNow(ctx)
 
 	require.NoError(t, err)
-	assert.Equal(t, 2, result.OrphanBlobsDeleted)
+	assert.Equal(t, 2, result.UnreferencedBlobsDeleted)
 	assert.Equal(t, int64(300), result.BytesReclaimed)
 
 	_, err = db.GetBlob(ctx, "unreferenced1")
@@ -225,7 +225,7 @@ func TestManager_PhaseLRUEviction(t *testing.T) {
 	result, err := mgr.RunNow(ctx)
 
 	require.NoError(t, err)
-	assert.GreaterOrEqual(t, result.LRUBlobsEvicted+result.OrphanBlobsDeleted, 3, "should delete at least 3 blobs to get under 200 bytes")
+	assert.GreaterOrEqual(t, result.LRUBlobsEvicted+result.UnreferencedBlobsDeleted, 3, "should delete at least 3 blobs to get under 200 bytes")
 
 	total, err = db.TotalBlobSize(ctx)
 	require.NoError(t, err)
@@ -250,6 +250,7 @@ func TestManager_Status(t *testing.T) {
 	require.NotNil(t, status)
 	assert.Equal(t, result.StartedAt, status.StartedAt)
 	assert.Equal(t, result.Duration, status.Duration)
+	assert.Equal(t, result.UnreferencedBlobsDeleted, status.UnreferencedBlobsDeleted)
 	assert.Equal(t, result.OrphanBlobsDeleted, status.OrphanBlobsDeleted)
 	assert.Equal(t, result.ExpiredMetaDeleted, status.ExpiredMetaDeleted)
 	assert.Equal(t, result.LRUBlobsEvicted, status.LRUBlobsEvicted)
@@ -261,8 +262,8 @@ func TestManager_PhaseDeleteOrphans(t *testing.T) {
 	db := newTestDB(t)
 	fs := newTestBackend(t)
 
-	hash1 := "orphanblob123"
-	hash2 := "trackedblob456"
+	hash1 := "aa00112233445566778899aabbccddeeff"
+	hash2 := "bb00112233445566778899aabbccddeeff"
 	key1 := blobKey(hash1)
 	key2 := blobKey(hash2)
 	require.NoError(t, fs.Write(ctx, key1, strings.NewReader("orphan data")))
@@ -329,4 +330,25 @@ func TestManager_DoubleStart(t *testing.T) {
 
 	err := mgr.Stop(stopCtx)
 	require.NoError(t, err)
+}
+
+func TestExtractHashFromKey(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+		want string
+	}{
+		{"valid key", "blobs/ab/ab0123456789abcdef0123456789abcdef", "ab0123456789abcdef0123456789abcdef"},
+		{"empty string", "", ""},
+		{"too short", "blobs/ab/abc123", ""},
+		{"non-hex chars", "blobs/ab/tempfile.tmp.000000000000000000000000000000000", ""},
+		{"temp file", "blobs/.tmp-upload-123", ""},
+		{"directory-like", "blobs/ab/", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractHashFromKey(tt.key)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }
