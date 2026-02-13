@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
+	contentcache "github.com/wolfeidau/content-cache"
 	"github.com/wolfeidau/content-cache/backend"
 	"github.com/wolfeidau/content-cache/store/metadb"
 )
@@ -105,12 +105,13 @@ func (m *Manager) phaseDeleteOrphans(ctx context.Context, result *Result) {
 		default:
 		}
 
-		hash := extractHashFromKey(key)
-		if hash == "" {
+		h, err := contentcache.ParseBlobStorageKey(key)
+		if err != nil {
 			continue
 		}
+		hash := h.String()
 
-		_, err := m.db.GetBlob(ctx, hash)
+		_, err = m.db.GetBlob(ctx, hash)
 		if err == nil {
 			continue
 		}
@@ -231,7 +232,12 @@ func (m *Manager) deleteBlob(ctx context.Context, hash string) (int64, error) {
 		size = entry.Size
 	}
 
-	key := blobKey(hash)
+	h, err := contentcache.ParseHash(hash)
+	if err != nil {
+		return 0, fmt.Errorf("parse hash: %w", err)
+	}
+
+	key := contentcache.BlobStorageKey(h)
 	if err := m.backend.Delete(ctx, key); err != nil && !errors.Is(err, backend.ErrNotFound) {
 		return 0, fmt.Errorf("delete from backend: %w", err)
 	}
@@ -241,39 +247,4 @@ func (m *Manager) deleteBlob(ctx context.Context, hash string) (int64, error) {
 	}
 
 	return size, nil
-}
-
-// blobKey returns the backend storage key for a blob hash.
-func blobKey(hash string) string {
-	if len(hash) >= 4 {
-		return fmt.Sprintf("blobs/%s/%s/%s", hash[:2], hash[2:4], hash)
-	}
-	return fmt.Sprintf("blobs/%s", hash)
-}
-
-// extractHashFromKey extracts the blob hash from a storage key.
-func extractHashFromKey(key string) string {
-	parts := strings.Split(key, "/")
-	if len(parts) == 0 {
-		return ""
-	}
-	hash := parts[len(parts)-1]
-	if !isValidHexHash(hash) {
-		return ""
-	}
-	return hash
-}
-
-const minHashLength = 32
-
-func isValidHexHash(s string) bool {
-	if len(s) < minHashLength {
-		return false
-	}
-	for _, c := range s {
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
-			return false
-		}
-	}
-	return true
 }

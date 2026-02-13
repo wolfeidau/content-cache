@@ -226,7 +226,7 @@ func (ts *TrackedStore) Put(ctx context.Context, r io.Reader) (contentcache.Hash
 	size := hr.BytesRead()
 
 	// Check if already exists
-	exists, err := ts.backend.Exists(ctx, blobKey(hash))
+	exists, err := ts.backend.Exists(ctx, contentcache.BlobStorageKey(hash))
 	if err != nil {
 		return contentcache.Hash{}, fmt.Errorf("checking existence: %w", err)
 	}
@@ -238,7 +238,7 @@ func (ts *TrackedStore) Put(ctx context.Context, r io.Reader) (contentcache.Hash
 	}
 
 	// Write blob
-	if err := ts.backend.Write(ctx, blobKey(hash), strings.NewReader(string(data))); err != nil {
+	if err := ts.backend.Write(ctx, contentcache.BlobStorageKey(hash), strings.NewReader(string(data))); err != nil {
 		return contentcache.Hash{}, fmt.Errorf("writing blob: %w", err)
 	}
 
@@ -250,7 +250,7 @@ func (ts *TrackedStore) Put(ctx context.Context, r io.Reader) (contentcache.Hash
 
 // Get retrieves content and updates access time.
 func (ts *TrackedStore) Get(ctx context.Context, hash contentcache.Hash) (io.ReadCloser, error) {
-	rc, err := ts.backend.Read(ctx, blobKey(hash))
+	rc, err := ts.backend.Read(ctx, contentcache.BlobStorageKey(hash))
 	if err != nil {
 		return nil, err
 	}
@@ -263,12 +263,12 @@ func (ts *TrackedStore) Get(ctx context.Context, hash contentcache.Hash) (io.Rea
 
 // Has checks if content exists.
 func (ts *TrackedStore) Has(ctx context.Context, hash contentcache.Hash) (bool, error) {
-	return ts.backend.Exists(ctx, blobKey(hash))
+	return ts.backend.Exists(ctx, contentcache.BlobStorageKey(hash))
 }
 
 // Delete removes content and its metadata.
 func (ts *TrackedStore) Delete(ctx context.Context, hash contentcache.Hash) error {
-	if err := ts.backend.Delete(ctx, blobKey(hash)); err != nil {
+	if err := ts.backend.Delete(ctx, contentcache.BlobStorageKey(hash)); err != nil {
 		return err
 	}
 	return ts.metadata.Delete(ctx, hash)
@@ -283,7 +283,7 @@ func (ts *TrackedStore) Size(ctx context.Context, hash contentcache.Hash) (int64
 
 	// Fall back to reading from backend
 	if sb, ok := ts.backend.(backend.SizeAwareBackend); ok {
-		return sb.Size(ctx, blobKey(hash))
+		return sb.Size(ctx, contentcache.BlobStorageKey(hash))
 	}
 
 	return 0, backend.ErrNotFound
@@ -292,9 +292,4 @@ func (ts *TrackedStore) Size(ctx context.Context, hash contentcache.Hash) (int64
 // Metadata returns the metadata store.
 func (ts *TrackedStore) Metadata() *MetadataStore {
 	return ts.metadata
-}
-
-func blobKey(hash contentcache.Hash) string {
-	hex := hash.String()
-	return fmt.Sprintf("blobs/%s/%s", hex[:2], hex)
 }

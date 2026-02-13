@@ -180,7 +180,7 @@ func TestIndexBlobRefTracking(t *testing.T) {
 	hash := contentcache.HashBytes([]byte("tarball content"))
 
 	// Create the blob entry first with blake3: prefix (matches collectBlobRefs format)
-	hashWithPrefix := "blake3:" + hash.String()
+	hashWithPrefix := contentcache.NewBlobRef(hash).String()
 	require.NoError(t, db.PutBlob(ctx, &metadb.BlobEntry{
 		Hash:     hashWithPrefix,
 		Size:     100,
@@ -198,7 +198,7 @@ func TestIndexBlobRefTracking(t *testing.T) {
 
 	// Add another version with different hash
 	hash2 := contentcache.HashBytes([]byte("tarball content 2"))
-	hash2WithPrefix := "blake3:" + hash2.String()
+	hash2WithPrefix := contentcache.NewBlobRef(hash2).String()
 	require.NoError(t, db.PutBlob(ctx, &metadb.BlobEntry{
 		Hash:     hash2WithPrefix,
 		Size:     200,

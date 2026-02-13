@@ -172,7 +172,7 @@ func collectBlobRefs(project *CachedProject) []string {
 	refs := make([]string, 0, len(project.Files))
 	for _, file := range project.Files {
 		if file != nil && !file.ContentHash.IsZero() {
-			refs = append(refs, "blake3:"+file.ContentHash.String())
+			refs = append(refs, contentcache.NewBlobRef(file.ContentHash).String())
 		}
 	}
 	return refs

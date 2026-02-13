@@ -206,5 +206,5 @@ func collectBlobRefs(artifact *CachedArtifact) []string {
 	if artifact == nil || artifact.Hash.IsZero() {
 		return nil
 	}
-	return []string{"blake3:" + artifact.Hash.String()}
+	return []string{contentcache.NewBlobRef(artifact.Hash).String()}
 }

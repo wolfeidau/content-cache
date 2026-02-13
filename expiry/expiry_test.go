@@ -139,12 +139,12 @@ func TestManagerTTLExpiration(t *testing.T) {
 	// Old blob - 10 days ago
 	meta.now = func() time.Time { return baseTime.Add(-10 * 24 * time.Hour) }
 	_ = meta.Create(ctx, oldHash, 100)
-	_ = b.Write(ctx, blobKey(oldHash), strings.NewReader("old blob"))
+	_ = b.Write(ctx, contentcache.BlobStorageKey(oldHash), strings.NewReader("old blob"))
 
 	// New blob - 1 day ago
 	meta.now = func() time.Time { return baseTime.Add(-24 * time.Hour) }
 	_ = meta.Create(ctx, newHash, 100)
-	_ = b.Write(ctx, blobKey(newHash), strings.NewReader("new blob"))
+	_ = b.Write(ctx, contentcache.BlobStorageKey(newHash), strings.NewReader("new blob"))
 
 	// Create manager with 7 day TTL
 	cfg := Config{
@@ -161,11 +161,11 @@ func TestManagerTTLExpiration(t *testing.T) {
 	require.Equal(t, int64(100), result.BytesFreed)
 
 	// Old blob should be gone
-	exists, _ := b.Exists(ctx, blobKey(oldHash))
+	exists, _ := b.Exists(ctx, contentcache.BlobStorageKey(oldHash))
 	require.False(t, exists)
 
 	// New blob should still exist
-	exists, _ = b.Exists(ctx, blobKey(newHash))
+	exists, _ = b.Exists(ctx, contentcache.BlobStorageKey(newHash))
 	require.True(t, exists)
 }
 
@@ -185,7 +185,7 @@ func TestManagerLRUEviction(t *testing.T) {
 		// Stagger access times
 		meta.now = func() time.Time { return baseTime.Add(time.Duration(i) * time.Hour) }
 		_ = meta.Create(ctx, hashes[i], 100)
-		_ = b.Write(ctx, blobKey(hashes[i]), strings.NewReader(content))
+		_ = b.Write(ctx, contentcache.BlobStorageKey(hashes[i]), strings.NewReader(content))
 	}
 
 	// Create manager with 300 byte max (should evict 2 blobs)
@@ -203,13 +203,13 @@ func TestManagerLRUEviction(t *testing.T) {
 
 	// Oldest blobs should be gone
 	for i := 0; i < 2; i++ {
-		exists, _ := b.Exists(ctx, blobKey(hashes[i]))
+		exists, _ := b.Exists(ctx, contentcache.BlobStorageKey(hashes[i]))
 		require.False(t, exists)
 	}
 
 	// Newer blobs should remain
 	for i := 2; i < 5; i++ {
-		exists, _ := b.Exists(ctx, blobKey(hashes[i]))
+		exists, _ := b.Exists(ctx, contentcache.BlobStorageKey(hashes[i]))
 		require.True(t, exists)
 	}
 }
@@ -226,7 +226,7 @@ func TestManagerCombinedTTLAndLRU(t *testing.T) {
 	oldHash1 := contentcache.HashBytes([]byte("old1"))
 	meta.now = func() time.Time { return baseTime.Add(-10 * 24 * time.Hour) }
 	_ = meta.Create(ctx, oldHash1, 100)
-	_ = b.Write(ctx, blobKey(oldHash1), strings.NewReader("old1"))
+	_ = b.Write(ctx, contentcache.BlobStorageKey(oldHash1), strings.NewReader("old1"))
 
 	// Recent blobs (should trigger LRU)
 	recentHashes := make([]contentcache.Hash, 3)
@@ -234,7 +234,7 @@ func TestManagerCombinedTTLAndLRU(t *testing.T) {
 		recentHashes[i] = contentcache.HashBytes([]byte(strings.Repeat("r", i+1)))
 		meta.now = func() time.Time { return baseTime.Add(time.Duration(i) * time.Hour) }
 		_ = meta.Create(ctx, recentHashes[i], 100)
-		_ = b.Write(ctx, blobKey(recentHashes[i]), strings.NewReader(strings.Repeat("r", i+1)))
+		_ = b.Write(ctx, contentcache.BlobStorageKey(recentHashes[i]), strings.NewReader(strings.Repeat("r", i+1)))
 	}
 
 	cfg := Config{
@@ -265,7 +265,7 @@ func TestManagerForceExpire(t *testing.T) {
 		hash := contentcache.HashBytes([]byte(strings.Repeat("f", i+1)))
 		meta.now = func() time.Time { return baseTime.Add(-age) }
 		_ = meta.Create(ctx, hash, 100)
-		_ = b.Write(ctx, blobKey(hash), strings.NewReader(strings.Repeat("f", i+1)))
+		_ = b.Write(ctx, contentcache.BlobStorageKey(hash), strings.NewReader(strings.Repeat("f", i+1)))
 	}
 
 	cfg := Config{CheckInterval: time.Hour}

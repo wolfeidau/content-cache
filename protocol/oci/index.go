@@ -152,7 +152,7 @@ func (idx *Index) PutManifest(ctx context.Context, digest, mediaType string, has
 
 	key := encodeDigest(digest)
 	// Manifest content hash is a blob ref
-	refs := []string{"blake3:" + hash.String()}
+	refs := []string{contentcache.NewBlobRef(hash).String()}
 
 	return idx.manifestIndex.PutJSON(ctx, key, manifest, refs)
 }
@@ -188,7 +188,7 @@ func (idx *Index) PutBlob(ctx context.Context, digest string, hash contentcache.
 
 	key := encodeDigest(digest)
 	// Blob content hash is a blob ref
-	refs := []string{"blake3:" + hash.String()}
+	refs := []string{contentcache.NewBlobRef(hash).String()}
 
 	return idx.blobIndex.PutJSON(ctx, key, blob, refs)
 }

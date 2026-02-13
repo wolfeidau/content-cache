@@ -271,7 +271,7 @@ func TestIndexGemBlobRefTracking(t *testing.T) {
 	ctx := context.Background()
 
 	hash := contentcache.HashBytes([]byte("gem content"))
-	hashWithPrefix := "blake3:" + hash.String()
+	hashWithPrefix := contentcache.NewBlobRef(hash).String()
 
 	// Create the blob entry
 	require.NoError(t, db.PutBlob(ctx, &metadb.BlobEntry{
@@ -303,7 +303,7 @@ func TestIndexGemspecBlobRefTracking(t *testing.T) {
 	ctx := context.Background()
 
 	hash := contentcache.HashBytes([]byte("gemspec content"))
-	hashWithPrefix := "blake3:" + hash.String()
+	hashWithPrefix := contentcache.NewBlobRef(hash).String()
 
 	// Create the blob entry
 	require.NoError(t, db.PutBlob(ctx, &metadb.BlobEntry{

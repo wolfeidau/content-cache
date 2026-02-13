@@ -196,7 +196,7 @@ func collectBlobRefs(pkg *CachedPackage) []string {
 	for _, ver := range pkg.Versions {
 		if ver != nil && !ver.TarballHash.IsZero() {
 			// Format as blake3:<hex> for envelope validation
-			refs = append(refs, "blake3:"+ver.TarballHash.String())
+			refs = append(refs, contentcache.NewBlobRef(ver.TarballHash).String())
 		}
 	}
 	return refs

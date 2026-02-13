@@ -283,7 +283,7 @@ func (m *Manager) evictByLRU(ctx context.Context, blobs []*BlobMetadata) lruResu
 
 func (m *Manager) deleteBlob(ctx context.Context, hash contentcache.Hash) error {
 	// Delete the blob data
-	key := blobKey(hash)
+	key := contentcache.BlobStorageKey(hash)
 	if err := m.backend.Delete(ctx, key); err != nil {
 		return err
 	}

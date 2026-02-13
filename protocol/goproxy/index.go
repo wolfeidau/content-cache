@@ -236,7 +236,7 @@ func collectBlobRefs(mv *ModuleVersion) []string {
 	if mv == nil || mv.ZipHash.IsZero() {
 		return nil
 	}
-	return []string{"blake3:" + mv.ZipHash.String()}
+	return []string{contentcache.NewBlobRef(mv.ZipHash).String()}
 }
 
 // ModuleVersionJSON is the JSON representation stored in the info index.
