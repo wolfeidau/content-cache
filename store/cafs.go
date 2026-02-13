@@ -14,11 +14,6 @@ import (
 	"github.com/wolfeidau/content-cache/store/metadb"
 )
 
-const (
-	// blobPrefix is the prefix for blob storage keys used in List.
-	blobPrefix = "blobs"
-)
-
 // MetadataTracker tracks blob metadata for expiration.
 type MetadataTracker interface {
 	// Create records metadata for a new blob.
@@ -244,7 +239,7 @@ func (c *CAFS) Size(ctx context.Context, h contentcache.Hash) (int64, error) {
 
 // List returns all hashes in the store.
 func (c *CAFS) List(ctx context.Context) ([]contentcache.Hash, error) {
-	keys, err := c.backend.List(ctx, blobPrefix)
+	keys, err := c.backend.List(ctx, contentcache.BlobKeyPrefix)
 	if err != nil {
 		return nil, fmt.Errorf("listing blobs: %w", err)
 	}
@@ -260,7 +255,6 @@ func (c *CAFS) List(ctx context.Context) ([]contentcache.Hash, error) {
 	}
 	return hashes, nil
 }
-
 
 // PutFramed stores content with headers and returns its hash.
 func (c *CAFS) PutFramed(ctx context.Context, header *backend.BlobHeader, body io.Reader) (contentcache.Hash, error) {

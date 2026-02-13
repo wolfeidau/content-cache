@@ -10,7 +10,6 @@ type Algorithm string
 
 const (
 	AlgBLAKE3 Algorithm = "blake3"
-	AlgSHA256 Algorithm = "sha256"
 )
 
 // BlobRef is a content-addressed reference to a blob, combining an algorithm
@@ -47,8 +46,6 @@ func ParseBlobRef(s string) (BlobRef, error) {
 	switch Algorithm(algoStr) {
 	case AlgBLAKE3:
 		alg = AlgBLAKE3
-	case AlgSHA256:
-		alg = AlgSHA256
 	default:
 		return BlobRef{}, fmt.Errorf("unsupported algorithm %q in blob ref %q", algoStr, s)
 	}
@@ -73,13 +70,14 @@ func (r BlobRef) Hex() string {
 
 // Blob storage key layout.
 
-const blobKeyPrefix = "blobs"
+// BlobKeyPrefix is the storage key prefix for all blob objects.
+const BlobKeyPrefix = "blobs"
 
 // BlobStorageKey returns the backend storage key for a blob.
 // Format: blobs/{hex[:2]}/{hex}
 func BlobStorageKey(h Hash) string {
 	hex := h.String()
-	return blobKeyPrefix + "/" + hex[:2] + "/" + hex
+	return BlobKeyPrefix + "/" + hex[:2] + "/" + hex
 }
 
 // ParseBlobStorageKey extracts a Hash from a backend storage key.
@@ -91,13 +89,13 @@ func ParseBlobStorageKey(key string) (Hash, error) {
 	switch len(parts) {
 	case 3:
 		// blobs/xx/hex
-		if parts[0] != blobKeyPrefix {
+		if parts[0] != BlobKeyPrefix {
 			return Hash{}, fmt.Errorf("invalid blob key prefix: %s", key)
 		}
 		return ParseHash(parts[2])
 	case 4:
 		// blobs/xx/yy/hex (legacy 3-level)
-		if parts[0] != blobKeyPrefix {
+		if parts[0] != BlobKeyPrefix {
 			return Hash{}, fmt.Errorf("invalid blob key prefix: %s", key)
 		}
 		return ParseHash(parts[3])

@@ -39,18 +39,6 @@ func TestParseBlobRef(t *testing.T) {
 			wantHex: validHex,
 		},
 		{
-			name:    "sha256",
-			input:   "sha256:" + validHex,
-			wantAlg: AlgSHA256,
-			wantHex: validHex,
-		},
-		{
-			name:    "SHA256 uppercase",
-			input:   "SHA256:" + validHex,
-			wantAlg: AlgSHA256,
-			wantHex: validHex,
-		},
-		{
 			name:    "uppercase hex normalised",
 			input:   "blake3:" + upperHex,
 			wantAlg: AlgBLAKE3,

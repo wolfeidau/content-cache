@@ -248,4 +248,3 @@ func (m *Manager) deleteBlob(ctx context.Context, hash string) (int64, error) {
 
 	return size, nil
 }
-

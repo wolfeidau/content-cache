@@ -293,4 +293,3 @@ func (ts *TrackedStore) Size(ctx context.Context, hash contentcache.Hash) (int64
 func (ts *TrackedStore) Metadata() *MetadataStore {
 	return ts.metadata
 }
-
