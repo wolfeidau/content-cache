@@ -10,9 +10,30 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	contentcache "github.com/wolfeidau/content-cache"
 	"github.com/wolfeidau/content-cache/backend"
 	"github.com/wolfeidau/content-cache/store/metadb"
 )
+
+// testHash creates a valid 64-char hex hash string from a short seed.
+// The seed is zero-padded to 64 hex characters.
+func testHash(seed string) string {
+	h := seed
+	for len(h) < 64 {
+		h += "0"
+	}
+	return h[:64]
+}
+
+// testBlobKey returns the storage key for a test hash seed.
+func testBlobKey(seed string) string {
+	hex := testHash(seed)
+	h, err := contentcache.ParseHash(hex)
+	if err != nil {
+		panic("invalid test hash: " + err.Error())
+	}
+	return contentcache.BlobStorageKey(h)
+}
 
 func newTestDB(t *testing.T, opts ...metadb.BoltDBOption) *metadb.BoltDB {
 	t.Helper()
@@ -43,7 +64,7 @@ func TestManager_RunNow(t *testing.T) {
 	require.NoError(t, db2.PutMeta(ctx, "npm", "valid-pkg", []byte(`{"name":"valid"}`), 24*time.Hour))
 
 	require.NoError(t, db.PutBlob(ctx, &metadb.BlobEntry{
-		Hash:       "orphan123",
+		Hash:       testHash("aa"),
 		Size:       100,
 		CachedAt:   pastTime,
 		LastAccess: pastTime,
@@ -126,8 +147,12 @@ func TestManager_PhaseDeleteUnreferenced(t *testing.T) {
 	db := newTestDB(t, metadb.WithNow(func() time.Time { return baseTime }))
 	fs := newTestBackend(t)
 
+	hash1 := testHash("aa01")
+	hash2 := testHash("bb02")
+	hash3 := testHash("cc03")
+
 	require.NoError(t, db.PutBlob(ctx, &metadb.BlobEntry{
-		Hash:       "unreferenced1",
+		Hash:       hash1,
 		Size:       100,
 		CachedAt:   baseTime,
 		LastAccess: baseTime,
@@ -135,7 +160,7 @@ func TestManager_PhaseDeleteUnreferenced(t *testing.T) {
 	}))
 
 	require.NoError(t, db.PutBlob(ctx, &metadb.BlobEntry{
-		Hash:       "unreferenced2",
+		Hash:       hash2,
 		Size:       200,
 		CachedAt:   baseTime,
 		LastAccess: baseTime,
@@ -143,16 +168,16 @@ func TestManager_PhaseDeleteUnreferenced(t *testing.T) {
 	}))
 
 	require.NoError(t, db.PutBlob(ctx, &metadb.BlobEntry{
-		Hash:       "referenced",
+		Hash:       hash3,
 		Size:       300,
 		CachedAt:   baseTime,
 		LastAccess: baseTime,
 		RefCount:   1,
 	}))
 
-	key1 := blobKey("unreferenced1")
-	key2 := blobKey("unreferenced2")
-	key3 := blobKey("referenced")
+	key1 := testBlobKey("aa01")
+	key2 := testBlobKey("bb02")
+	key3 := testBlobKey("cc03")
 	require.NoError(t, fs.Write(ctx, key1, strings.NewReader("data1")))
 	require.NoError(t, fs.Write(ctx, key2, strings.NewReader("data2")))
 	require.NoError(t, fs.Write(ctx, key3, strings.NewReader("data3")))
@@ -167,13 +192,13 @@ func TestManager_PhaseDeleteUnreferenced(t *testing.T) {
 	assert.Equal(t, 2, result.UnreferencedBlobsDeleted)
 	assert.Equal(t, int64(300), result.BytesReclaimed)
 
-	_, err = db.GetBlob(ctx, "unreferenced1")
+	_, err = db.GetBlob(ctx, hash1)
 	require.ErrorIs(t, err, metadb.ErrNotFound)
 
-	_, err = db.GetBlob(ctx, "unreferenced2")
+	_, err = db.GetBlob(ctx, hash2)
 	require.ErrorIs(t, err, metadb.ErrNotFound)
 
-	_, err = db.GetBlob(ctx, "referenced")
+	_, err = db.GetBlob(ctx, hash3)
 	require.NoError(t, err)
 
 	exists, err := fs.Exists(ctx, key1)
@@ -194,8 +219,9 @@ func TestManager_PhaseLRUEviction(t *testing.T) {
 
 	blobData := bytes.Repeat([]byte("x"), 100)
 
-	for i := 0; i < 5; i++ {
-		hash := string(rune('a' + i))
+	lruSeeds := []string{"a0", "b0", "c0", "d0", "e0"}
+	for i, seed := range lruSeeds {
+		hash := testHash(seed)
 		currentTime = baseTime.Add(time.Duration(i) * time.Hour)
 		require.NoError(t, db.PutBlob(ctx, &metadb.BlobEntry{
 			Hash:       hash,
@@ -204,12 +230,12 @@ func TestManager_PhaseLRUEviction(t *testing.T) {
 			LastAccess: currentTime,
 			RefCount:   1,
 		}))
-		key := blobKey(hash)
+		key := testBlobKey(seed)
 		require.NoError(t, fs.Write(ctx, key, bytes.NewReader(blobData)))
 	}
 
-	for i := 0; i < 5; i++ {
-		hash := string(rune('a' + i))
+	for _, seed := range lruSeeds {
+		hash := testHash(seed)
 		require.NoError(t, db.DecrementBlobRef(ctx, hash))
 	}
 
@@ -262,10 +288,9 @@ func TestManager_PhaseDeleteOrphans(t *testing.T) {
 	db := newTestDB(t)
 	fs := newTestBackend(t)
 
-	hash1 := "aa00112233445566778899aabbccddeeff"
-	hash2 := "bb00112233445566778899aabbccddeeff"
-	key1 := blobKey(hash1)
-	key2 := blobKey(hash2)
+	hash2 := testHash("bb00112233445566778899aabbccddeeff")
+	key1 := testBlobKey("aa00112233445566778899aabbccddeeff")
+	key2 := testBlobKey("bb00112233445566778899aabbccddeeff")
 	require.NoError(t, fs.Write(ctx, key1, strings.NewReader("orphan data")))
 	require.NoError(t, fs.Write(ctx, key2, strings.NewReader("tracked data")))
 
@@ -332,23 +357,32 @@ func TestManager_DoubleStart(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestExtractHashFromKey(t *testing.T) {
+func TestParseBlobStorageKey(t *testing.T) {
+	validHash := testHash("ab01")
+
 	tests := []struct {
-		name string
-		key  string
-		want string
+		name    string
+		key     string
+		wantHex string
+		wantErr bool
 	}{
-		{"valid key", "blobs/ab/ab0123456789abcdef0123456789abcdef", "ab0123456789abcdef0123456789abcdef"},
-		{"empty string", "", ""},
-		{"too short", "blobs/ab/abc123", ""},
-		{"non-hex chars", "blobs/ab/tempfile.tmp.000000000000000000000000000000000", ""},
-		{"temp file", "blobs/.tmp-upload-123", ""},
-		{"directory-like", "blobs/ab/", ""},
+		{"valid 2-level key", "blobs/ab/" + validHash, validHash, false},
+		{"valid 3-level key (legacy)", "blobs/ab/01/" + validHash, validHash, false},
+		{"empty string", "", "", true},
+		{"too short hash", "blobs/ab/abc123", "", true},
+		{"non-hex chars", "blobs/ab/tempfile.tmp.000000000000000000000000000000000", "", true},
+		{"temp file", "blobs/.tmp-upload-123", "", true},
+		{"wrong prefix", "meta/ab/" + validHash, "", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := extractHashFromKey(tt.key)
-			assert.Equal(t, tt.want, got)
+			h, err := contentcache.ParseBlobStorageKey(tt.key)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tt.wantHex, h.String())
+			}
 		})
 	}
 }

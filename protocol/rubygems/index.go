@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	contentcache "github.com/wolfeidau/content-cache"
 	"github.com/wolfeidau/content-cache/store/metadb"
 )
 
@@ -230,7 +231,7 @@ func (idx *Index) PutGem(ctx context.Context, gem *CachedGem) error {
 	// Collect blob ref for the gem content
 	var refs []string
 	if !gem.ContentHash.IsZero() {
-		refs = []string{"blake3:" + gem.ContentHash.String()}
+		refs = []string{contentcache.NewBlobRef(gem.ContentHash).String()}
 	}
 
 	return idx.gemIndex.PutJSON(ctx, gem.Filename, gem, refs)
@@ -263,7 +264,7 @@ func (idx *Index) PutGemspec(ctx context.Context, spec *CachedGemspec) error {
 	// Collect blob ref for the gemspec content
 	var refs []string
 	if !spec.ContentHash.IsZero() {
-		refs = []string{"blake3:" + spec.ContentHash.String()}
+		refs = []string{contentcache.NewBlobRef(spec.ContentHash).String()}
 	}
 
 	return idx.gemspecIndex.PutJSON(ctx, filename, spec, refs)

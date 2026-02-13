@@ -3,6 +3,7 @@ package git
 import (
 	"context"
 
+	contentcache "github.com/wolfeidau/content-cache"
 	"github.com/wolfeidau/content-cache/store/metadb"
 )
 
@@ -40,7 +41,7 @@ func (idx *Index) DeleteCachedPack(ctx context.Context, cacheKey string) error {
 func (idx *Index) PutCachedPack(ctx context.Context, cacheKey string, pack *CachedPack) error {
 	var refs []string
 	if !pack.ResponseHash.IsZero() {
-		refs = append(refs, "blake3:"+pack.ResponseHash.String())
+		refs = append(refs, contentcache.NewBlobRef(pack.ResponseHash).String())
 	}
 	return idx.packIndex.PutJSON(ctx, cacheKey, pack, refs)
 }

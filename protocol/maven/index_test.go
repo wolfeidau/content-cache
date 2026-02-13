@@ -305,5 +305,5 @@ func TestCollectBlobRefs(t *testing.T) {
 	artifact.Hash = hash
 	refs := collectBlobRefs(artifact)
 	require.Len(t, refs, 1)
-	require.Equal(t, "blake3:"+hash.String(), refs[0])
+	require.Equal(t, contentcache.NewBlobRef(hash).String(), refs[0])
 }

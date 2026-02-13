@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 	"time"
 
 	contentcache "github.com/wolfeidau/content-cache"
@@ -16,7 +15,7 @@ import (
 )
 
 const (
-	// blobPrefix is the prefix for blob storage keys.
+	// blobPrefix is the prefix for blob storage keys used in List.
 	blobPrefix = "blobs"
 )
 
@@ -92,7 +91,7 @@ func (c *CAFS) PutWithResult(ctx context.Context, r io.Reader) (*PutResult, erro
 
 	hash := hr.Sum()
 	size := hr.BytesRead()
-	key := c.hashToKey(hash)
+	key := contentcache.BlobStorageKey(hash)
 
 	// Check if content already exists
 	exists, err := c.backend.Exists(ctx, key)
@@ -153,7 +152,7 @@ func (c *CAFS) PutBytes(ctx context.Context, data []byte) (contentcache.Hash, er
 
 // Get retrieves content by its hash.
 func (c *CAFS) Get(ctx context.Context, h contentcache.Hash) (io.ReadCloser, error) {
-	key := c.hashToKey(h)
+	key := contentcache.BlobStorageKey(h)
 	rc, err := c.backend.Read(ctx, key)
 	if err != nil {
 		if errors.Is(err, backend.ErrNotFound) {
@@ -189,13 +188,13 @@ func (c *CAFS) GetBytes(ctx context.Context, h contentcache.Hash) ([]byte, error
 
 // Has checks if content with the given hash exists.
 func (c *CAFS) Has(ctx context.Context, h contentcache.Hash) (bool, error) {
-	key := c.hashToKey(h)
+	key := contentcache.BlobStorageKey(h)
 	return c.backend.Exists(ctx, key)
 }
 
 // Delete removes content by its hash.
 func (c *CAFS) Delete(ctx context.Context, h contentcache.Hash) error {
-	key := c.hashToKey(h)
+	key := contentcache.BlobStorageKey(h)
 	if err := c.backend.Delete(ctx, key); err != nil {
 		return err
 	}
@@ -212,7 +211,7 @@ func (c *CAFS) Delete(ctx context.Context, h contentcache.Hash) error {
 
 // Size returns the size of content with the given hash.
 func (c *CAFS) Size(ctx context.Context, h contentcache.Hash) (int64, error) {
-	key := c.hashToKey(h)
+	key := contentcache.BlobStorageKey(h)
 
 	// Try the SizeAwareBackend interface first
 	if sb, ok := c.backend.(backend.SizeAwareBackend); ok {
@@ -252,7 +251,7 @@ func (c *CAFS) List(ctx context.Context) ([]contentcache.Hash, error) {
 
 	hashes := make([]contentcache.Hash, 0, len(keys))
 	for _, key := range keys {
-		h, err := c.keyToHash(key)
+		h, err := contentcache.ParseBlobStorageKey(key)
 		if err != nil {
 			// Skip invalid keys (shouldn't happen in normal use)
 			continue
@@ -262,22 +261,6 @@ func (c *CAFS) List(ctx context.Context) ([]contentcache.Hash, error) {
 	return hashes, nil
 }
 
-// hashToKey converts a hash to a storage key.
-// Format: blobs/{first-byte-hex}/{full-hash-hex}
-func (c *CAFS) hashToKey(h contentcache.Hash) string {
-	hex := h.String()
-	return fmt.Sprintf("%s/%s/%s", blobPrefix, hex[:2], hex)
-}
-
-// keyToHash extracts a hash from a storage key.
-func (c *CAFS) keyToHash(key string) (contentcache.Hash, error) {
-	// Expected format: blobs/xx/xxxxxxxx...
-	parts := strings.Split(key, "/")
-	if len(parts) != 3 || parts[0] != blobPrefix {
-		return contentcache.Hash{}, fmt.Errorf("invalid key format: %s", key)
-	}
-	return contentcache.ParseHash(parts[2])
-}
 
 // PutFramed stores content with headers and returns its hash.
 func (c *CAFS) PutFramed(ctx context.Context, header *backend.BlobHeader, body io.Reader) (contentcache.Hash, error) {
@@ -295,7 +278,7 @@ func (c *CAFS) PutFramed(ctx context.Context, header *backend.BlobHeader, body i
 
 	hash := hr.Sum()
 	size := hr.BytesRead()
-	key := c.hashToKey(hash)
+	key := contentcache.BlobStorageKey(hash)
 
 	exists, err := c.backend.Exists(ctx, key)
 	if err != nil {
@@ -351,7 +334,7 @@ func (c *CAFS) GetFramed(ctx context.Context, h contentcache.Hash) (*backend.Blo
 		return nil, nil, fmt.Errorf("backend does not support framed reads")
 	}
 
-	key := c.hashToKey(h)
+	key := contentcache.BlobStorageKey(h)
 	header, rc, err := fb.ReadFramed(ctx, key)
 	if err != nil {
 		if errors.Is(err, backend.ErrNotFound) {
