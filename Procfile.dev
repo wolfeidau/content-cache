@@ -1,0 +1,3 @@
+content-cache: go run ./cmd/content-cache serve --listen :9443 --storage ./cache --log-level debug --metrics-prometheus --tls-cert .cert/cert.pem --tls-key .cert/key.pem --git-allowed-hosts github.com
+prometheus:     prometheus --config.file=dev/prometheus.yml --storage.tsdb.path=dev/data/prometheus --web.listen-address=:9090 --web.config.file=dev/prometheus-web.yml --storage.tsdb.retention.time=1d
+grafana:        grafana server --config dev/grafana/grafana.ini --homepath $(brew --prefix grafana)/share/grafana

@@ -4,3 +4,4 @@
 dist/
 .envrc
 /.cert
+dev/data/

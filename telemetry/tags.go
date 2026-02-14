@@ -18,10 +18,12 @@ const (
 	CacheHit    CacheResult = "hit"
 	CacheMiss   CacheResult = "miss"
 	CacheBypass CacheResult = "bypass"
+	CacheNA     CacheResult = "na"
 )
 
 // RequestTags holds mutable request metadata that handlers can set for logging.
 type RequestTags struct {
+	Protocol    string
 	CacheResult CacheResult
 	Endpoint    string
 }
@@ -29,7 +31,7 @@ type RequestTags struct {
 // InjectTags creates a new request with an empty RequestTags in context.
 // Call this in middleware before handlers run.
 func InjectTags(r *http.Request) *http.Request {
-	tags := &RequestTags{}
+	tags := &RequestTags{CacheResult: CacheBypass}
 	return r.WithContext(context.WithValue(r.Context(), requestTagsKey, tags))
 }
 
@@ -46,6 +48,13 @@ func GetTags(r *http.Request) *RequestTags {
 func SetCacheResult(r *http.Request, result CacheResult) {
 	if tags := GetTags(r); tags != nil {
 		tags.CacheResult = result
+	}
+}
+
+// SetProtocol sets the protocol tag for metrics and logging.
+func SetProtocol(r *http.Request, protocol string) {
+	if tags := GetTags(r); tags != nil {
+		tags.Protocol = protocol
 	}
 }
 

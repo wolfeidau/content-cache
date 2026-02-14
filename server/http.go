@@ -568,75 +568,84 @@ func New(cfg Config) (*Server, error) {
 	return s, nil
 }
 
+// withProtocol returns middleware that sets the protocol tag on the request.
+func withProtocol(protocol string, h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		telemetry.SetProtocol(r, protocol)
+		h.ServeHTTP(w, r)
+	})
+}
+
 // registerRoutes sets up the HTTP routes.
 func (s *Server) registerRoutes(mux *http.ServeMux) {
-	// Health check
-	mux.HandleFunc("GET /health", s.handleHealth)
+	// Internal / admin endpoints (cache_result = "na")
+	internalHealth := withProtocol("internal", http.HandlerFunc(s.handleHealth))
+	internalStats := withProtocol("internal", http.HandlerFunc(s.handleStats))
+	internalMetrics := withProtocol("internal", telemetry.PrometheusHandler())
+	adminGCTrigger := withProtocol("internal", http.HandlerFunc(s.handleGCTrigger))
+	adminGCStatus := withProtocol("internal", http.HandlerFunc(s.handleGCStatus))
 
-	// Cache stats
-	mux.HandleFunc("GET /stats", s.handleStats)
-
-	// Prometheus metrics endpoint (returns 404 if not enabled)
-	mux.Handle("GET /metrics", telemetry.PrometheusHandler())
-
-	// Admin endpoints
-	mux.HandleFunc("POST /admin/gc", s.handleGCTrigger)
-	mux.HandleFunc("GET /admin/gc/status", s.handleGCStatus)
+	mux.Handle("GET /health", internalHealth)
+	mux.Handle("GET /stats", internalStats)
+	mux.Handle("GET /metrics", internalMetrics)
+	mux.Handle("POST /admin/gc", adminGCTrigger)
+	mux.Handle("GET /admin/gc/status", adminGCStatus)
 
 	// NPM registry endpoints
-	// The npm handler handles all paths under /npm/
-	mux.Handle("GET /npm/", http.StripPrefix("/npm", s.npm))
-	mux.Handle("HEAD /npm/", http.StripPrefix("/npm", s.npm))
+	npmHandler := withProtocol("npm", http.StripPrefix("/npm", s.npm))
+	mux.Handle("GET /npm/", npmHandler)
+	mux.Handle("HEAD /npm/", npmHandler)
 
 	// OCI registry endpoints
-	// The OCI handler handles all paths under /v2/
-	mux.Handle("GET /v2/", s.oci)
-	mux.Handle("HEAD /v2/", s.oci)
+	ociHandler := withProtocol("oci", s.oci)
+	mux.Handle("GET /v2/", ociHandler)
+	mux.Handle("HEAD /v2/", ociHandler)
 
 	// PyPI Simple API endpoints
-	// The pypi handler handles all paths under /pypi/
-	mux.Handle("GET /pypi/", http.StripPrefix("/pypi", s.pypi))
-	mux.Handle("HEAD /pypi/", http.StripPrefix("/pypi", s.pypi))
+	pypiHandler := withProtocol("pypi", http.StripPrefix("/pypi", s.pypi))
+	mux.Handle("GET /pypi/", pypiHandler)
+	mux.Handle("HEAD /pypi/", pypiHandler)
 
 	// Maven repository endpoints
-	// The maven handler handles all paths under /maven/
-	mux.Handle("GET /maven/", http.StripPrefix("/maven", s.maven))
-	mux.Handle("HEAD /maven/", http.StripPrefix("/maven", s.maven))
+	mavenHandler := withProtocol("maven", http.StripPrefix("/maven", s.maven))
+	mux.Handle("GET /maven/", mavenHandler)
+	mux.Handle("HEAD /maven/", mavenHandler)
 
 	// RubyGems registry endpoints
-	// The rubygems handler handles all paths under /rubygems/
-	mux.Handle("GET /rubygems/", http.StripPrefix("/rubygems", s.rubygems))
-	mux.Handle("HEAD /rubygems/", http.StripPrefix("/rubygems", s.rubygems))
+	rubygemsHandler := withProtocol("rubygems", http.StripPrefix("/rubygems", s.rubygems))
+	mux.Handle("GET /rubygems/", rubygemsHandler)
+	mux.Handle("HEAD /rubygems/", rubygemsHandler)
 
 	// Git proxy endpoints
-	// The git handler handles all paths under /git/
-	mux.Handle("GET /git/", http.StripPrefix("/git", s.git))
-	mux.Handle("POST /git/", http.StripPrefix("/git", s.git))
+	gitHandler := withProtocol("git", http.StripPrefix("/git", s.git))
+	mux.Handle("GET /git/", gitHandler)
+	mux.Handle("POST /git/", gitHandler)
 
 	// Sumdb proxy endpoints
 	// Handle both root and prefixed paths for sumdb
-	// Root: GOPROXY=http://localhost:8080 -> /sumdb/sum.golang.org/...
-	// Prefixed: GOPROXY=http://localhost:8080/goproxy -> /goproxy/sumdb/sum.golang.org/...
-	mux.Handle("GET /sumdb/", s.sumdb)
-	mux.Handle("GET /goproxy/sumdb/", http.StripPrefix("/goproxy", s.sumdb))
+	sumdbHandler := withProtocol("sumdb", s.sumdb)
+	mux.Handle("GET /sumdb/", sumdbHandler)
+	mux.Handle("GET /goproxy/sumdb/", withProtocol("sumdb", http.StripPrefix("/goproxy", s.sumdb)))
 
 	// GOPROXY endpoints
-	// The goproxy handler handles all paths under /goproxy/
-	mux.Handle("GET /goproxy/", http.StripPrefix("/goproxy", s.goproxy))
+	goproxyHandler := withProtocol("goproxy", http.StripPrefix("/goproxy", s.goproxy))
+	mux.Handle("GET /goproxy/", goproxyHandler)
 
 	// Also support serving at root for direct GOPROXY usage
 	// This allows: GOPROXY=http://localhost:8080
-	mux.Handle("GET /{module...}", s.goproxy)
+	mux.Handle("GET /{module...}", withProtocol("goproxy", s.goproxy))
 }
 
 // handleHealth handles health check requests.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	telemetry.SetCacheResult(r, telemetry.CacheNA)
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
 
 // handleStats handles cache statistics requests.
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	telemetry.SetCacheResult(r, telemetry.CacheNA)
 	if s.metaDB == nil {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"error":"metadb not enabled"}`))
@@ -654,6 +663,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGCTrigger(w http.ResponseWriter, r *http.Request) {
+	telemetry.SetCacheResult(r, telemetry.CacheNA)
 	if s.gcManager == nil {
 		http.Error(w, "GC not enabled", http.StatusServiceUnavailable)
 		return
@@ -668,6 +678,7 @@ func (s *Server) handleGCTrigger(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGCStatus(w http.ResponseWriter, r *http.Request) {
+	telemetry.SetCacheResult(r, telemetry.CacheNA)
 	if s.gcManager == nil {
 		http.Error(w, "GC not enabled", http.StatusServiceUnavailable)
 		return
@@ -691,15 +702,18 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		r = telemetry.InjectTags(r)
 		tags := telemetry.GetTags(r)
 
-		// Derive protocol from path (simple prefix matching)
-		protocol := deriveProtocol(r.URL.Path)
-
 		// Wrap response writer to capture status and bytes
 		wrapped := &responseWriter{ResponseWriter: w, status: http.StatusOK}
 
 		next.ServeHTTP(wrapped, r)
 
 		duration := time.Since(start)
+
+		// Resolve protocol: prefer tag set by WithProtocol middleware, fall back to path derivation
+		protocol := tags.Protocol
+		if protocol == "" {
+			protocol = deriveProtocol(r.URL.Path)
+		}
 
 		// Build log attributes
 		attrs := []any{
@@ -742,7 +756,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		s.logger.Info("http request", attrs...)
 
 		// Record OTel metrics
-		telemetry.RecordHTTP(r.Context(), r, protocol, wrapped.status, wrapped.bytesWritten, duration)
+		telemetry.RecordHTTP(r.Context(), r, wrapped.status, wrapped.bytesWritten, duration)
 	})
 }
 
