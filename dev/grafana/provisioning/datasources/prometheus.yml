@@ -4,8 +4,6 @@ datasources:
   - name: Prometheus
     type: prometheus
     access: proxy
-    url: https://localhost:9090
-    jsonData:
-      tlsSkipVerify: true
+    url: http://localhost:9090
     isDefault: true
     editable: true

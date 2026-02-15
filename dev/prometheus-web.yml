@@ -1,3 +1,0 @@
-tls_server_config:
-  cert_file: ../.cert/cert.pem
-  key_file: ../.cert/key.pem
