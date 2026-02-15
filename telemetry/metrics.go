@@ -2,7 +2,6 @@ package telemetry
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"sync"
 	"time"
@@ -22,9 +21,6 @@ import (
 const (
 	meterName = "github.com/wolfeidau/content-cache"
 )
-
-// ErrMetricsAlreadyInitialized is returned when InitMetrics is called more than once.
-var ErrMetricsAlreadyInitialized = errors.New("metrics already initialized")
 
 // MetricsConfig configures the metrics system.
 type MetricsConfig struct {
@@ -47,9 +43,10 @@ type MetricsConfig struct {
 
 // Metrics holds the OpenTelemetry metric instruments.
 type Metrics struct {
-	requestsTotal      metric.Int64Counter
-	responseBytesTotal metric.Int64Counter
-	requestDuration    metric.Float64Histogram
+	requestsTotal           metric.Int64Counter
+	responseBytesTotal      metric.Int64Counter
+	requestDuration         metric.Float64Histogram
+	requestsByEndpointTotal metric.Int64Counter
 
 	meterProvider *sdkmetric.MeterProvider
 	promHandler   http.Handler
@@ -63,20 +60,14 @@ var (
 
 // InitMetrics initializes the OpenTelemetry metrics system.
 // Returns a shutdown function that should be called on application exit.
-// Returns ErrMetricsAlreadyInitialized if called more than once.
+// Uses sync.Once to ensure single initialisation.
 func InitMetrics(ctx context.Context, cfg MetricsConfig) (shutdown func(context.Context) error, err error) {
-	var alreadyInitialized bool
-
 	initOnce.Do(func() {
 		initErr = doInitMetrics(ctx, cfg)
 	})
 
 	if initErr != nil {
 		return nil, initErr
-	}
-
-	if alreadyInitialized {
-		return nil, ErrMetricsAlreadyInitialized
 	}
 
 	return shutdownMetrics, nil
@@ -177,12 +168,22 @@ func doInitMetrics(ctx context.Context, cfg MetricsConfig) error {
 		return err
 	}
 
+	requestsByEndpointTotal, err := meter.Int64Counter(
+		"content_cache_http_requests_by_endpoint_total",
+		metric.WithDescription("Total number of HTTP requests by endpoint (detail metric)"),
+		metric.WithUnit("{request}"),
+	)
+	if err != nil {
+		return err
+	}
+
 	globalMetrics = &Metrics{
-		requestsTotal:      requestsTotal,
-		responseBytesTotal: responseBytesTotal,
-		requestDuration:    requestDuration,
-		meterProvider:      mp,
-		promHandler:        promHandler,
+		requestsTotal:           requestsTotal,
+		responseBytesTotal:      responseBytesTotal,
+		requestDuration:         requestDuration,
+		requestsByEndpointTotal: requestsByEndpointTotal,
+		meterProvider:           mp,
+		promHandler:             promHandler,
 	}
 
 	return nil
@@ -200,37 +201,49 @@ func shutdownMetrics(ctx context.Context) error {
 
 // RecordHTTP records HTTP request metrics.
 // Call this from the logging middleware after the request completes.
-func RecordHTTP(ctx context.Context, r *http.Request, protocol string, status int, bytesSent int64, duration time.Duration) {
+// Protocol and cache result are read from request tags set by middleware and handlers.
+func RecordHTTP(ctx context.Context, r *http.Request, status int, bytesSent int64, duration time.Duration) {
 	if globalMetrics == nil {
 		return
 	}
 
 	tags := GetTags(r)
 
-	// Build attributes
-	endpoint := "unknown"
-	cacheResult := "unknown"
+	protocol := "unknown"
+	cacheResult := string(CacheBypass)
+	endpoint := ""
 	if tags != nil {
-		if tags.Endpoint != "" {
-			endpoint = tags.Endpoint
+		if tags.Protocol != "" {
+			protocol = tags.Protocol
 		}
 		if tags.CacheResult != "" {
 			cacheResult = string(tags.CacheResult)
 		}
+		endpoint = tags.Endpoint
 	}
 
-	attrs := []attribute.KeyValue{
+	statusClass := StatusClass(status)
+
+	// Shared metrics: low cardinality {protocol, status_class, cache_result}
+	sharedAttrs := []attribute.KeyValue{
 		attribute.String("protocol", protocol),
-		attribute.String("endpoint", endpoint),
+		attribute.String("status_class", statusClass),
 		attribute.String("cache_result", cacheResult),
-		attribute.String("status_class", StatusClass(status)),
-		attribute.String("method", r.Method),
 	}
+	globalMetrics.requestsTotal.Add(ctx, 1, metric.WithAttributes(sharedAttrs...))
+	globalMetrics.responseBytesTotal.Add(ctx, bytesSent, metric.WithAttributes(sharedAttrs...))
+	globalMetrics.requestDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(sharedAttrs...))
 
-	// Record metrics
-	globalMetrics.requestsTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
-	globalMetrics.responseBytesTotal.Add(ctx, bytesSent, metric.WithAttributes(attrs...))
-	globalMetrics.requestDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(attrs...))
+	// Detail metric: higher cardinality, only when endpoint is set
+	if endpoint != "" {
+		detailAttrs := []attribute.KeyValue{
+			attribute.String("protocol", protocol),
+			attribute.String("endpoint", endpoint),
+			attribute.String("status_class", statusClass),
+			attribute.String("cache_result", cacheResult),
+		}
+		globalMetrics.requestsByEndpointTotal.Add(ctx, 1, metric.WithAttributes(detailAttrs...))
+	}
 }
 
 // PrometheusHandler returns the Prometheus metrics HTTP handler.
