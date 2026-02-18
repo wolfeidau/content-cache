@@ -512,6 +512,11 @@ func (b *BoltDB) TouchBlob(_ context.Context, hash string) error {
 		// Update access time
 		entry.LastAccess = b.now()
 
+		// Increment access count, capped at 3 (S3-FIFO 2-bit counter)
+		if entry.AccessCount < 3 {
+			entry.AccessCount++
+		}
+
 		data, err := json.Marshal(&entry)
 		if err != nil {
 			return fmt.Errorf("marshaling blob entry: %w", err)

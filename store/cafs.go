@@ -12,6 +12,7 @@ import (
 	contentcache "github.com/wolfeidau/content-cache"
 	"github.com/wolfeidau/content-cache/backend"
 	"github.com/wolfeidau/content-cache/store/metadb"
+	"github.com/wolfeidau/content-cache/telemetry"
 )
 
 // MetadataTracker tracks blob metadata for expiration.
@@ -101,6 +102,7 @@ func (c *CAFS) PutWithResult(ctx context.Context, r io.Reader) (*PutResult, erro
 		} else if c.metadata != nil {
 			_ = c.metadata.Touch(ctx, hash)
 		}
+		telemetry.RecordBlobWrite(ctx, "", size, false)
 		return &PutResult{
 			Hash:   hash,
 			Size:   size,
@@ -133,6 +135,7 @@ func (c *CAFS) PutWithResult(ctx context.Context, r io.Reader) (*PutResult, erro
 		_ = c.metadata.Create(ctx, hash, size)
 	}
 
+	telemetry.RecordBlobWrite(ctx, "", size, true)
 	return &PutResult{
 		Hash:   hash,
 		Size:   size,
@@ -283,6 +286,7 @@ func (c *CAFS) PutFramed(ctx context.Context, header *backend.BlobHeader, body i
 		if c.metaDB != nil {
 			_ = c.metaDB.TouchBlob(ctx, hash.String())
 		}
+		telemetry.RecordBlobWrite(ctx, "", size, false)
 		return hash, nil
 	}
 
@@ -318,6 +322,7 @@ func (c *CAFS) PutFramed(ctx context.Context, header *backend.BlobHeader, body i
 		}
 	}
 
+	telemetry.RecordBlobWrite(ctx, "", size, true)
 	return hash, nil
 }
 
