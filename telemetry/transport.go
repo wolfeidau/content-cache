@@ -38,11 +38,19 @@ func (t *InstrumentedTransport) RoundTrip(req *http.Request) (*http.Response, er
 		return nil, err
 	}
 
+	outcome := "success"
+	if resp.StatusCode >= 500 {
+		outcome = "5xx"
+	} else if resp.StatusCode >= 400 {
+		outcome = "4xx"
+	}
+
 	resp.Body = &instrumentedBody{
 		ReadCloser: resp.Body,
 		ctx:        req.Context(),
 		protocol:   t.protocol,
 		start:      start,
+		outcome:    outcome,
 	}
 
 	return resp, nil
@@ -55,6 +63,7 @@ type instrumentedBody struct {
 	protocol string
 	start    time.Time
 	bytes    int64
+	outcome  string
 	recorded bool
 }
 
@@ -67,7 +76,7 @@ func (b *instrumentedBody) Read(p []byte) (int, error) {
 func (b *instrumentedBody) Close() error {
 	if !b.recorded {
 		b.recorded = true
-		RecordUpstreamFetch(b.ctx, b.protocol, time.Since(b.start), b.bytes, "success")
+		RecordUpstreamFetch(b.ctx, b.protocol, time.Since(b.start), b.bytes, b.outcome)
 	}
 	return b.ReadCloser.Close()
 }

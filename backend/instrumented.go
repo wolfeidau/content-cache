@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -32,12 +33,11 @@ func (ib *InstrumentedBackend) Write(ctx context.Context, key string, r io.Reade
 func (ib *InstrumentedBackend) Read(ctx context.Context, key string) (io.ReadCloser, error) {
 	start := time.Now()
 	rc, err := ib.backend.Read(ctx, key)
-	outcome := outcomeFromError(err)
-	telemetry.RecordBackendOp(ctx, ib.name, "read", outcome, time.Since(start), 0)
 	if err != nil {
+		telemetry.RecordBackendOp(ctx, ib.name, "read", outcomeFromError(err), time.Since(start), 0)
 		return nil, err
 	}
-	return rc, nil
+	return &countingReadCloser{ReadCloser: rc, ctx: ctx, backend: ib.name, op: "read", start: start}, nil
 }
 
 func (ib *InstrumentedBackend) Delete(ctx context.Context, key string) error {
@@ -115,12 +115,11 @@ func (ib *InstrumentedBackend) ReadFramed(ctx context.Context, key string) (*Blo
 	}
 	start := time.Now()
 	header, rc, err := fb.ReadFramed(ctx, key)
-	outcome := outcomeFromError(err)
-	telemetry.RecordBackendOp(ctx, ib.name, "read_framed", outcome, time.Since(start), 0)
 	if err != nil {
+		telemetry.RecordBackendOp(ctx, ib.name, "read_framed", outcomeFromError(err), time.Since(start), 0)
 		return nil, nil, err
 	}
-	return header, rc, nil
+	return header, &countingReadCloser{ReadCloser: rc, ctx: ctx, backend: ib.name, op: "read_framed", start: start}, nil
 }
 
 // Unwrap returns the underlying backend.
@@ -132,7 +131,7 @@ func outcomeFromError(err error) string {
 	if err == nil {
 		return "success"
 	}
-	if err == ErrNotFound {
+	if errors.Is(err, ErrNotFound) {
 		return "not_found"
 	}
 	return "error"
@@ -150,8 +149,32 @@ func (cr *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// countingReadCloser wraps a ReadCloser, counts bytes read, and records the
+// backend metric on Close (capturing the full read duration and byte count).
+type countingReadCloser struct {
+	io.ReadCloser
+	ctx     context.Context
+	backend string
+	op      string
+	start   time.Time
+	n       int64
+}
+
+func (c *countingReadCloser) Read(p []byte) (int, error) {
+	n, err := c.ReadCloser.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+func (c *countingReadCloser) Close() error {
+	telemetry.RecordBackendOp(c.ctx, c.backend, c.op, "success", time.Since(c.start), c.n)
+	return c.ReadCloser.Close()
+}
+
 // Compile-time interface checks
 var (
 	_ Backend          = (*InstrumentedBackend)(nil)
 	_ SizeAwareBackend = (*InstrumentedBackend)(nil)
+	_ WriterBackend    = (*InstrumentedBackend)(nil)
+	_ FramedBackend    = (*InstrumentedBackend)(nil)
 )

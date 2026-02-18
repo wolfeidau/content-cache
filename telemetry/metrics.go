@@ -2,8 +2,8 @@ package telemetry
 
 import (
 	"context"
-	"fmt"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -400,7 +400,7 @@ func RecordBlobTouch(ctx context.Context, protocol string, newAccessCount int) {
 
 	attrs := []attribute.KeyValue{
 		attribute.String("protocol", protocol),
-		attribute.String("new_access_count", fmt.Sprintf("%d", newAccessCount)),
+		attribute.String("new_access_count", strconv.Itoa(newAccessCount)),
 	}
 	globalMetrics.blobTouchesTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
 }

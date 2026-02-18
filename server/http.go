@@ -545,7 +545,11 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("creating sumdb cache index: %w", err)
 	}
 	sumdbIndex := goproxy.NewSumdbIndex(sumdbEnvelope)
-	sumdbUpstreamOpts := []goproxy.SumdbUpstreamOption{}
+	sumdbHTTPClient := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: telemetry.NewInstrumentedTransport(nil, "sumdb"),
+	}
+	sumdbUpstreamOpts := []goproxy.SumdbUpstreamOption{goproxy.WithSumdbHTTPClient(sumdbHTTPClient)}
 	if cfg.UpstreamSumDB != "" {
 		sumdbUpstreamOpts = append(sumdbUpstreamOpts, goproxy.WithSumdbUpstreamURL(cfg.UpstreamSumDB))
 	}

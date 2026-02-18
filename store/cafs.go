@@ -98,11 +98,12 @@ func (c *CAFS) PutWithResult(ctx context.Context, r io.Reader) (*PutResult, erro
 	if exists {
 		// Update access time (best effort, don't fail the operation)
 		if c.metaDB != nil {
-			_ = c.metaDB.TouchBlob(ctx, hash.String())
+			newCount, _ := c.metaDB.TouchBlob(ctx, hash.String())
+			telemetry.RecordBlobTouch(ctx, telemetry.ProtocolFromContext(ctx), newCount)
 		} else if c.metadata != nil {
 			_ = c.metadata.Touch(ctx, hash)
 		}
-		telemetry.RecordBlobWrite(ctx, "", size, false)
+		telemetry.RecordBlobWrite(ctx, telemetry.ProtocolFromContext(ctx), size, false)
 		return &PutResult{
 			Hash:   hash,
 			Size:   size,
@@ -135,7 +136,7 @@ func (c *CAFS) PutWithResult(ctx context.Context, r io.Reader) (*PutResult, erro
 		_ = c.metadata.Create(ctx, hash, size)
 	}
 
-	telemetry.RecordBlobWrite(ctx, "", size, true)
+	telemetry.RecordBlobWrite(ctx, telemetry.ProtocolFromContext(ctx), size, true)
 	return &PutResult{
 		Hash:   hash,
 		Size:   size,
@@ -159,9 +160,16 @@ func (c *CAFS) Get(ctx context.Context, h contentcache.Hash) (io.ReadCloser, err
 		return nil, fmt.Errorf("reading content: %w", err)
 	}
 
-	// Update access time asynchronously (best effort)
+	// Update access time asynchronously (best effort).
+	// Capture protocol from the request context before spawning so the goroutine
+	// can emit the correct label even after the request context is cancelled.
 	if c.metaDB != nil {
-		go func() { _ = c.metaDB.TouchBlob(context.Background(), h.String()) }()
+		protocol := telemetry.ProtocolFromContext(ctx)
+		touchCtx := telemetry.WithProtocolContext(context.Background(), protocol)
+		go func() {
+			newCount, _ := c.metaDB.TouchBlob(touchCtx, h.String())
+			telemetry.RecordBlobTouch(touchCtx, protocol, newCount)
+		}()
 	} else if c.metadata != nil {
 		go func() { _ = c.metadata.Touch(context.Background(), h) }()
 	}
@@ -284,9 +292,10 @@ func (c *CAFS) PutFramed(ctx context.Context, header *backend.BlobHeader, body i
 
 	if exists {
 		if c.metaDB != nil {
-			_ = c.metaDB.TouchBlob(ctx, hash.String())
+			newCount, _ := c.metaDB.TouchBlob(ctx, hash.String())
+			telemetry.RecordBlobTouch(ctx, telemetry.ProtocolFromContext(ctx), newCount)
 		}
-		telemetry.RecordBlobWrite(ctx, "", size, false)
+		telemetry.RecordBlobWrite(ctx, telemetry.ProtocolFromContext(ctx), size, false)
 		return hash, nil
 	}
 
@@ -322,7 +331,7 @@ func (c *CAFS) PutFramed(ctx context.Context, header *backend.BlobHeader, body i
 		}
 	}
 
-	telemetry.RecordBlobWrite(ctx, "", size, true)
+	telemetry.RecordBlobWrite(ctx, telemetry.ProtocolFromContext(ctx), size, true)
 	return hash, nil
 }
 
@@ -343,7 +352,12 @@ func (c *CAFS) GetFramed(ctx context.Context, h contentcache.Hash) (*backend.Blo
 	}
 
 	if c.metaDB != nil {
-		go func() { _ = c.metaDB.TouchBlob(context.Background(), h.String()) }()
+		protocol := telemetry.ProtocolFromContext(ctx)
+		touchCtx := telemetry.WithProtocolContext(context.Background(), protocol)
+		go func() {
+			newCount, _ := c.metaDB.TouchBlob(touchCtx, h.String())
+			telemetry.RecordBlobTouch(touchCtx, protocol, newCount)
+		}()
 	}
 
 	return header, rc, nil
