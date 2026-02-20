@@ -5,11 +5,12 @@ import "time"
 
 // BlobEntry contains metadata about a stored blob.
 type BlobEntry struct {
-	Hash       string    `json:"hash"`
-	Size       int64     `json:"size"`
-	CachedAt   time.Time `json:"cached_at"`
-	LastAccess time.Time `json:"last_access"`
-	RefCount   int       `json:"ref_count"`
+	Hash        string    `json:"hash"`
+	Size        int64     `json:"size"`
+	CachedAt    time.Time `json:"cached_at"`
+	LastAccess  time.Time `json:"last_access"`
+	RefCount    int       `json:"ref_count"`
+	AccessCount int       `json:"access_count"`
 }
 
 // ExpiryEntry contains metadata about protocol entries for expiration tracking.

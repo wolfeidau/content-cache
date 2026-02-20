@@ -8,8 +8,12 @@ import (
 
 type contextKey string
 
-// requestTagsKey is the context key for request tags holder.
-const requestTagsKey contextKey = "request_tags"
+const (
+	// requestTagsKey is the context key for request tags holder.
+	requestTagsKey contextKey = "request_tags"
+	// protocolKey is the context key for propagating protocol to background goroutines.
+	protocolKey contextKey = "protocol"
+)
 
 // CacheResult represents the outcome of a cache lookup.
 type CacheResult string
@@ -63,4 +67,23 @@ func SetEndpoint(r *http.Request, endpoint string) {
 	if tags := GetTags(r); tags != nil {
 		tags.Endpoint = endpoint
 	}
+}
+
+// ProtocolFromContext retrieves the protocol from a context.
+// It checks both background contexts (set by WithProtocolContext) and
+// request contexts (set by SetProtocol middleware via InjectTags).
+func ProtocolFromContext(ctx context.Context) string {
+	if p, ok := ctx.Value(protocolKey).(string); ok && p != "" {
+		return p
+	}
+	if tags, ok := ctx.Value(requestTagsKey).(*RequestTags); ok && tags != nil {
+		return tags.Protocol
+	}
+	return ""
+}
+
+// WithProtocolContext returns a context with the protocol stored.
+// Use this to propagate the protocol into goroutines that outlive the request context.
+func WithProtocolContext(ctx context.Context, protocol string) context.Context {
+	return context.WithValue(ctx, protocolKey, protocol)
 }

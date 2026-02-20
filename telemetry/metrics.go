@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -47,6 +48,15 @@ type Metrics struct {
 	responseBytesTotal      metric.Int64Counter
 	requestDuration         metric.Float64Histogram
 	requestsByEndpointTotal metric.Int64Counter
+
+	blobWriteSize           metric.Float64Histogram
+	upstreamFetchDuration   metric.Float64Histogram
+	upstreamFetchTotal      metric.Int64Counter
+	upstreamFetchBytesTotal metric.Int64Counter
+	blobTouchesTotal        metric.Int64Counter
+	backendRequestDuration  metric.Float64Histogram
+	backendRequestsTotal    metric.Int64Counter
+	backendBytesTotal       metric.Int64Counter
 
 	meterProvider *sdkmetric.MeterProvider
 	promHandler   http.Handler
@@ -177,11 +187,94 @@ func doInitMetrics(ctx context.Context, cfg MetricsConfig) error {
 		return err
 	}
 
+	blobWriteSize, err := meter.Float64Histogram(
+		"content_cache_blob_write_size_bytes",
+		metric.WithDescription("Size of blobs written to storage"),
+		metric.WithUnit("By"),
+		metric.WithExplicitBucketBoundaries(128, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824),
+	)
+	if err != nil {
+		return err
+	}
+
+	upstreamFetchDuration, err := meter.Float64Histogram(
+		"content_cache_upstream_fetch_duration_seconds",
+		metric.WithDescription("Duration of upstream fetch requests"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 40, 60),
+	)
+	if err != nil {
+		return err
+	}
+
+	upstreamFetchTotal, err := meter.Int64Counter(
+		"content_cache_upstream_fetch_total",
+		metric.WithDescription("Total number of upstream fetch requests"),
+		metric.WithUnit("{request}"),
+	)
+	if err != nil {
+		return err
+	}
+
+	upstreamFetchBytesTotal, err := meter.Int64Counter(
+		"content_cache_upstream_fetch_bytes_total",
+		metric.WithDescription("Total bytes fetched from upstream"),
+		metric.WithUnit("By"),
+	)
+	if err != nil {
+		return err
+	}
+
+	blobTouchesTotal, err := meter.Int64Counter(
+		"content_cache_blob_touches_total",
+		metric.WithDescription("Total blob access count increments"),
+		metric.WithUnit("{touch}"),
+	)
+	if err != nil {
+		return err
+	}
+
+	backendRequestDuration, err := meter.Float64Histogram(
+		"content_cache_backend_request_duration_seconds",
+		metric.WithDescription("Duration of backend storage operations"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5),
+	)
+	if err != nil {
+		return err
+	}
+
+	backendRequestsTotal, err := meter.Int64Counter(
+		"content_cache_backend_requests_total",
+		metric.WithDescription("Total number of backend storage operations"),
+		metric.WithUnit("{request}"),
+	)
+	if err != nil {
+		return err
+	}
+
+	backendBytesTotal, err := meter.Int64Counter(
+		"content_cache_backend_bytes_total",
+		metric.WithDescription("Total bytes transferred in backend operations"),
+		metric.WithUnit("By"),
+	)
+	if err != nil {
+		return err
+	}
+
 	globalMetrics = &Metrics{
 		requestsTotal:           requestsTotal,
 		responseBytesTotal:      responseBytesTotal,
 		requestDuration:         requestDuration,
 		requestsByEndpointTotal: requestsByEndpointTotal,
+		blobWriteSize:           blobWriteSize,
+		upstreamFetchDuration:   upstreamFetchDuration,
+		upstreamFetchTotal:      upstreamFetchTotal,
+		upstreamFetchBytesTotal: upstreamFetchBytesTotal,
+		blobTouchesTotal:        blobTouchesTotal,
+		backendRequestDuration:  backendRequestDuration,
+		backendRequestsTotal:    backendRequestsTotal,
+		backendBytesTotal:       backendBytesTotal,
 		meterProvider:           mp,
 		promHandler:             promHandler,
 	}
@@ -244,6 +337,72 @@ func RecordHTTP(ctx context.Context, r *http.Request, status int, bytesSent int6
 		}
 		globalMetrics.requestsByEndpointTotal.Add(ctx, 1, metric.WithAttributes(detailAttrs...))
 	}
+}
+
+// RecordBackendOp records backend operation metrics.
+func RecordBackendOp(ctx context.Context, backend, op, outcome string, duration time.Duration, bytes int64) {
+	if globalMetrics == nil {
+		return
+	}
+
+	attrs := []attribute.KeyValue{
+		attribute.String("backend", backend),
+		attribute.String("op", op),
+		attribute.String("outcome", outcome),
+	}
+	globalMetrics.backendRequestsTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
+	globalMetrics.backendRequestDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(attrs...))
+	if bytes > 0 {
+		globalMetrics.backendBytesTotal.Add(ctx, bytes, metric.WithAttributes(attrs...))
+	}
+}
+
+// RecordBlobWrite records a blob write with its size.
+func RecordBlobWrite(ctx context.Context, protocol string, size int64, isNew bool) {
+	if globalMetrics == nil {
+		return
+	}
+
+	result := "exists"
+	if isNew {
+		result = "new"
+	}
+
+	attrs := []attribute.KeyValue{
+		attribute.String("protocol", protocol),
+		attribute.String("result", result),
+	}
+	globalMetrics.blobWriteSize.Record(ctx, float64(size), metric.WithAttributes(attrs...))
+}
+
+// RecordUpstreamFetch records an upstream fetch request.
+func RecordUpstreamFetch(ctx context.Context, protocol string, duration time.Duration, bytesRead int64, outcome string) {
+	if globalMetrics == nil {
+		return
+	}
+
+	attrs := []attribute.KeyValue{
+		attribute.String("protocol", protocol),
+		attribute.String("outcome", outcome),
+	}
+	globalMetrics.upstreamFetchDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(attrs...))
+	globalMetrics.upstreamFetchTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
+	if bytesRead > 0 {
+		globalMetrics.upstreamFetchBytesTotal.Add(ctx, bytesRead, metric.WithAttributes(attrs...))
+	}
+}
+
+// RecordBlobTouch records a blob access count increment.
+func RecordBlobTouch(ctx context.Context, protocol string, newAccessCount int) {
+	if globalMetrics == nil {
+		return
+	}
+
+	attrs := []attribute.KeyValue{
+		attribute.String("protocol", protocol),
+		attribute.String("new_access_count", strconv.Itoa(newAccessCount)),
+	}
+	globalMetrics.blobTouchesTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // PrometheusHandler returns the Prometheus metrics HTTP handler.

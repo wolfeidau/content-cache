@@ -136,7 +136,8 @@ func TestBlobAccessIndex_SingleEntryAfterRepeatedTouches(t *testing.T) {
 	// Touch the blob 10 times, advancing time each time
 	for i := 0; i < 10; i++ {
 		currentTime = currentTime.Add(time.Hour)
-		require.NoError(t, db.TouchBlob(ctx, hash))
+		_, err := db.TouchBlob(ctx, hash)
+		require.NoError(t, err)
 	}
 
 	// Verify index consistency
@@ -282,11 +283,14 @@ func TestIndexConsistency_AfterMixedOperations(t *testing.T) {
 
 	// Touch some blobs
 	currentTime = currentTime.Add(time.Hour)
-	require.NoError(t, db.TouchBlob(ctx, "blob1"))
+	_, touchErr := db.TouchBlob(ctx, "blob1")
+	require.NoError(t, touchErr)
 	currentTime = currentTime.Add(time.Hour)
-	require.NoError(t, db.TouchBlob(ctx, "blob1"))
+	_, touchErr = db.TouchBlob(ctx, "blob1")
+	require.NoError(t, touchErr)
 	currentTime = currentTime.Add(time.Hour)
-	require.NoError(t, db.TouchBlob(ctx, "blob2"))
+	_, touchErr = db.TouchBlob(ctx, "blob2")
+	require.NoError(t, touchErr)
 
 	// Delete some entries
 	require.NoError(t, db.DeleteMeta(ctx, "npm", "pkg2"))

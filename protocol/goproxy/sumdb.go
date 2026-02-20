@@ -249,6 +249,13 @@ func WithSumdbUpstreamURL(url string) SumdbUpstreamOption {
 	}
 }
 
+// WithSumdbHTTPClient sets a custom HTTP client for the sumdb upstream.
+func WithSumdbHTTPClient(client *http.Client) SumdbUpstreamOption {
+	return func(u *SumdbUpstream) {
+		u.client = client
+	}
+}
+
 // NewSumdbUpstream creates a new upstream sumdb client.
 func NewSumdbUpstream(opts ...SumdbUpstreamOption) *SumdbUpstream {
 	u := &SumdbUpstream{

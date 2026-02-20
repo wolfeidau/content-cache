@@ -76,7 +76,7 @@ func BenchmarkTouchBlobUpdate(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				currentTime = baseTime.Add(time.Duration(n+i) * time.Minute)
 				hash := fmt.Sprintf("hash-%d", i%n)
-				if err := db.TouchBlob(ctx, hash); err != nil {
+				if _, err := db.TouchBlob(ctx, hash); err != nil {
 					b.Fatal(err)
 				}
 			}

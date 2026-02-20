@@ -145,12 +145,43 @@ func TestBoltDB_BlobOperations(t *testing.T) {
 		require.NoError(t, db.PutBlob(ctx, entry))
 
 		currentTime = updatedTime
-		err := db.TouchBlob(ctx, "hash3")
+		newCount, err := db.TouchBlob(ctx, "hash3")
 		require.NoError(t, err)
+		assert.Equal(t, 1, newCount)
 
 		got, err := db.GetBlob(ctx, "hash3")
 		require.NoError(t, err)
 		assert.Equal(t, updatedTime, got.LastAccess)
+	})
+
+	t.Run("TouchBlob increments AccessCount and caps at 3", func(t *testing.T) {
+		db := newTestBoltDB(t)
+
+		now := time.Now()
+		entry := &BlobEntry{Hash: "countblob", Size: 50, CachedAt: now, LastAccess: now}
+		require.NoError(t, db.PutBlob(ctx, entry))
+
+		// First four touches: count goes 0→1→2→3→3 (capped)
+		for i := 1; i <= 4; i++ {
+			newCount, err := db.TouchBlob(ctx, "countblob")
+			require.NoError(t, err)
+			expected := i
+			if expected > 3 {
+				expected = 3
+			}
+			assert.Equal(t, expected, newCount, "touch %d", i)
+		}
+
+		got, err := db.GetBlob(ctx, "countblob")
+		require.NoError(t, err)
+		assert.Equal(t, 3, got.AccessCount)
+	})
+
+	t.Run("TouchBlob on missing blob returns ErrNotFound", func(t *testing.T) {
+		db := newTestBoltDB(t)
+
+		_, err := db.TouchBlob(ctx, "nosuchblob")
+		require.ErrorIs(t, err, ErrNotFound)
 	})
 
 	t.Run("DeleteBlob removes entry", func(t *testing.T) {
@@ -319,7 +350,7 @@ func TestBoltDB_ConcurrentAccess(t *testing.T) {
 
 				_, _ = db.GetBlob(ctx, hash)
 
-				_ = db.TouchBlob(ctx, hash)
+				_, _ = db.TouchBlob(ctx, hash)
 			}
 		}(i)
 	}

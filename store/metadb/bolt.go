@@ -491,9 +491,11 @@ func (b *BoltDB) DecrementBlobRef(ctx context.Context, hash string) error {
 	})
 }
 
-// TouchBlob updates the last access time for a blob.
-func (b *BoltDB) TouchBlob(_ context.Context, hash string) error {
-	return b.db.Update(func(tx *bbolt.Tx) error {
+// TouchBlob updates the last access time for a blob and increments the access counter.
+// Returns the new access count (capped at 3 for S3-FIFO), or 0 if the blob was not found.
+func (b *BoltDB) TouchBlob(_ context.Context, hash string) (int, error) {
+	var newCount int
+	err := b.db.Update(func(tx *bbolt.Tx) error {
 		hashBucket := tx.Bucket(bucketBlobsByHash)
 		if hashBucket == nil {
 			return ErrNotFound
@@ -512,6 +514,12 @@ func (b *BoltDB) TouchBlob(_ context.Context, hash string) error {
 		// Update access time
 		entry.LastAccess = b.now()
 
+		// Increment access count, capped at 3 (S3-FIFO 2-bit counter)
+		if entry.AccessCount < 3 {
+			entry.AccessCount++
+		}
+		newCount = entry.AccessCount
+
 		data, err := json.Marshal(&entry)
 		if err != nil {
 			return fmt.Errorf("marshaling blob entry: %w", err)
@@ -528,6 +536,7 @@ func (b *BoltDB) TouchBlob(_ context.Context, hash string) error {
 
 		return nil
 	})
+	return newCount, err
 }
 
 // TotalBlobSize returns the total size of all blobs.

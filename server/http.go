@@ -180,6 +180,7 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating filesystem backend: %w", err)
 	}
+	instrumentedBackend := backend.NewInstrumentedBackend(fsBackend, "filesystem")
 
 	// Initialize metadata database
 	metaDB := metadb.New()
@@ -208,11 +209,11 @@ func New(cfg Config) (*Server, error) {
 			MaxCacheBytes: cfg.CacheMaxSize,
 			BatchSize:     1000,
 		}
-		gcManager = gc.New(metaDB, fsBackend, gcConfig, gcMetrics, cfg.Logger.With("component", "gc"))
+		gcManager = gc.New(metaDB, instrumentedBackend, gcConfig, gcMetrics, cfg.Logger.With("component", "gc"))
 	}
 
 	// Initialize CAFS store with MetaDB tracking
-	cafsStore := store.NewCAFS(fsBackend, store.WithMetaDB(metaDB))
+	cafsStore := store.NewCAFS(instrumentedBackend, store.WithMetaDB(metaDB))
 
 	// Get BoltDB for EnvelopeIndex creation (used by all protocols)
 	boltDB, ok := metaDB.(*metadb.BoltDB)
@@ -222,6 +223,35 @@ func New(cfg Config) (*Server, error) {
 
 	// Create shared downloader for singleflight deduplication
 	dl := download.New()
+
+	// Create instrumented HTTP clients for upstream fetch metrics
+	goHTTPClient := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: telemetry.NewInstrumentedTransport(nil, "goproxy"),
+	}
+	npmHTTPClient := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: telemetry.NewInstrumentedTransport(nil, "npm"),
+	}
+	ociHTTPClient := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: telemetry.NewInstrumentedTransport(nil, "oci"),
+	}
+	pypiHTTPClient := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: telemetry.NewInstrumentedTransport(nil, "pypi"),
+	}
+	mavenHTTPClient := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: telemetry.NewInstrumentedTransport(nil, "maven"),
+	}
+	rubygemsHTTPClient := &http.Client{
+		Timeout:   5 * time.Minute,
+		Transport: telemetry.NewInstrumentedTransport(nil, "rubygems"),
+	}
+	gitHTTPClient := &http.Client{
+		Transport: telemetry.NewInstrumentedTransport(nil, "git"),
+	}
 
 	// Initialize goproxy components using metadb EnvelopeIndex
 	goproxyModIndex, err := metadb.NewEnvelopeIndex(boltDB, "goproxy", "mod", 24*time.Hour)
@@ -237,7 +267,7 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("creating goproxy list index: %w", err)
 	}
 	goIndex := goproxy.NewIndex(goproxyModIndex, goproxyInfoIndex, goproxyListIndex)
-	goUpstream := goproxy.NewUpstream(goproxy.WithUpstreamURL(cfg.UpstreamGoProxy))
+	goUpstream := goproxy.NewUpstream(goproxy.WithUpstreamURL(cfg.UpstreamGoProxy), goproxy.WithHTTPClient(goHTTPClient))
 	goHandler := goproxy.NewHandler(
 		goIndex,
 		cafsStore,
@@ -264,7 +294,7 @@ func New(cfg Config) (*Server, error) {
 		// Build NPM router from credentials file routes.
 		npmRoutes := make([]npm.Route, 0, len(cfg.Credentials.NPM.Routes))
 		for _, r := range cfg.Credentials.NPM.Routes {
-			upOpts := []npm.UpstreamOption{}
+			upOpts := []npm.UpstreamOption{npm.WithHTTPClient(npmHTTPClient)}
 			if r.RegistryURL != "" {
 				upOpts = append(upOpts, npm.WithRegistryURL(r.RegistryURL))
 			}
@@ -284,7 +314,7 @@ func New(cfg Config) (*Server, error) {
 		cfg.Logger.Info("npm routing configured", "routes", len(npmRoutes))
 	} else {
 		// Default single upstream, no auth.
-		npmUpstreamOpts := []npm.UpstreamOption{}
+		npmUpstreamOpts := []npm.UpstreamOption{npm.WithHTTPClient(npmHTTPClient)}
 		if cfg.UpstreamNPMRegistry != "" {
 			npmUpstreamOpts = append(npmUpstreamOpts, npm.WithRegistryURL(cfg.UpstreamNPMRegistry))
 		}
@@ -314,7 +344,7 @@ func New(cfg Config) (*Server, error) {
 			cfg.Logger.Info("credentials file defines OCI registries, ignoring --oci-upstream and --oci-prefix CLI flags")
 		}
 		for _, reg := range cfg.Credentials.OCI.Registries {
-			upOpts := []oci.UpstreamOption{}
+			upOpts := []oci.UpstreamOption{oci.WithHTTPClient(ociHTTPClient)}
 			if reg.Upstream != "" {
 				upOpts = append(upOpts, oci.WithRegistryURL(reg.Upstream))
 			}
@@ -337,7 +367,7 @@ func New(cfg Config) (*Server, error) {
 		cfg.Logger.Info("oci routing configured from credentials file", "registries", len(ociRegistries))
 	} else {
 		// Default single registry from CLI flags, no auth.
-		ociUpstreamOpts := []oci.UpstreamOption{}
+		ociUpstreamOpts := []oci.UpstreamOption{oci.WithHTTPClient(ociHTTPClient)}
 		if cfg.UpstreamOCIRegistry != "" {
 			ociUpstreamOpts = append(ociUpstreamOpts, oci.WithRegistryURL(cfg.UpstreamOCIRegistry))
 		}
@@ -371,7 +401,7 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("creating pypi project index: %w", err)
 	}
 	pypiIndex := pypi.NewIndex(pypiProjectIndex)
-	pypiUpstreamOpts := []pypi.UpstreamOption{}
+	pypiUpstreamOpts := []pypi.UpstreamOption{pypi.WithHTTPClient(pypiHTTPClient)}
 	if cfg.UpstreamPyPI != "" {
 		pypiUpstreamOpts = append(pypiUpstreamOpts, pypi.WithSimpleURL(cfg.UpstreamPyPI))
 	}
@@ -400,7 +430,7 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("creating maven artifact index: %w", err)
 	}
 	mavenIndex := maven.NewIndex(mavenMetadataIndex, mavenArtifactIndex)
-	mavenUpstreamOpts := []maven.UpstreamOption{}
+	mavenUpstreamOpts := []maven.UpstreamOption{maven.WithHTTPClient(mavenHTTPClient)}
 	if cfg.UpstreamMaven != "" {
 		mavenUpstreamOpts = append(mavenUpstreamOpts, maven.WithRepositoryURL(cfg.UpstreamMaven))
 	}
@@ -447,7 +477,7 @@ func New(cfg Config) (*Server, error) {
 		rubygemsGemIndex,
 		rubygemsGemspecIndex,
 	)
-	rubygemsUpstreamOpts := []rubygems.UpstreamOption{}
+	rubygemsUpstreamOpts := []rubygems.UpstreamOption{rubygems.WithHTTPClient(rubygemsHTTPClient)}
 	if cfg.UpstreamRubyGems != "" {
 		rubygemsUpstreamOpts = append(rubygemsUpstreamOpts, rubygems.WithRegistryURL(cfg.UpstreamRubyGems))
 	}
@@ -478,6 +508,7 @@ func New(cfg Config) (*Server, error) {
 		for _, r := range cfg.Credentials.Git.Routes {
 			upOpts := []git.UpstreamOption{
 				git.WithUpstreamLogger(cfg.Logger.With("component", "git")),
+				git.WithHTTPClient(gitHTTPClient),
 			}
 			if r.Username != "" {
 				upOpts = append(upOpts, git.WithBasicAuth(r.Username, r.Password))
@@ -494,7 +525,7 @@ func New(cfg Config) (*Server, error) {
 		gitHandlerOpts = append(gitHandlerOpts, git.WithRouter(gitRouter))
 		cfg.Logger.Info("git routing configured", "routes", len(gitRoutes))
 	} else {
-		gitUpstream := git.NewUpstream(git.WithUpstreamLogger(cfg.Logger.With("component", "git")))
+		gitUpstream := git.NewUpstream(git.WithUpstreamLogger(cfg.Logger.With("component", "git")), git.WithHTTPClient(gitHTTPClient))
 		gitHandlerOpts = append(gitHandlerOpts, git.WithUpstream(gitUpstream))
 	}
 	if len(cfg.GitAllowedHosts) > 0 {
@@ -514,7 +545,11 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("creating sumdb cache index: %w", err)
 	}
 	sumdbIndex := goproxy.NewSumdbIndex(sumdbEnvelope)
-	sumdbUpstreamOpts := []goproxy.SumdbUpstreamOption{}
+	sumdbHTTPClient := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: telemetry.NewInstrumentedTransport(nil, "sumdb"),
+	}
+	sumdbUpstreamOpts := []goproxy.SumdbUpstreamOption{goproxy.WithSumdbHTTPClient(sumdbHTTPClient)}
 	if cfg.UpstreamSumDB != "" {
 		sumdbUpstreamOpts = append(sumdbUpstreamOpts, goproxy.WithSumdbUpstreamURL(cfg.UpstreamSumDB))
 	}
@@ -531,7 +566,7 @@ func New(cfg Config) (*Server, error) {
 	s := &Server{
 		config:        cfg,
 		logger:        cfg.Logger,
-		backend:       fsBackend,
+		backend:       instrumentedBackend,
 		store:         cafsStore,
 		index:         goIndex,
 		goproxy:       goHandler,
