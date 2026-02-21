@@ -19,6 +19,29 @@ content-cache acts as a local caching proxy that:
 
 Based on [FIFO Queues are All You Need for Cache Eviction (CMU-CS-24-149)](https://www.pdl.cmu.edu/ftp/Storage/CMU-CS-24-149-juncheny.pdf).
 
+S3-FIFO achieves lower miss ratios than LRU by keeping one-hit-wonders out of the main cache. It uses three structures:
+
+- **Small queue (10% of `--cache-max-size`)** — new blobs enter here. A blob that is accessed again while in this queue is promoted to main; one that is never re-accessed is evicted and recorded in the ghost set.
+- **Main queue (90%)** — hot blobs. Each eviction candidate gets a second-chance pass for every cache hit it received since its last eviction check, then is evicted cold.
+- **Ghost set** — a compact in-memory + on-disk set of recently evicted hashes (no blob data). When a client re-requests an evicted blob it is admitted directly to main, bypassing the small queue probation period.
+
+### Memory and disk overhead
+
+The ghost set stores only hashes (32 bytes each), not blob data. Its size is automatically capped at the current number of entries in the main queue. For a cache holding 100,000 blobs this amounts to roughly 3 MB of ghost state persisted in bbolt alongside the queue metadata.
+
+### Configuration
+
+Size eviction activates automatically when `--cache-max-size` is set. The GC continues to run in parallel and handles TTL expiry, unreferenced blobs, and orphan cleanup — S3-FIFO handles only the size limit.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--cache-max-size` | `10737418240` (10 GB) | Total byte limit for cached blobs. Set to `0` to disable size eviction. |
+| `--gc-interval` | `1h` | How often the background eviction safety-net tick fires. Real eviction is signal-driven and happens inline after each cache write. |
+
+### Startup behaviour
+
+Queue state is persisted in bbolt, so eviction is warm across restarts — the manager recomputes byte totals from the persisted queue on startup and resumes where it left off. Blobs that were written before S3-FIFO was first enabled (e.g. files left on disk from a previous deployment) will not appear in any queue and will not be subject to size eviction until they are naturally expired by TTL or cleaned up by GC.
+
 ## Quick Start
 
 ```bash
