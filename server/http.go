@@ -200,8 +200,11 @@ func New(cfg Config) (*Server, error) {
 	var s3fifoMgr *s3fifo.Manager
 	if cfg.CacheMaxSize > 0 {
 		s3fifoCfg := s3fifo.Config{
-			MaxSize:       cfg.CacheMaxSize,
-			CheckInterval: cfg.ExpiryCheckInterval,
+			MaxSize: cfg.CacheMaxSize,
+			// CheckInterval is a safety-net ticker; real eviction is signal-driven
+			// via Admit. Align the tick with the GC cycle so background maintenance
+			// runs at a consistent cadence.
+			CheckInterval: cfg.GCInterval,
 			Logger:        cfg.Logger.With("component", "s3fifo"),
 		}
 		var s3err error

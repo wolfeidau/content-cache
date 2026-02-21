@@ -304,18 +304,26 @@ func txPopTail(tx *bbolt.Tx, fwdName, revName []byte) (string, error) {
 
 // queueFwdName returns the forward bucket name (seq→hash) for a named queue.
 func queueFwdName(queue string) []byte {
-	if queue == QueueSmall {
+	switch queue {
+	case QueueSmall:
 		return bucketSmall
+	case QueueMain:
+		return bucketMain
+	default:
+		panic("s3fifo: unknown queue name: " + queue)
 	}
-	return bucketMain
 }
 
 // queueRevName returns the reverse bucket name (hash→seq) for a named queue.
 func queueRevName(queue string) []byte {
-	if queue == QueueSmall {
+	switch queue {
+	case QueueSmall:
 		return bucketSmallByHash
+	case QueueMain:
+		return bucketMainByHash
+	default:
+		panic("s3fifo: unknown queue name: " + queue)
 	}
-	return bucketMainByHash
 }
 
 // encodeSeq encodes a uint64 sequence number as a big-endian 8-byte slice

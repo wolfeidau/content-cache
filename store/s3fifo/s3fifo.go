@@ -230,7 +230,10 @@ func (m *Manager) maybeEvict(ctx context.Context) {
 		smallLen, _ := m.queues.Len(QueueSmall)
 		mainLen, _ := m.queues.Len(QueueMain)
 
-		evicted := false
+		// smallActed is true when the small queue took any action (eviction or
+		// promotion). Either way, we skip the main queue this pass — promotions
+		// don't free bytes immediately but do make progress toward balance.
+		smallActed := false
 
 		// Prefer evicting from small when it exceeds its quota.
 		if m.smallBytes > smallTarget && smallLen > 0 {
@@ -238,21 +241,21 @@ func (m *Manager) maybeEvict(ctx context.Context) {
 			if err != nil {
 				m.logger.Warn("s3fifo: evict from small error", "error", err)
 			} else if !skipped {
-				evicted = true
+				smallActed = true
 			}
 		}
 
 		// If small couldn't contribute (empty or all pinned), try main.
-		if !evicted && mainLen > 0 {
+		if !smallActed && mainLen > 0 {
 			skipped, err := m.evictFromMain(ctx)
 			if err != nil {
 				m.logger.Warn("s3fifo: evict from main error", "error", err)
 			} else if !skipped {
-				evicted = true
+				smallActed = true
 			}
 		}
 
-		if !evicted {
+		if !smallActed {
 			m.logger.Warn("s3fifo: all eviction candidates pinned, allowing temporary overrun",
 				"over_by", m.smallBytes+m.mainBytes-m.config.MaxSize,
 			)
