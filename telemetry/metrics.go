@@ -16,7 +16,7 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/resource"
-	semconv "go.opentelemetry.io/otel/semconv/v1.37.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.39.0"
 )
 
 const (
@@ -57,6 +57,26 @@ type Metrics struct {
 	backendRequestDuration  metric.Float64Histogram
 	backendRequestsTotal    metric.Int64Counter
 	backendBytesTotal       metric.Int64Counter
+
+	// S3-FIFO eviction metrics
+	s3fifoAdmissionsTotal          metric.Int64Counter
+	s3fifoAdmissionBytesTotal      metric.Int64Counter
+	s3fifoGhostHitsTotal           metric.Int64Counter
+	s3fifoPromotionsTotal          metric.Int64Counter
+	s3fifoOneHitEvictionsTotal     metric.Int64Counter
+	s3fifoOneHitEvictionBytesTotal metric.Int64Counter
+	s3fifoSecondChanceTotal        metric.Int64Counter
+	s3fifoEvictionsTotal           metric.Int64Counter
+	s3fifoEvictionBytesTotal       metric.Int64Counter
+	s3fifoPinnedSkipsTotal         metric.Int64Counter
+	s3fifoEvictionRunDuration      metric.Float64Histogram
+	s3fifoEvictionRunsTotal        metric.Int64Counter
+	s3fifoQueueBytes               metric.Int64Gauge
+	s3fifoQueueEntries             metric.Int64Gauge
+	s3fifoGhostEntries             metric.Int64Gauge
+	s3fifoTargetBytes              metric.Int64Gauge
+	s3fifoCacheMaxSizeBytes        metric.Int64Gauge
+	s3fifoOverlimitBytes           metric.Int64Gauge
 
 	meterProvider *sdkmetric.MeterProvider
 	promHandler   http.Handler
@@ -262,21 +282,202 @@ func doInitMetrics(ctx context.Context, cfg MetricsConfig) error {
 		return err
 	}
 
+	s3fifoAdmissionsTotal, err := meter.Int64Counter(
+		"content_cache_s3fifo_admissions_total",
+		metric.WithDescription("Total blobs admitted to S3-FIFO queues"),
+		metric.WithUnit("{blob}"),
+	)
+	if err != nil {
+		return err
+	}
+
+	s3fifoAdmissionBytesTotal, err := meter.Int64Counter(
+		"content_cache_s3fifo_admission_bytes_total",
+		metric.WithDescription("Total bytes admitted to S3-FIFO queues"),
+		metric.WithUnit("By"),
+	)
+	if err != nil {
+		return err
+	}
+
+	s3fifoGhostHitsTotal, err := meter.Int64Counter(
+		"content_cache_s3fifo_ghost_hits_total",
+		metric.WithDescription("Total ghost queue hits (scan resistance signal)"),
+		metric.WithUnit("{hit}"),
+	)
+	if err != nil {
+		return err
+	}
+
+	s3fifoPromotionsTotal, err := meter.Int64Counter(
+		"content_cache_s3fifo_promotions_total",
+		metric.WithDescription("Total small→main promotions (accessCount > 0 at eviction)"),
+		metric.WithUnit("{blob}"),
+	)
+	if err != nil {
+		return err
+	}
+
+	s3fifoOneHitEvictionsTotal, err := meter.Int64Counter(
+		"content_cache_s3fifo_one_hit_evictions_total",
+		metric.WithDescription("Total one-hit wonders filtered (accessCount == 0 evicted from small)"),
+		metric.WithUnit("{blob}"),
+	)
+	if err != nil {
+		return err
+	}
+
+	s3fifoOneHitEvictionBytesTotal, err := meter.Int64Counter(
+		"content_cache_s3fifo_one_hit_eviction_bytes_total",
+		metric.WithDescription("Total bytes freed by filtering one-hit wonders"),
+		metric.WithUnit("By"),
+	)
+	if err != nil {
+		return err
+	}
+
+	s3fifoSecondChanceTotal, err := meter.Int64Counter(
+		"content_cache_s3fifo_second_chance_total",
+		metric.WithDescription("Total main queue reinsertions (accessCount > 0, decremented)"),
+		metric.WithUnit("{blob}"),
+	)
+	if err != nil {
+		return err
+	}
+
+	s3fifoEvictionsTotal, err := meter.Int64Counter(
+		"content_cache_s3fifo_evictions_total",
+		metric.WithDescription("Total evictions from S3-FIFO queues"),
+		metric.WithUnit("{blob}"),
+	)
+	if err != nil {
+		return err
+	}
+
+	s3fifoEvictionBytesTotal, err := meter.Int64Counter(
+		"content_cache_s3fifo_eviction_bytes_total",
+		metric.WithDescription("Total bytes freed by S3-FIFO eviction"),
+		metric.WithUnit("By"),
+	)
+	if err != nil {
+		return err
+	}
+
+	s3fifoPinnedSkipsTotal, err := meter.Int64Counter(
+		"content_cache_s3fifo_pinned_skips_total",
+		metric.WithDescription("Total eviction skips due to RefCount > 0"),
+		metric.WithUnit("{skip}"),
+	)
+	if err != nil {
+		return err
+	}
+
+	s3fifoEvictionRunDuration, err := meter.Float64Histogram(
+		"content_cache_s3fifo_eviction_run_duration_seconds",
+		metric.WithDescription("Duration of S3-FIFO eviction runs"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10),
+	)
+	if err != nil {
+		return err
+	}
+
+	s3fifoEvictionRunsTotal, err := meter.Int64Counter(
+		"content_cache_s3fifo_eviction_runs_total",
+		metric.WithDescription("Total S3-FIFO eviction runs"),
+		metric.WithUnit("{run}"),
+	)
+	if err != nil {
+		return err
+	}
+
+	s3fifoQueueBytes, err := meter.Int64Gauge(
+		"content_cache_s3fifo_queue_bytes",
+		metric.WithDescription("Current bytes in each S3-FIFO queue"),
+		metric.WithUnit("By"),
+	)
+	if err != nil {
+		return err
+	}
+
+	s3fifoQueueEntries, err := meter.Int64Gauge(
+		"content_cache_s3fifo_queue_entries",
+		metric.WithDescription("Current entries in each S3-FIFO queue"),
+		metric.WithUnit("{entry}"),
+	)
+	if err != nil {
+		return err
+	}
+
+	s3fifoGhostEntries, err := meter.Int64Gauge(
+		"content_cache_s3fifo_ghost_entries",
+		metric.WithDescription("Current entries in the S3-FIFO ghost set"),
+		metric.WithUnit("{entry}"),
+	)
+	if err != nil {
+		return err
+	}
+
+	s3fifoTargetBytes, err := meter.Int64Gauge(
+		"content_cache_s3fifo_target_bytes",
+		metric.WithDescription("S3-FIFO small queue target size (MaxSize × SmallQueuePercent)"),
+		metric.WithUnit("By"),
+	)
+	if err != nil {
+		return err
+	}
+
+	s3fifoCacheMaxSizeBytes, err := meter.Int64Gauge(
+		"content_cache_s3fifo_cache_max_size_bytes",
+		metric.WithDescription("Configured maximum cache size"),
+		metric.WithUnit("By"),
+	)
+	if err != nil {
+		return err
+	}
+
+	s3fifoOverlimitBytes, err := meter.Int64Gauge(
+		"content_cache_s3fifo_overlimit_bytes",
+		metric.WithDescription("Bytes over the cache limit (pressure indicator)"),
+		metric.WithUnit("By"),
+	)
+	if err != nil {
+		return err
+	}
+
 	globalMetrics = &Metrics{
-		requestsTotal:           requestsTotal,
-		responseBytesTotal:      responseBytesTotal,
-		requestDuration:         requestDuration,
-		requestsByEndpointTotal: requestsByEndpointTotal,
-		blobWriteSize:           blobWriteSize,
-		upstreamFetchDuration:   upstreamFetchDuration,
-		upstreamFetchTotal:      upstreamFetchTotal,
-		upstreamFetchBytesTotal: upstreamFetchBytesTotal,
-		blobTouchesTotal:        blobTouchesTotal,
-		backendRequestDuration:  backendRequestDuration,
-		backendRequestsTotal:    backendRequestsTotal,
-		backendBytesTotal:       backendBytesTotal,
-		meterProvider:           mp,
-		promHandler:             promHandler,
+		requestsTotal:                  requestsTotal,
+		responseBytesTotal:             responseBytesTotal,
+		requestDuration:                requestDuration,
+		requestsByEndpointTotal:        requestsByEndpointTotal,
+		blobWriteSize:                  blobWriteSize,
+		upstreamFetchDuration:          upstreamFetchDuration,
+		upstreamFetchTotal:             upstreamFetchTotal,
+		upstreamFetchBytesTotal:        upstreamFetchBytesTotal,
+		blobTouchesTotal:               blobTouchesTotal,
+		backendRequestDuration:         backendRequestDuration,
+		backendRequestsTotal:           backendRequestsTotal,
+		backendBytesTotal:              backendBytesTotal,
+		s3fifoAdmissionsTotal:          s3fifoAdmissionsTotal,
+		s3fifoAdmissionBytesTotal:      s3fifoAdmissionBytesTotal,
+		s3fifoGhostHitsTotal:           s3fifoGhostHitsTotal,
+		s3fifoPromotionsTotal:          s3fifoPromotionsTotal,
+		s3fifoOneHitEvictionsTotal:     s3fifoOneHitEvictionsTotal,
+		s3fifoOneHitEvictionBytesTotal: s3fifoOneHitEvictionBytesTotal,
+		s3fifoSecondChanceTotal:        s3fifoSecondChanceTotal,
+		s3fifoEvictionsTotal:           s3fifoEvictionsTotal,
+		s3fifoEvictionBytesTotal:       s3fifoEvictionBytesTotal,
+		s3fifoPinnedSkipsTotal:         s3fifoPinnedSkipsTotal,
+		s3fifoEvictionRunDuration:      s3fifoEvictionRunDuration,
+		s3fifoEvictionRunsTotal:        s3fifoEvictionRunsTotal,
+		s3fifoQueueBytes:               s3fifoQueueBytes,
+		s3fifoQueueEntries:             s3fifoQueueEntries,
+		s3fifoGhostEntries:             s3fifoGhostEntries,
+		s3fifoTargetBytes:              s3fifoTargetBytes,
+		s3fifoCacheMaxSizeBytes:        s3fifoCacheMaxSizeBytes,
+		s3fifoOverlimitBytes:           s3fifoOverlimitBytes,
+		meterProvider:                  mp,
+		promHandler:                    promHandler,
 	}
 
 	return nil
@@ -416,6 +617,114 @@ func PrometheusHandler() http.Handler {
 		}
 		globalMetrics.promHandler.ServeHTTP(w, r)
 	})
+}
+
+// RecordS3FIFOAdmission records a blob admission to an S3-FIFO queue.
+// queue is "small" or "main", reason is "new" or "ghost_hit".
+func RecordS3FIFOAdmission(ctx context.Context, queue, reason string, bytes int64) {
+	if globalMetrics == nil {
+		return
+	}
+	protocol := ProtocolFromContext(ctx)
+	attrs := []attribute.KeyValue{
+		attribute.String("protocol", protocol),
+		attribute.String("queue", queue),
+		attribute.String("reason", reason),
+	}
+	globalMetrics.s3fifoAdmissionsTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
+	globalMetrics.s3fifoAdmissionBytesTotal.Add(ctx, bytes, metric.WithAttributes(attrs...))
+}
+
+// RecordS3FIFOGhostHit records a ghost queue hit.
+func RecordS3FIFOGhostHit(ctx context.Context) {
+	if globalMetrics == nil {
+		return
+	}
+	protocol := ProtocolFromContext(ctx)
+	attrs := []attribute.KeyValue{attribute.String("protocol", protocol)}
+	globalMetrics.s3fifoGhostHitsTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordS3FIFOPromotion records a small→main promotion.
+func RecordS3FIFOPromotion(ctx context.Context) {
+	if globalMetrics == nil {
+		return
+	}
+	protocol := ProtocolFromContext(ctx)
+	attrs := []attribute.KeyValue{attribute.String("protocol", protocol)}
+	globalMetrics.s3fifoPromotionsTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordS3FIFOOneHitEviction records a one-hit-wonder eviction from the small queue.
+func RecordS3FIFOOneHitEviction(ctx context.Context, bytes int64) {
+	if globalMetrics == nil {
+		return
+	}
+	protocol := ProtocolFromContext(ctx)
+	attrs := []attribute.KeyValue{attribute.String("protocol", protocol)}
+	globalMetrics.s3fifoOneHitEvictionsTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
+	globalMetrics.s3fifoOneHitEvictionBytesTotal.Add(ctx, bytes, metric.WithAttributes(attrs...))
+}
+
+// RecordS3FIFOSecondChance records a main queue second-chance reinsertion.
+func RecordS3FIFOSecondChance(ctx context.Context) {
+	if globalMetrics == nil {
+		return
+	}
+	protocol := ProtocolFromContext(ctx)
+	attrs := []attribute.KeyValue{attribute.String("protocol", protocol)}
+	globalMetrics.s3fifoSecondChanceTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordS3FIFOEviction records a final eviction from a queue.
+// queue is "small" or "main".
+func RecordS3FIFOEviction(ctx context.Context, queue string, bytes int64) {
+	if globalMetrics == nil {
+		return
+	}
+	attrs := []attribute.KeyValue{attribute.String("queue", queue)}
+	globalMetrics.s3fifoEvictionsTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
+	globalMetrics.s3fifoEvictionBytesTotal.Add(ctx, bytes, metric.WithAttributes(attrs...))
+}
+
+// RecordS3FIFOPinnedSkip records a skipped eviction due to RefCount > 0.
+// queue is "small" or "main".
+func RecordS3FIFOPinnedSkip(ctx context.Context, queue string) {
+	if globalMetrics == nil {
+		return
+	}
+	attrs := []attribute.KeyValue{attribute.String("queue", queue)}
+	globalMetrics.s3fifoPinnedSkipsTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordS3FIFOEvictionRun records the duration of one MaybeEvict call.
+func RecordS3FIFOEvictionRun(ctx context.Context, duration time.Duration) {
+	if globalMetrics == nil {
+		return
+	}
+	globalMetrics.s3fifoEvictionRunDuration.Record(ctx, duration.Seconds())
+	globalMetrics.s3fifoEvictionRunsTotal.Add(ctx, 1)
+}
+
+// UpdateS3FIFOQueueState updates all S3-FIFO queue-state gauges.
+// Called synchronously at the end of each MaybeEvict run.
+func UpdateS3FIFOQueueState(ctx context.Context, smallBytes, mainBytes int64, smallEntries, mainEntries, ghostEntries int, maxBytes, targetBytes int64) {
+	if globalMetrics == nil {
+		return
+	}
+	globalMetrics.s3fifoQueueBytes.Record(ctx, smallBytes, metric.WithAttributes(attribute.String("queue", "small")))
+	globalMetrics.s3fifoQueueBytes.Record(ctx, mainBytes, metric.WithAttributes(attribute.String("queue", "main")))
+	globalMetrics.s3fifoQueueEntries.Record(ctx, int64(smallEntries), metric.WithAttributes(attribute.String("queue", "small")))
+	globalMetrics.s3fifoQueueEntries.Record(ctx, int64(mainEntries), metric.WithAttributes(attribute.String("queue", "main")))
+	globalMetrics.s3fifoGhostEntries.Record(ctx, int64(ghostEntries))
+	globalMetrics.s3fifoTargetBytes.Record(ctx, targetBytes)
+	globalMetrics.s3fifoCacheMaxSizeBytes.Record(ctx, maxBytes)
+	total := smallBytes + mainBytes
+	overlimit := total - maxBytes
+	if overlimit < 0 {
+		overlimit = 0
+	}
+	globalMetrics.s3fifoOverlimitBytes.Record(ctx, overlimit)
 }
 
 // StatusClass returns the HTTP status class (2xx, 3xx, 4xx, 5xx).

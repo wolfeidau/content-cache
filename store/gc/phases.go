@@ -142,84 +142,6 @@ func (m *Manager) phaseDeleteOrphans(ctx context.Context, result *Result) {
 	}
 }
 
-// phaseLRUEviction evicts LRU blobs if over quota.
-func (m *Manager) phaseLRUEviction(ctx context.Context, result *Result) {
-	if m.config.MaxCacheBytes <= 0 {
-		return
-	}
-
-	m.logger.Debug("phase: LRU eviction")
-
-	totalSize, err := m.db.TotalBlobSize(ctx)
-	if err != nil {
-		result.Errors = append(result.Errors, fmt.Sprintf("get total blob size: %v", err))
-		m.logger.Error("failed to get total blob size", "error", err)
-		return
-	}
-
-	if totalSize <= m.config.MaxCacheBytes {
-		m.logger.Debug("cache within quota", "total_size", totalSize, "max_size", m.config.MaxCacheBytes)
-		return
-	}
-
-	bytesToFree := totalSize - m.config.MaxCacheBytes
-	m.logger.Info("cache over quota, starting LRU eviction",
-		"total_size", totalSize,
-		"max_size", m.config.MaxCacheBytes,
-		"bytes_to_free", bytesToFree,
-	)
-
-	var bytesFreed int64
-	evicted := 0
-
-	for bytesFreed < bytesToFree && evicted < m.config.BatchSize {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		blobs, err := m.db.GetLRUBlobs(ctx, 100)
-		if err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("get LRU blobs: %v", err))
-			m.logger.Error("failed to get LRU blobs", "error", err)
-			break
-		}
-
-		if len(blobs) == 0 {
-			break
-		}
-
-		for _, blob := range blobs {
-			if bytesFreed >= bytesToFree {
-				break
-			}
-
-			if blob.RefCount > 0 {
-				continue
-			}
-
-			bytesReclaimed, err := m.deleteBlob(ctx, blob.Hash)
-			if err != nil {
-				result.Errors = append(result.Errors, fmt.Sprintf("delete LRU blob %s: %v", blob.Hash, err))
-				m.logger.Error("failed to delete LRU blob", "hash", blob.Hash, "error", err)
-				continue
-			}
-
-			bytesFreed += bytesReclaimed
-			result.LRUBlobsEvicted++
-			result.BytesReclaimed += bytesReclaimed
-			evicted++
-
-			m.logger.Debug("evicted LRU blob",
-				"hash", blob.Hash,
-				"size", bytesReclaimed,
-				"last_access", blob.LastAccess,
-			)
-		}
-	}
-}
-
 // deleteBlob deletes a blob from both the backend and metadata store.
 func (m *Manager) deleteBlob(ctx context.Context, hash string) (int64, error) {
 	entry, err := m.db.GetBlob(ctx, hash)
@@ -244,6 +166,12 @@ func (m *Manager) deleteBlob(ctx context.Context, hash string) (int64, error) {
 
 	if err := m.db.DeleteBlob(ctx, hash); err != nil && err != metadb.ErrNotFound {
 		return 0, fmt.Errorf("delete from metadb: %w", err)
+	}
+
+	// Always notify the hook, even when size==0 (blob was already absent from
+	// MetaDB). Remove() guards against counter underflow, so passing 0 is safe.
+	if m.blobDeleteHook != nil {
+		m.blobDeleteHook(ctx, hash, size)
 	}
 
 	return size, nil

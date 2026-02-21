@@ -262,50 +262,8 @@ func TestBoltDB_ExpiryQueries(t *testing.T) {
 	})
 }
 
-func TestBoltDB_LRUQueries(t *testing.T) {
+func TestBoltDB_UnreferencedBlobQueries(t *testing.T) {
 	ctx := context.Background()
-
-	t.Run("GetLRUBlobs returns oldest accessed first", func(t *testing.T) {
-		baseTime := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
-		currentTime := baseTime
-		db := newTestBoltDB(t, WithNow(func() time.Time { return currentTime }))
-
-		currentTime = baseTime
-		require.NoError(t, db.PutBlob(ctx, &BlobEntry{Hash: "oldest", Size: 100, CachedAt: currentTime, LastAccess: currentTime}))
-
-		currentTime = baseTime.Add(time.Hour)
-		require.NoError(t, db.PutBlob(ctx, &BlobEntry{Hash: "middle", Size: 100, CachedAt: currentTime, LastAccess: currentTime}))
-
-		currentTime = baseTime.Add(2 * time.Hour)
-		require.NoError(t, db.PutBlob(ctx, &BlobEntry{Hash: "newest", Size: 100, CachedAt: currentTime, LastAccess: currentTime}))
-
-		blobs, err := db.GetLRUBlobs(ctx, 0)
-		require.NoError(t, err)
-		require.Len(t, blobs, 3)
-		assert.Equal(t, "oldest", blobs[0].Hash)
-		assert.Equal(t, "middle", blobs[1].Hash)
-		assert.Equal(t, "newest", blobs[2].Hash)
-	})
-
-	t.Run("GetLRUBlobs respects limit", func(t *testing.T) {
-		baseTime := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
-		currentTime := baseTime
-		db := newTestBoltDB(t, WithNow(func() time.Time { return currentTime }))
-
-		for i := 0; i < 5; i++ {
-			currentTime = baseTime.Add(time.Duration(i) * time.Hour)
-			require.NoError(t, db.PutBlob(ctx, &BlobEntry{
-				Hash:       string(rune('a' + i)),
-				Size:       100,
-				CachedAt:   currentTime,
-				LastAccess: currentTime,
-			}))
-		}
-
-		blobs, err := db.GetLRUBlobs(ctx, 2)
-		require.NoError(t, err)
-		assert.Len(t, blobs, 2)
-	})
 
 	t.Run("GetUnreferencedBlobs returns blobs with RefCount == 0", func(t *testing.T) {
 		db := newTestBoltDB(t)

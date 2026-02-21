@@ -11,7 +11,6 @@ type Metrics struct {
 	unreferencedBlobsDeleted metric.Int64Counter
 	orphanBlobsDeleted       metric.Int64Counter
 	expiredMetaDeleted       metric.Int64Counter
-	lruBlobsEvicted          metric.Int64Counter
 	bytesReclaimed           metric.Int64Counter
 	errorsTotal              metric.Int64Counter
 	lastRunTimestamp         metric.Float64Gauge
@@ -66,15 +65,6 @@ func NewMetrics(meter metric.Meter) (*Metrics, error) {
 		return nil, err
 	}
 
-	lruBlobsEvicted, err := meter.Int64Counter(
-		"content_cache_gc_lru_blobs_evicted_total",
-		metric.WithDescription("Total number of blobs evicted by LRU policy"),
-		metric.WithUnit("{blob}"),
-	)
-	if err != nil {
-		return nil, err
-	}
-
 	bytesReclaimed, err := meter.Int64Counter(
 		"content_cache_gc_bytes_reclaimed_total",
 		metric.WithDescription("Total bytes reclaimed by GC"),
@@ -117,7 +107,6 @@ func NewMetrics(meter metric.Meter) (*Metrics, error) {
 		unreferencedBlobsDeleted: unreferencedBlobsDeleted,
 		orphanBlobsDeleted:       orphanBlobsDeleted,
 		expiredMetaDeleted:       expiredMetaDeleted,
-		lruBlobsEvicted:          lruBlobsEvicted,
 		bytesReclaimed:           bytesReclaimed,
 		errorsTotal:              errorsTotal,
 		lastRunTimestamp:         lastRunTimestamp,

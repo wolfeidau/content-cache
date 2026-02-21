@@ -34,7 +34,6 @@ type MetaDB interface {
 
 	// Eviction queries
 	GetExpiredMeta(ctx context.Context, before time.Time, limit int) ([]ExpiryEntry, error)
-	GetLRUBlobs(ctx context.Context, limit int) ([]BlobEntry, error)
 	GetUnreferencedBlobs(ctx context.Context, limit int) ([]string, error)
 }
 

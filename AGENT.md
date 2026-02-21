@@ -36,8 +36,10 @@ protocol/              # Protocol handlers (one package per protocol)
   └── git/             # Git Smart HTTP proxy
 download/              # Singleflight-based download deduplication
 store/                 # Content-addressable storage (CAFS)
+  ├── gc/              # Garbage collection (TTL expiry, orphan cleanup)
+  ├── metadb/          # BoltDB metadata index (blob entries, meta entries)
+  └── s3fifo/          # S3-FIFO eviction algorithm (queues + manager)
 backend/               # Storage backends (filesystem, future: S3)
-expiry/                # TTL and LRU cache expiration
 cache/                 # Local cache directory (gitignored)
 ```
 
@@ -80,10 +82,10 @@ When creating documentation (README, code comments, design docs):
 
 Use conventional commits format:
 ```
-feat: add npm registry support and TTL/LRU cache expiration
+feat: add npm registry support and TTL cache expiration
 
 - Add npm protocol handler with tarball caching and integrity verification
-- Implement expiry system with TTL and LRU eviction policies
+- Implement expiry system with TTL expiration and S3-FIFO size eviction
 - Fix golangci-lint errors across codebase
 ```
 
