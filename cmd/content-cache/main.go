@@ -223,9 +223,16 @@ func (cmd *ServeCmd) Run() error {
 		pprofMux.HandleFunc("/debug/pprof/profile", httppprof.Profile)
 		pprofMux.HandleFunc("/debug/pprof/symbol", httppprof.Symbol)
 		pprofMux.HandleFunc("/debug/pprof/trace", httppprof.Trace)
+		pprofServer := &http.Server{
+			Addr:        cmd.PprofAddress,
+			Handler:     pprofMux,
+			ReadTimeout: 30 * time.Second,
+			// WriteTimeout is intentionally long to allow pprof profile collection
+			WriteTimeout: 5 * time.Minute,
+		}
 		go func() {
 			logger.Info("pprof server started", "address", cmd.PprofAddress)
-			if err := http.ListenAndServe(cmd.PprofAddress, pprofMux); err != nil {
+			if err := pprofServer.ListenAndServe(); err != nil {
 				logger.Error("pprof server error", "error", err)
 			}
 		}()
