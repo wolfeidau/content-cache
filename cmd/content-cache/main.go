@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
+	httppprof "net/http/pprof"
 	"os"
 	"os/signal"
 	"strings"
@@ -62,6 +64,8 @@ type ServeCmd struct {
 
 	LogLevel  string `kong:"name='log-level',default='info',env='LOG_LEVEL',enum='debug,info,warn,error',help='Log level',group='Logging'"`
 	LogFormat string `kong:"name='log-format',default='text',env='LOG_FORMAT',enum='text,json',help='Log format',group='Logging'"`
+
+	PprofAddress string `kong:"name='pprof-address',env='PPROF_ADDRESS',help='Address for pprof HTTP server (e.g., localhost:6060); disabled if empty',group='Debug'"`
 
 	MetricsOTLPEndpoint string        `kong:"name='metrics-otlp-endpoint',env='METRICS_OTLP_ENDPOINT',help='OTLP gRPC endpoint for metrics (e.g., localhost:4317)',group='Metrics'"`
 	MetricsPrometheus   bool          `kong:"name='metrics-prometheus',env='METRICS_PROMETHEUS',help='Enable Prometheus /metrics endpoint',group='Metrics'"`
@@ -209,6 +213,29 @@ func (cmd *ServeCmd) Run() error {
 	srv, err := server.New(cfg)
 	if err != nil {
 		return fmt.Errorf("creating server: %w", err)
+	}
+
+	// Start pprof server if configured
+	if cmd.PprofAddress != "" {
+		pprofMux := http.NewServeMux()
+		pprofMux.HandleFunc("/debug/pprof/", httppprof.Index)
+		pprofMux.HandleFunc("/debug/pprof/cmdline", httppprof.Cmdline)
+		pprofMux.HandleFunc("/debug/pprof/profile", httppprof.Profile)
+		pprofMux.HandleFunc("/debug/pprof/symbol", httppprof.Symbol)
+		pprofMux.HandleFunc("/debug/pprof/trace", httppprof.Trace)
+		pprofServer := &http.Server{
+			Addr:        cmd.PprofAddress,
+			Handler:     pprofMux,
+			ReadTimeout: 30 * time.Second,
+			// WriteTimeout is intentionally long to allow pprof profile collection
+			WriteTimeout: 5 * time.Minute,
+		}
+		go func() {
+			logger.Info("pprof server started", "address", cmd.PprofAddress)
+			if err := pprofServer.ListenAndServe(); err != nil {
+				logger.Error("pprof server error", "error", err)
+			}
+		}()
 	}
 
 	// Handle shutdown signals
