@@ -9,14 +9,12 @@ import (
 
 	"github.com/wolfeidau/content-cache/backend"
 	"github.com/wolfeidau/content-cache/store/metadb"
-	"go.opentelemetry.io/otel/metric"
 )
 
 // Config configures the GC manager.
 type Config struct {
 	Interval         time.Duration // How often to run (default: 1h)
 	StartupDelay     time.Duration // Delay before first run (default: 5m)
-	MaxCacheBytes    int64         // Target max cache size
 	BatchSize        int           // Max items to process per run (default: 1000)
 	CompactInterval  time.Duration // How often to compact bbolt (default: 24h)
 	CompactThreshold float64       // Compact if free pages > threshold (default: 0.3)
@@ -27,7 +25,6 @@ func DefaultConfig() Config {
 	return Config{
 		Interval:         1 * time.Hour,
 		StartupDelay:     5 * time.Minute,
-		MaxCacheBytes:    0, // No limit by default
 		BatchSize:        1000,
 		CompactInterval:  24 * time.Hour,
 		CompactThreshold: 0.3,
@@ -41,7 +38,6 @@ type Result struct {
 	UnreferencedBlobsDeleted int           `json:"unreferenced_blobs_deleted"`
 	OrphanBlobsDeleted       int           `json:"orphan_blobs_deleted"`
 	ExpiredMetaDeleted       int           `json:"expired_meta_deleted"`
-	LRUBlobsEvicted          int           `json:"lru_blobs_evicted"`
 	BytesReclaimed           int64         `json:"bytes_reclaimed"`
 	Errors                   []string      `json:"errors,omitempty"`
 }
@@ -146,7 +142,6 @@ func (m *Manager) run(ctx context.Context) {
 	m.logger.Info("gc manager starting",
 		"interval", m.config.Interval,
 		"startup_delay", m.config.StartupDelay,
-		"max_cache_bytes", m.config.MaxCacheBytes,
 	)
 
 	// Wait for startup delay
@@ -206,9 +201,6 @@ func (m *Manager) runGC(ctx context.Context) *Result {
 	// Phase 3: Delete orphan blobs (on disk but not in index)
 	m.phaseDeleteOrphans(ctx, result)
 
-	// Phase 4: LRU eviction if over quota
-	m.phaseLRUEviction(ctx, result)
-
 	result.Duration = time.Since(result.StartedAt)
 
 	// Update last run
@@ -224,7 +216,6 @@ func (m *Manager) runGC(ctx context.Context) *Result {
 		"unreferenced_blobs_deleted", result.UnreferencedBlobsDeleted,
 		"orphan_blobs_deleted", result.OrphanBlobsDeleted,
 		"expired_meta_deleted", result.ExpiredMetaDeleted,
-		"lru_blobs_evicted", result.LRUBlobsEvicted,
 		"bytes_reclaimed", result.BytesReclaimed,
 		"errors", len(result.Errors),
 	)
@@ -242,7 +233,6 @@ func (m *Manager) recordMetrics(ctx context.Context, result *Result) {
 	m.metrics.unreferencedBlobsDeleted.Add(ctx, int64(result.UnreferencedBlobsDeleted))
 	m.metrics.orphanBlobsDeleted.Add(ctx, int64(result.OrphanBlobsDeleted))
 	m.metrics.expiredMetaDeleted.Add(ctx, int64(result.ExpiredMetaDeleted))
-	m.metrics.lruBlobsEvicted.Add(ctx, int64(result.LRUBlobsEvicted))
 	m.metrics.bytesReclaimed.Add(ctx, result.BytesReclaimed)
 	m.metrics.errorsTotal.Add(ctx, int64(len(result.Errors)))
 	m.metrics.lastRunTimestamp.Record(ctx, float64(result.StartedAt.Unix()))
@@ -251,27 +241,5 @@ func (m *Manager) recordMetrics(ctx context.Context, result *Result) {
 		m.metrics.lastRunSuccess.Record(ctx, 1)
 	} else {
 		m.metrics.lastRunSuccess.Record(ctx, 0)
-	}
-}
-
-// ManagerOption configures a Manager.
-type ManagerOption func(*Manager)
-
-// WithLogger sets the logger for the manager.
-func WithLogger(logger *slog.Logger) ManagerOption {
-	return func(m *Manager) {
-		m.logger = logger
-	}
-}
-
-// WithMetrics sets the metrics for the manager.
-func WithMetrics(meter metric.Meter) ManagerOption {
-	return func(m *Manager) {
-		metrics, err := NewMetrics(meter)
-		if err != nil {
-			m.logger.Error("failed to create gc metrics", "error", err)
-			return
-		}
-		m.metrics = metrics
 	}
 }

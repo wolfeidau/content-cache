@@ -107,13 +107,9 @@ type Config struct {
 	CacheTTL time.Duration
 
 	// CacheMaxSize is the maximum size of the cache in bytes.
-	// When exceeded, content is evicted according to EvictionPolicy.
+	// When exceeded, content is evicted by the S3-FIFO algorithm.
 	// Zero disables size-based eviction.
 	CacheMaxSize int64
-
-	// EvictionPolicy selects the size-based eviction algorithm.
-	// Supported values: "lru" (default), "s3fifo".
-	EvictionPolicy string
 
 	// ExpiryCheckInterval is how often to check for expired content.
 	// Default is 1 hour.
@@ -163,13 +159,7 @@ type Server struct {
 	sumdb         *goproxy.SumdbHandler
 	metaDB        metadb.MetaDB
 	gcManager     *gc.Manager
-	s3fifoManager s3fifoLifecycle
-}
-
-// s3fifoLifecycle is the subset of s3fifo.Manager used by the server for lifecycle management.
-type s3fifoLifecycle interface {
-	Start(context.Context)
-	Stop()
+	s3fifoManager *s3fifo.Manager
 }
 
 // New creates a new server with the given configuration.
@@ -206,11 +196,9 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("metaDB must be *metadb.BoltDB for envelope storage")
 	}
 
-	// Initialize S3-FIFO eviction manager when requested.
-	// When S3-FIFO is active, GC skips LRU size eviction (MaxCacheBytes=0) and
-	// S3-FIFO handles size management independently.
+	// Initialize S3-FIFO eviction manager when a cache size limit is configured.
 	var s3fifoMgr *s3fifo.Manager
-	if cfg.EvictionPolicy == "s3fifo" && cfg.CacheMaxSize > 0 {
+	if cfg.CacheMaxSize > 0 {
 		s3fifoCfg := s3fifo.Config{
 			MaxSize:       cfg.CacheMaxSize,
 			CheckInterval: cfg.ExpiryCheckInterval,
@@ -224,7 +212,7 @@ func New(cfg Config) (*Server, error) {
 		cfg.Logger.Info("s3fifo eviction enabled", "max_size", cfg.CacheMaxSize)
 	}
 
-	// Initialize GC manager. When S3-FIFO is active, disable GC's LRU phase.
+	// Initialize GC manager. S3-FIFO owns size eviction; GC handles TTL expiry, unreferenced, and orphan blobs.
 	var gcManager *gc.Manager
 	if cfg.CacheMaxSize > 0 {
 		gcInterval := cfg.GCInterval
@@ -239,22 +227,16 @@ func New(cfg Config) (*Server, error) {
 		if err != nil {
 			return nil, fmt.Errorf("creating gc metrics: %w", err)
 		}
-		gcMaxBytes := cfg.CacheMaxSize
-		gcOpts := []gc.Option{}
-		if s3fifoMgr != nil {
-			gcMaxBytes = 0 // S3-FIFO owns size eviction; GC handles only orphan/unreferenced cleanup.
-			s3fifoRef := s3fifoMgr
-			gcOpts = append(gcOpts, gc.WithBlobDeleteHook(func(ctx context.Context, hash string, size int64) {
-				s3fifoRef.Remove(ctx, hash, size)
-			}))
-		}
 		gcConfig := gc.Config{
-			Interval:      gcInterval,
-			StartupDelay:  gcStartupDelay,
-			MaxCacheBytes: gcMaxBytes,
-			BatchSize:     1000,
+			Interval:     gcInterval,
+			StartupDelay: gcStartupDelay,
+			BatchSize:    1000,
 		}
-		gcManager = gc.New(metaDB, instrumentedBackend, gcConfig, gcMetrics, cfg.Logger.With("component", "gc"), gcOpts...)
+		gcManager = gc.New(metaDB, instrumentedBackend, gcConfig, gcMetrics, cfg.Logger.With("component", "gc"),
+			gc.WithBlobDeleteHook(func(ctx context.Context, hash string, size int64) {
+				s3fifoMgr.Remove(ctx, hash, size)
+			}),
+		)
 	}
 
 	// Initialize CAFS store with MetaDB tracking and optional S3-FIFO admission hook.

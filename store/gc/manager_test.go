@@ -1,7 +1,6 @@
 package gc
 
 import (
-	"bytes"
 	"context"
 	"path/filepath"
 	"strings"
@@ -210,54 +209,6 @@ func TestManager_PhaseDeleteUnreferenced(t *testing.T) {
 	assert.True(t, exists)
 }
 
-func TestManager_PhaseLRUEviction(t *testing.T) {
-	ctx := context.Background()
-	baseTime := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
-	currentTime := baseTime
-	db := newTestDB(t, metadb.WithNow(func() time.Time { return currentTime }))
-	fs := newTestBackend(t)
-
-	blobData := bytes.Repeat([]byte("x"), 100)
-
-	lruSeeds := []string{"a0", "b0", "c0", "d0", "e0"}
-	for i, seed := range lruSeeds {
-		hash := testHash(seed)
-		currentTime = baseTime.Add(time.Duration(i) * time.Hour)
-		require.NoError(t, db.PutBlob(ctx, &metadb.BlobEntry{
-			Hash:       hash,
-			Size:       100,
-			CachedAt:   currentTime,
-			LastAccess: currentTime,
-			RefCount:   1,
-		}))
-		key := testBlobKey(seed)
-		require.NoError(t, fs.Write(ctx, key, bytes.NewReader(blobData)))
-	}
-
-	for _, seed := range lruSeeds {
-		hash := testHash(seed)
-		require.NoError(t, db.DecrementBlobRef(ctx, hash))
-	}
-
-	total, err := db.TotalBlobSize(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, int64(500), total)
-
-	config := DefaultConfig()
-	config.MaxCacheBytes = 200
-	config.BatchSize = 100
-
-	mgr := New(db, fs, config, nil, nil)
-	result, err := mgr.RunNow(ctx)
-
-	require.NoError(t, err)
-	assert.GreaterOrEqual(t, result.LRUBlobsEvicted+result.UnreferencedBlobsDeleted, 3, "should delete at least 3 blobs to get under 200 bytes")
-
-	total, err = db.TotalBlobSize(ctx)
-	require.NoError(t, err)
-	assert.LessOrEqual(t, total, int64(200), "total size should be at or under quota")
-}
-
 func TestManager_Status(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
@@ -279,7 +230,6 @@ func TestManager_Status(t *testing.T) {
 	assert.Equal(t, result.UnreferencedBlobsDeleted, status.UnreferencedBlobsDeleted)
 	assert.Equal(t, result.OrphanBlobsDeleted, status.OrphanBlobsDeleted)
 	assert.Equal(t, result.ExpiredMetaDeleted, status.ExpiredMetaDeleted)
-	assert.Equal(t, result.LRUBlobsEvicted, status.LRUBlobsEvicted)
 	assert.Equal(t, result.BytesReclaimed, status.BytesReclaimed)
 }
 

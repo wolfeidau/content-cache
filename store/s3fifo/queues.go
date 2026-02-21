@@ -24,9 +24,9 @@ const (
 var (
 	bucketSmall       = []byte("s3fifo_small")         // seq(uint64BE) → hash
 	bucketSmallByHash = []byte("s3fifo_small_by_hash") // hash → seq(uint64BE)
-	bucketMain        = []byte("s3fifo_main")           // seq(uint64BE) → hash
+	bucketMain        = []byte("s3fifo_main")          // seq(uint64BE) → hash
 	bucketMainByHash  = []byte("s3fifo_main_by_hash")  // hash → seq(uint64BE)
-	bucketGhost       = []byte("s3fifo_ghost")          // hash → seq(uint64BE)
+	bucketGhost       = []byte("s3fifo_ghost")         // hash → seq(uint64BE)
 	bucketGhostBySeq  = []byte("s3fifo_ghost_by_seq")  // seq(uint64BE) → hash
 )
 

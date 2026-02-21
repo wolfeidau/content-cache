@@ -133,7 +133,7 @@ git config --global --unset url."http://localhost:8080/git/github.com/".insteadO
 - **Filesystem Backend**: Atomic writes with sharded directory structure
 - **Download Deduplication**: Singleflight-based coalescing of concurrent requests for the same uncached resource
 - **Pull-Through Caching**: Fetches from upstream on cache miss, caches for future requests
-- **Cache Expiration**: TTL-based expiration and size-based eviction with two algorithms: `lru` (default, batch GC) and `s3fifo` (S3-FIFO algorithm — lower miss ratios by filtering one-hit-wonders from polluting the main cache)
+- **Cache Expiration**: TTL-based expiration with S3-FIFO size-based eviction (lower miss ratios by filtering one-hit-wonders from polluting the main cache)
 - **Inbound Authentication**: Bearer token auth middleware protecting all endpoints (except `/health` and `/metrics`), configurable via `--auth-token` or `--auth-token-file`
 - **Upstream Credentials**: Template-based credentials file (`--credentials-file`) with routing tables for per-scope (NPM) and per-repo-prefix (Git) credential selection, plus multi-registry OCI auth. Supports pluggable secret providers (environment variables, files, 1Password CLI)
 - **Routing Tables**: NPM scope-based and Git repo-prefix-based routing with catch-all fallback, validated at startup
@@ -181,7 +181,7 @@ graph TD
     A -.-> A7["/health, /stats"]
 
     E -.-> E1["blobs/{hash[0:2]}/{hash}"]
-    E -.-> E2["TTL + LRU Expiration"]
+    E -.-> E2["TTL + S3-FIFO Eviction"]
 
     F -.-> F1["Filesystem (implemented)"]
     F -.-> F2["S3 (planned)"]
@@ -258,7 +258,6 @@ OCI registry credentials (username/password) are configured via the credentials 
 |------|---------------------|---------|-------------|
 | `--cache-ttl` | `CACHE_TTL` | `168h` | Cache TTL (0 to disable) |
 | `--cache-max-size` | `CACHE_MAX_SIZE` | `10737418240` | Maximum cache size in bytes (10GB, 0 to disable) |
-| `--eviction-policy` | `EVICTION_POLICY` | `lru` | Size eviction algorithm: `lru` (default) or `s3fifo` |
 | `--expiry-check-interval` | `EXPIRY_CHECK_INTERVAL` | `1h` | How often to check for expired content |
 | `--gc-interval` | `GC_INTERVAL` | `1h` | How often to run garbage collection |
 | `--gc-startup-delay` | `GC_STARTUP_DELAY` | `5m` | Delay before first GC run after startup |
@@ -591,7 +590,7 @@ With `-log-format json`, logs include fields for analysis:
 - Automatic deduplication (same content stored once)
 - Content retrieval by BLAKE3 hash
 - Multiple storage backends (filesystem, S3)
-- TTL and LRU-based expiration
+- TTL and S3-FIFO size-based eviction
 - Compression support
 - Observability (metrics, traces, logs)
 

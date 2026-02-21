@@ -3,7 +3,6 @@ package metadb
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -114,59 +113,6 @@ func TestMetaExpiryIndex_SingleEntryAfterRepeatedUpdates(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestBlobAccessIndex_SingleEntryAfterRepeatedTouches(t *testing.T) {
-	ctx := context.Background()
-	baseTime := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
-	currentTime := baseTime
-	db := newTestBoltDB(t, WithNow(func() time.Time { return currentTime }))
-
-	hash := "abc123def456"
-	hashBytes := []byte(hash)
-
-	// Put initial blob
-	entry := &BlobEntry{
-		Hash:       hash,
-		Size:       1024,
-		CachedAt:   currentTime,
-		LastAccess: currentTime,
-		RefCount:   1,
-	}
-	require.NoError(t, db.PutBlob(ctx, entry))
-
-	// Touch the blob 10 times, advancing time each time
-	for i := 0; i < 10; i++ {
-		currentTime = currentTime.Add(time.Hour)
-		_, err := db.TouchBlob(ctx, hash)
-		require.NoError(t, err)
-	}
-
-	// Verify index consistency
-	err := db.db.View(func(tx *bbolt.Tx) error {
-		// Check blobs_by_access bucket - should have exactly ONE entry for this hash
-		accessEntries := getBucketEntriesForValue(tx, bucketBlobsByAccess, hashBytes)
-		assert.Len(t, accessEntries, 1, "should have exactly one entry in blobs_by_access for this hash")
-
-		// Get the blob entry to verify LastAccess timestamp matches the index
-		hashBucket := tx.Bucket(bucketBlobsByHash)
-		require.NotNil(t, hashBucket)
-		blobData := hashBucket.Get(hashBytes)
-		require.NotNil(t, blobData)
-
-		if len(accessEntries) == 1 {
-			// Extract timestamp from access index key
-			accessTs := decodeTimestamp(accessEntries[0][:8])
-
-			// Verify it matches the blob's LastAccess (compare as UnixNano to avoid timezone issues)
-			var blobEntry BlobEntry
-			require.NoError(t, json.Unmarshal(blobData, &blobEntry))
-			assert.Equal(t, blobEntry.LastAccess.UnixNano(), accessTs.UnixNano(), "access index timestamp should match blob's LastAccess")
-		}
-
-		return nil
-	})
-	require.NoError(t, err)
-}
-
 func TestMetaExpiryIndex_DeleteCleansUpIndexes(t *testing.T) {
 	ctx := context.Background()
 	baseTime := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
@@ -201,51 +147,6 @@ func TestMetaExpiryIndex_DeleteCleansUpIndexes(t *testing.T) {
 
 		reverseEntries := getBucketEntriesForKey(tx, bucketMetaExpiryByKey, compoundKey)
 		assert.Empty(t, reverseEntries, "should have no reverse index entries after delete")
-
-		return nil
-	})
-	require.NoError(t, err)
-}
-
-func TestBlobAccessIndex_DeleteCleansUpIndexes(t *testing.T) {
-	ctx := context.Background()
-	baseTime := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
-	db := newTestBoltDB(t, WithNow(func() time.Time { return baseTime }))
-
-	hash := "deleteme123"
-	hashBytes := []byte(hash)
-
-	// Put blob
-	entry := &BlobEntry{
-		Hash:       hash,
-		Size:       1024,
-		CachedAt:   baseTime,
-		LastAccess: baseTime,
-		RefCount:   1,
-	}
-	require.NoError(t, db.PutBlob(ctx, entry))
-
-	// Verify index entries exist before delete
-	err := db.db.View(func(tx *bbolt.Tx) error {
-		accessEntries := getBucketEntriesForValue(tx, bucketBlobsByAccess, hashBytes)
-		assert.Len(t, accessEntries, 1, "should have access index entry before delete")
-
-		return nil
-	})
-	require.NoError(t, err)
-
-	// Delete blob
-	require.NoError(t, db.DeleteBlob(ctx, hash))
-
-	// Verify index entries are removed
-	err = db.db.View(func(tx *bbolt.Tx) error {
-		accessEntries := getBucketEntriesForValue(tx, bucketBlobsByAccess, hashBytes)
-		assert.Empty(t, accessEntries, "should have no access index entries after delete")
-
-		// Also verify blob is gone from hash bucket
-		hashBucket := tx.Bucket(bucketBlobsByHash)
-		require.NotNil(t, hashBucket)
-		assert.Nil(t, hashBucket.Get(hashBytes), "blob should be removed from hash bucket")
 
 		return nil
 	})
@@ -339,39 +240,6 @@ func TestIndexConsistency_AfterMixedOperations(t *testing.T) {
 				return nil
 			})
 			assert.True(t, forwardFound, "forward index should exist for reverse index entry")
-			return nil
-		})
-
-		// Check blob access index consistency
-		accessBucket := tx.Bucket(bucketBlobsByAccess)
-		hashBucket := tx.Bucket(bucketBlobsByHash)
-		require.NotNil(t, accessBucket)
-		require.NotNil(t, hashBucket)
-
-		accessIndexCount := countBucketEntries(tx, bucketBlobsByAccess)
-		blobCount := countBucketEntries(tx, bucketBlobsByHash)
-		assert.Equal(t, accessIndexCount, blobCount,
-			"blob access index count should match blob count")
-
-		// Verify every access index entry points to an existing blob
-		_ = accessBucket.ForEach(func(k, v []byte) error {
-			blobData := hashBucket.Get(v)
-			assert.NotNil(t, blobData, "access index should point to existing blob")
-			return nil
-		})
-
-		// Verify every blob has exactly one access index entry
-		_ = hashBucket.ForEach(func(hash, blobData []byte) error {
-			var entry BlobEntry
-			require.NoError(t, json.Unmarshal(blobData, &entry))
-
-			accessEntries := getBucketEntriesForValue(tx, bucketBlobsByAccess, hash)
-			assert.Len(t, accessEntries, 1, "blob %s should have exactly one access index entry", hash)
-
-			if len(accessEntries) == 1 {
-				accessTs := decodeTimestamp(accessEntries[0][:8])
-				assert.Equal(t, entry.LastAccess.UnixNano(), accessTs.UnixNano(), "access timestamp should match blob's LastAccess")
-			}
 			return nil
 		})
 
