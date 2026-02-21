@@ -18,6 +18,9 @@ const (
 
 	// DefaultTimeout is the default timeout for upstream requests.
 	DefaultTimeout = 30 * time.Second
+
+	// maxMetadataSize is the maximum size of a metadata response body (100 MB).
+	maxMetadataSize = 100 * 1024 * 1024
 )
 
 // ErrNotFound is returned when a package or version is not found.
@@ -156,7 +159,43 @@ func (u *Upstream) FetchPackageMetadataRaw(ctx context.Context, name string) ([]
 		return nil, fmt.Errorf("upstream returned %d: %s", resp.StatusCode, string(body))
 	}
 
-	return io.ReadAll(resp.Body)
+	return io.ReadAll(io.LimitReader(resp.Body, maxMetadataSize))
+}
+
+// FetchPackageMetadataDecoded fetches and decodes full metadata for a package without buffering
+// the raw JSON body. The response body is decoded directly into a map, using at most maxMetadataSize bytes.
+func (u *Upstream) FetchPackageMetadataDecoded(ctx context.Context, name string) (map[string]any, error) {
+	url := fmt.Sprintf("%s/%s", u.baseURL, encodePackageName(name))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+
+	req.Header.Set("Accept", "application/json")
+	u.setAuth(req)
+
+	resp, err := u.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("performing request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, ErrNotFound
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("upstream returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var meta map[string]any
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxMetadataSize)).Decode(&meta); err != nil {
+		return nil, fmt.Errorf("decoding metadata: %w", err)
+	}
+
+	return meta, nil
 }
 
 // FetchAbbreviatedMetadata fetches abbreviated metadata for a package.
