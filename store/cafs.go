@@ -25,12 +25,23 @@ type MetadataTracker interface {
 	Delete(ctx context.Context, hash contentcache.Hash) error
 }
 
+// EvictionNotifier is notified of blob lifecycle events so that a cache
+// eviction policy (e.g. S3-FIFO) can maintain its own state.
+type EvictionNotifier interface {
+	// Admit is called when a new blob is stored for the first time.
+	Admit(ctx context.Context, hash string, size int64)
+	// Remove is called when a blob is deleted externally (GC, explicit Delete).
+	// size is the blob's byte count for accurate accounting; 0 if unknown.
+	Remove(ctx context.Context, hash string, size int64)
+}
+
 // CAFS implements content-addressable file storage.
 // Content is stored in a sharded directory structure based on hash.
 type CAFS struct {
-	backend  backend.Backend
-	metadata MetadataTracker // Legacy tracker (keep for backwards compat)
-	metaDB   metadb.MetaDB   // New MetaDB for blob tracking
+	backend          backend.Backend
+	metadata         MetadataTracker  // Legacy tracker (keep for backwards compat)
+	metaDB           metadb.MetaDB    // New MetaDB for blob tracking
+	evictionNotifier EvictionNotifier // Optional S3-FIFO hook
 }
 
 // CAFSOption configures a CAFS instance.
@@ -47,6 +58,14 @@ func WithMetadataTracker(tracker MetadataTracker) CAFSOption {
 func WithMetaDB(db metadb.MetaDB) CAFSOption {
 	return func(c *CAFS) {
 		c.metaDB = db
+	}
+}
+
+// WithEvictionNotifier wires an EvictionNotifier (e.g. the S3-FIFO Manager)
+// into the CAFS so that admissions and external deletions are tracked.
+func WithEvictionNotifier(n EvictionNotifier) CAFSOption {
+	return func(c *CAFS) {
+		c.evictionNotifier = n
 	}
 }
 
@@ -136,6 +155,10 @@ func (c *CAFS) PutWithResult(ctx context.Context, r io.Reader) (*PutResult, erro
 		_ = c.metadata.Create(ctx, hash, size)
 	}
 
+	if c.evictionNotifier != nil {
+		c.evictionNotifier.Admit(ctx, hash.String(), size)
+	}
+
 	telemetry.RecordBlobWrite(ctx, telemetry.ProtocolFromContext(ctx), size, true)
 	return &PutResult{
 		Hash:   hash,
@@ -205,11 +228,20 @@ func (c *CAFS) Delete(ctx context.Context, h contentcache.Hash) error {
 		return err
 	}
 
-	// Clean up metadata (best effort)
+	// Look up size before deleting metadata so the eviction notifier can
+	// accurately adjust its byte counters.
+	var size int64
 	if c.metaDB != nil {
+		if entry, err := c.metaDB.GetBlob(ctx, h.String()); err == nil && entry != nil {
+			size = entry.Size
+		}
 		_ = c.metaDB.DeleteBlob(ctx, h.String())
 	} else if c.metadata != nil {
 		_ = c.metadata.Delete(ctx, h)
+	}
+
+	if c.evictionNotifier != nil {
+		c.evictionNotifier.Remove(ctx, h.String(), size)
 	}
 
 	return nil
@@ -329,6 +361,10 @@ func (c *CAFS) PutFramed(ctx context.Context, header *backend.BlobHeader, body i
 		if err := c.metaDB.PutBlob(ctx, entry); err != nil {
 			return contentcache.Hash{}, fmt.Errorf("tracking blob metadata: %w", err)
 		}
+	}
+
+	if c.evictionNotifier != nil {
+		c.evictionNotifier.Admit(ctx, hash.String(), size)
 	}
 
 	telemetry.RecordBlobWrite(ctx, telemetry.ProtocolFromContext(ctx), size, true)

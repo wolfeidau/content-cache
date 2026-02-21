@@ -46,13 +46,27 @@ type Result struct {
 	Errors                   []string      `json:"errors,omitempty"`
 }
 
+// BlobDeleteHook is called after a blob is successfully deleted from both the
+// backend and MetaDB. hash is the blob's hex hash string; size is its byte count.
+// Used to notify the S3-FIFO manager so it can clean up queue state.
+type BlobDeleteHook func(ctx context.Context, hash string, size int64)
+
+// Option configures a GC Manager.
+type Option func(*Manager)
+
+// WithBlobDeleteHook sets a hook that is called after each blob deletion.
+func WithBlobDeleteHook(fn BlobDeleteHook) Option {
+	return func(m *Manager) { m.blobDeleteHook = fn }
+}
+
 // Manager manages garbage collection for the content cache.
 type Manager struct {
-	db      metadb.MetaDB
-	backend backend.Backend
-	config  Config
-	metrics *Metrics
-	logger  *slog.Logger
+	db             metadb.MetaDB
+	backend        backend.Backend
+	config         Config
+	metrics        *Metrics
+	logger         *slog.Logger
+	blobDeleteHook BlobDeleteHook
 
 	stopCh  chan struct{}
 	doneCh  chan struct{}
@@ -62,17 +76,21 @@ type Manager struct {
 }
 
 // New creates a new GC manager.
-func New(db metadb.MetaDB, backend backend.Backend, config Config, metrics *Metrics, logger *slog.Logger) *Manager {
+func New(db metadb.MetaDB, backend backend.Backend, config Config, metrics *Metrics, logger *slog.Logger, opts ...Option) *Manager {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Manager{
+	m := &Manager{
 		db:      db,
 		backend: backend,
 		config:  config,
 		metrics: metrics,
 		logger:  logger,
 	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
 // Start starts the background GC goroutine.

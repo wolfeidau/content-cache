@@ -246,5 +246,9 @@ func (m *Manager) deleteBlob(ctx context.Context, hash string) (int64, error) {
 		return 0, fmt.Errorf("delete from metadb: %w", err)
 	}
 
+	if m.blobDeleteHook != nil && size > 0 {
+		m.blobDeleteHook(ctx, hash, size)
+	}
+
 	return size, nil
 }

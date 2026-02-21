@@ -130,6 +130,12 @@ func (b *BoltDB) Codec() *EnvelopeCodec {
 	return b.codec
 }
 
+// DB returns the underlying bbolt database.
+// Used by the s3fifo package to manage its queue buckets directly.
+func (b *BoltDB) DB() *bbolt.DB {
+	return b.db
+}
+
 // GetMeta retrieves protocol metadata.
 func (b *BoltDB) GetMeta(_ context.Context, protocol, key string) ([]byte, error) {
 	var data []byte

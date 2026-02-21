@@ -27,6 +27,7 @@ import (
 	"github.com/wolfeidau/content-cache/store"
 	"github.com/wolfeidau/content-cache/store/gc"
 	"github.com/wolfeidau/content-cache/store/metadb"
+	"github.com/wolfeidau/content-cache/store/s3fifo"
 	"github.com/wolfeidau/content-cache/telemetry"
 	"go.opentelemetry.io/otel"
 )
@@ -106,9 +107,13 @@ type Config struct {
 	CacheTTL time.Duration
 
 	// CacheMaxSize is the maximum size of the cache in bytes.
-	// When exceeded, least-recently-used content is evicted.
+	// When exceeded, content is evicted according to EvictionPolicy.
 	// Zero disables size-based eviction.
 	CacheMaxSize int64
+
+	// EvictionPolicy selects the size-based eviction algorithm.
+	// Supported values: "lru" (default), "s3fifo".
+	EvictionPolicy string
 
 	// ExpiryCheckInterval is how often to check for expired content.
 	// Default is 1 hour.
@@ -158,6 +163,13 @@ type Server struct {
 	sumdb         *goproxy.SumdbHandler
 	metaDB        metadb.MetaDB
 	gcManager     *gc.Manager
+	s3fifoManager s3fifoLifecycle
+}
+
+// s3fifoLifecycle is the subset of s3fifo.Manager used by the server for lifecycle management.
+type s3fifoLifecycle interface {
+	Start(context.Context)
+	Stop()
 }
 
 // New creates a new server with the given configuration.
@@ -188,7 +200,31 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("opening metadata database: %w", err)
 	}
 
-	// Initialize GC manager
+	// Get BoltDB for EnvelopeIndex creation and S3-FIFO queue access.
+	boltDB, ok := metaDB.(*metadb.BoltDB)
+	if !ok {
+		return nil, fmt.Errorf("metaDB must be *metadb.BoltDB for envelope storage")
+	}
+
+	// Initialize S3-FIFO eviction manager when requested.
+	// When S3-FIFO is active, GC skips LRU size eviction (MaxCacheBytes=0) and
+	// S3-FIFO handles size management independently.
+	var s3fifoMgr *s3fifo.Manager
+	if cfg.EvictionPolicy == "s3fifo" && cfg.CacheMaxSize > 0 {
+		s3fifoCfg := s3fifo.Config{
+			MaxSize:       cfg.CacheMaxSize,
+			CheckInterval: cfg.ExpiryCheckInterval,
+			Logger:        cfg.Logger.With("component", "s3fifo"),
+		}
+		var s3err error
+		s3fifoMgr, s3err = s3fifo.NewManager(boltDB.DB(), metaDB, instrumentedBackend, s3fifoCfg)
+		if s3err != nil {
+			return nil, fmt.Errorf("creating s3fifo manager: %w", s3err)
+		}
+		cfg.Logger.Info("s3fifo eviction enabled", "max_size", cfg.CacheMaxSize)
+	}
+
+	// Initialize GC manager. When S3-FIFO is active, disable GC's LRU phase.
 	var gcManager *gc.Manager
 	if cfg.CacheMaxSize > 0 {
 		gcInterval := cfg.GCInterval
@@ -203,23 +239,30 @@ func New(cfg Config) (*Server, error) {
 		if err != nil {
 			return nil, fmt.Errorf("creating gc metrics: %w", err)
 		}
+		gcMaxBytes := cfg.CacheMaxSize
+		gcOpts := []gc.Option{}
+		if s3fifoMgr != nil {
+			gcMaxBytes = 0 // S3-FIFO owns size eviction; GC handles only orphan/unreferenced cleanup.
+			s3fifoRef := s3fifoMgr
+			gcOpts = append(gcOpts, gc.WithBlobDeleteHook(func(ctx context.Context, hash string, size int64) {
+				s3fifoRef.Remove(ctx, hash, size)
+			}))
+		}
 		gcConfig := gc.Config{
 			Interval:      gcInterval,
 			StartupDelay:  gcStartupDelay,
-			MaxCacheBytes: cfg.CacheMaxSize,
+			MaxCacheBytes: gcMaxBytes,
 			BatchSize:     1000,
 		}
-		gcManager = gc.New(metaDB, instrumentedBackend, gcConfig, gcMetrics, cfg.Logger.With("component", "gc"))
+		gcManager = gc.New(metaDB, instrumentedBackend, gcConfig, gcMetrics, cfg.Logger.With("component", "gc"), gcOpts...)
 	}
 
-	// Initialize CAFS store with MetaDB tracking
-	cafsStore := store.NewCAFS(instrumentedBackend, store.WithMetaDB(metaDB))
-
-	// Get BoltDB for EnvelopeIndex creation (used by all protocols)
-	boltDB, ok := metaDB.(*metadb.BoltDB)
-	if !ok {
-		return nil, fmt.Errorf("metaDB must be *metadb.BoltDB for envelope storage")
+	// Initialize CAFS store with MetaDB tracking and optional S3-FIFO admission hook.
+	cafsOpts := []store.CAFSOption{store.WithMetaDB(metaDB)}
+	if s3fifoMgr != nil {
+		cafsOpts = append(cafsOpts, store.WithEvictionNotifier(s3fifoMgr))
 	}
+	cafsStore := store.NewCAFS(instrumentedBackend, cafsOpts...)
 
 	// Create shared downloader for singleflight deduplication
 	dl := download.New()
@@ -586,6 +629,7 @@ func New(cfg Config) (*Server, error) {
 		sumdb:         sumdbHandler,
 		metaDB:        metaDB,
 		gcManager:     gcManager,
+		s3fifoManager: s3fifoMgr,
 	}
 
 	// Build HTTP server
@@ -797,6 +841,11 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 
 // Start starts the server.
 func (s *Server) Start() error {
+	if s.s3fifoManager != nil {
+		s.logger.Info("starting S3-FIFO eviction manager")
+		s.s3fifoManager.Start(context.Background())
+	}
+
 	if s.gcManager != nil {
 		s.logger.Info("starting GC manager",
 			"interval", s.config.GCInterval,
@@ -817,6 +866,11 @@ func (s *Server) Start() error {
 // Shutdown gracefully shuts down the server.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.logger.Info("shutting down server")
+
+	// Stop S3-FIFO eviction manager
+	if s.s3fifoManager != nil {
+		s.s3fifoManager.Stop()
+	}
 
 	// Stop GC manager
 	if s.gcManager != nil {

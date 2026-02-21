@@ -36,8 +36,11 @@ protocol/              # Protocol handlers (one package per protocol)
   └── git/             # Git Smart HTTP proxy
 download/              # Singleflight-based download deduplication
 store/                 # Content-addressable storage (CAFS)
+  ├── gc/              # Garbage collection (TTL expiry, orphan cleanup, LRU eviction)
+  ├── metadb/          # BoltDB metadata index (blob entries, meta entries)
+  └── s3fifo/          # S3-FIFO eviction algorithm (queues + manager)
 backend/               # Storage backends (filesystem, future: S3)
-expiry/                # TTL and LRU cache expiration
+expiry/                # TTL and LRU cache expiration (legacy, unused by server)
 cache/                 # Local cache directory (gitignored)
 ```
 
