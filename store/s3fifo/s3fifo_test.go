@@ -2,9 +2,11 @@ package s3fifo
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -158,10 +160,10 @@ func TestEvictPromotionToMain(t *testing.T) {
 	exists, _ := b.Exists(ctx, contentcache.BlobStorageKey(mustParseHash(t, hash)))
 	require.True(t, exists, "promoted blob must not be deleted")
 
-	// AccessCount reset to 0 after promotion.
+	// AccessCount is carried forward to main (per S3-FIFO paper).
 	entry2, err := mdb.GetBlob(ctx, hash)
 	require.NoError(t, err)
-	require.Equal(t, 0, entry2.AccessCount)
+	require.Equal(t, 2, entry2.AccessCount, "access count should be preserved on promotion")
 
 	mgr.mu.Lock()
 	require.Equal(t, int64(0), mgr.smallBytes)
@@ -222,6 +224,11 @@ func TestEvictMainCold(t *testing.T) {
 
 	exists, _ := b.Exists(ctx, contentcache.BlobStorageKey(mustParseHash(t, hash)))
 	require.False(t, exists)
+
+	// Main-queue evictions must NOT add to the ghost set — only small-queue
+	// evictions do, to filter one-hit-wonders.
+	ghostFound, _ := mgr.queues.GhostContains(hash)
+	require.False(t, ghostFound, "main queue eviction must not add to ghost set")
 }
 
 func TestPinnedBlobSkipped(t *testing.T) {
@@ -291,6 +298,76 @@ func TestRecomputeBytes(t *testing.T) {
 	defer mgr.mu.Unlock()
 	require.Equal(t, int64(10), mgr.smallBytes)
 	require.Equal(t, int64(0), mgr.mainBytes)
+}
+
+func TestOrphanedQueueEntryCleanup(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("small queue orphan is silently dropped", func(t *testing.T) {
+		mgr, _, _ := testManager(t, Config{MaxSize: 5})
+
+		// A hash that exists in the queue but has no MetaDB entry.
+		orphanHash := strings.Repeat("a", 64)
+		require.NoError(t, mgr.queues.PushHead(QueueSmall, orphanHash))
+		mgr.mu.Lock()
+		mgr.smallBytes = 10 // force over-limit so maybeEvict acts
+		mgr.mu.Unlock()
+
+		mgr.maybeEvict(ctx)
+
+		nSmall, _ := mgr.queues.Len(QueueSmall)
+		require.Equal(t, 0, nSmall, "orphaned small queue entry should be silently dropped")
+	})
+
+	t.Run("main queue orphan is silently dropped", func(t *testing.T) {
+		mgr, _, _ := testManager(t, Config{MaxSize: 5, SmallQueuePercent: 10})
+
+		orphanHash := strings.Repeat("b", 64)
+		require.NoError(t, mgr.queues.PushHead(QueueMain, orphanHash))
+		mgr.mu.Lock()
+		mgr.mainBytes = 10
+		mgr.mu.Unlock()
+
+		mgr.maybeEvict(ctx)
+
+		nMain, _ := mgr.queues.Len(QueueMain)
+		require.Equal(t, 0, nMain, "orphaned main queue entry should be silently dropped")
+	})
+}
+
+func TestConcurrentAdmitRemove(t *testing.T) {
+	ctx := context.Background()
+	mgr, mdb, b := testManager(t, Config{MaxSize: 10 * 1024 * 1024})
+
+	const n = 50
+	hashes := make([]string, n)
+	sizes := make([]int64, n)
+	for i := range hashes {
+		content := fmt.Sprintf("blob-content-%d", i)
+		hashes[i] = putBlob(t, ctx, mdb, b, content)
+		sizes[i] = int64(len(content))
+	}
+
+	var wg sync.WaitGroup
+	for i := range hashes {
+		wg.Add(2)
+		hash, size := hashes[i], sizes[i]
+		go func() {
+			defer wg.Done()
+			mgr.Admit(ctx, hash, size)
+		}()
+		go func() {
+			defer wg.Done()
+			mgr.Remove(ctx, hash, size)
+		}()
+	}
+	wg.Wait()
+
+	// Byte counters must remain non-negative regardless of interleaving.
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	require.GreaterOrEqual(t, mgr.smallBytes, int64(0))
+	require.GreaterOrEqual(t, mgr.mainBytes, int64(0))
 }
 
 func TestGhostHitEndToEnd(t *testing.T) {

@@ -148,10 +148,15 @@ func (m *Manager) Admit(ctx context.Context, hash string, size int64) {
 		telemetry.RecordS3FIFOAdmission(ctx, QueueSmall, "new", size)
 	}
 
-	// Non-blocking signal: if eviction is already queued, drop the duplicate.
-	select {
-	case m.evictCh <- struct{}{}:
-	default:
+	// Signal the background eviction goroutine only when we are actually over
+	// the size limit. Signalling unconditionally would wake the goroutine on
+	// every Admit call — even well under capacity — causing unnecessary mutex
+	// contention and bbolt I/O.
+	if m.smallBytes+m.mainBytes > m.config.MaxSize {
+		select {
+		case m.evictCh <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -314,14 +319,10 @@ func (m *Manager) evictFromSmall(ctx context.Context) (skipped bool, err error) 
 	m.smallBytes -= entry.Size
 
 	if entry.AccessCount > 0 {
-		// Passed probation: promote to main queue.
-		// Reset AccessCount so the blob is re-evaluated from scratch in main.
-		entry.AccessCount = 0
-		if err := m.metaDB.PutBlob(ctx, entry); err != nil {
-			m.smallBytes += entry.Size // undo
-			_ = m.queues.PushHead(QueueSmall, hash)
-			return false, fmt.Errorf("reset access count for %s: %w", hash, err)
-		}
+		// Passed probation: promote to main queue. The frequency counter is
+		// carried forward per the S3-FIFO paper — a blob that received N hits
+		// in the small queue earns N second-chance passes in the main queue
+		// before it can be evicted. No MetaDB write is needed here.
 		if err := m.queues.PushHead(QueueMain, hash); err != nil {
 			m.smallBytes += entry.Size
 			return false, err

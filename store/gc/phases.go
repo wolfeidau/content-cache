@@ -168,7 +168,9 @@ func (m *Manager) deleteBlob(ctx context.Context, hash string) (int64, error) {
 		return 0, fmt.Errorf("delete from metadb: %w", err)
 	}
 
-	if m.blobDeleteHook != nil && size > 0 {
+	// Always notify the hook, even when size==0 (blob was already absent from
+	// MetaDB). Remove() guards against counter underflow, so passing 0 is safe.
+	if m.blobDeleteHook != nil {
 		m.blobDeleteHook(ctx, hash, size)
 	}
 
