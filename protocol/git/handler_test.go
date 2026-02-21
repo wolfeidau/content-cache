@@ -402,6 +402,51 @@ func TestHandlerUploadPackGzip(t *testing.T) {
 	})
 }
 
+func TestHandlerDecompressedBodyLimit(t *testing.T) {
+	upstream := fakeGitUpstream(t)
+
+	tmpDir, err := os.MkdirTemp("", "git-test-*")
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	b, err := backend.NewFilesystem(tmpDir)
+	require.NoError(t, err)
+	cafs := store.NewCAFS(b)
+
+	db := metadb.NewBoltDB(metadb.WithNoSync(true))
+	require.NoError(t, db.Open(filepath.Join(tmpDir, "meta.db")))
+	defer func() { _ = db.Close() }()
+
+	packIdx, err := metadb.NewEnvelopeIndex(db, "git", "pack", 24*time.Hour)
+	require.NoError(t, err)
+	idx := NewIndex(packIdx)
+	dl := download.New()
+
+	// Set the decompressed limit to a small value so we can trigger it in a test.
+	h := NewHandler(idx, cafs,
+		WithUpstream(NewUpstream(WithHTTPClient(redirectClient(upstream.URL)))),
+		WithDownloader(dl),
+		WithAllowedHosts([]string{"github.com"}),
+		WithMaxDecompressedBodySize(10), // 10 bytes decompressed limit
+	)
+
+	// Build a gzip body whose decompressed form exceeds the 10-byte limit.
+	plainBody := bytes.Repeat([]byte("x"), 100)
+	var gzBuf bytes.Buffer
+	gz := gzip.NewWriter(&gzBuf)
+	_, err = gz.Write(plainBody)
+	require.NoError(t, err)
+	require.NoError(t, gz.Close())
+
+	req := httptest.NewRequest(http.MethodPost, "/github.com/user/repo.git/git-upload-pack", bytes.NewReader(gzBuf.Bytes()))
+	req.Header.Set("Content-Encoding", "gzip")
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
+}
+
 func TestHandlerUploadPackCacheHitSkipsUpstream(t *testing.T) {
 	var fetchCount atomic.Int32
 

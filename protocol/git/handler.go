@@ -81,6 +81,14 @@ func WithMaxRequestBodySize(size int64) HandlerOption {
 	}
 }
 
+// WithMaxDecompressedBodySize sets the maximum allowed decompressed size for
+// gzip-encoded upload-pack request bodies.
+func WithMaxDecompressedBodySize(size int64) HandlerOption {
+	return func(h *Handler) {
+		h.maxDecompressedBodySize = size
+	}
+}
+
 // NewHandler creates a new Git proxy handler.
 func NewHandler(index *Index, store store.Store, opts ...HandlerOption) *Handler {
 	defaultRouter, _ := NewRouter(nil, WithFallback(NewUpstream()))
@@ -301,6 +309,12 @@ func (h *Handler) handleUploadPack(w http.ResponseWriter, r *http.Request, repo 
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
+		if decompSize >= h.maxDecompressedBodySize {
+			_ = decompFile.Close()
+			logger.Error("decompressed request body exceeds size limit", "limit", h.maxDecompressedBodySize)
+			http.Error(w, "decompressed request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 
 		bodyHash = hr.Sum()
 		logger.Debug("decompressed gzip request body", "decompressed_size", decompSize)
@@ -395,11 +409,18 @@ func (h *Handler) handleUploadPack(w http.ResponseWriter, r *http.Request, repo 
 
 	sfKey := fmt.Sprintf("git:upload-pack:%s", cacheKey)
 
-	// Transfer ownership of activeBodyFile to the closure / fetchAndStorePack.
+	// Transfer ownership of activeBodyFile to fetchAndStorePack via the closure.
+	// If singleflight deduplicates this call (our closure is never invoked), we must
+	// close bodyFile ourselves so the file descriptor is not leaked.
 	bodyFile := activeBodyFile
+	closureRan := false
 	result, _, err := h.downloader.Do(ctx, sfKey, func(dlCtx context.Context) (*download.Result, error) {
+		closureRan = true
 		return h.fetchAndStorePack(dlCtx, repo, gitProtocol, bodyFile, bodyHash, cacheKey, logger)
 	})
+	if !closureRan {
+		_ = bodyFile.Close()
+	}
 
 	download.HandleResult(download.HandleResultParams{
 		Writer:     w,

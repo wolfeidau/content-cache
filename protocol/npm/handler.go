@@ -174,11 +174,8 @@ func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request, name st
 		return
 	}
 
-	// Rewrite tarball URLs and optionally abbreviate before encoding once
+	// Rewrite tarball URLs, then encode the full metadata for caching.
 	h.rewriteTarballURLs(r, meta)
-	if abbreviated {
-		meta = h.abbreviateMetadata(meta)
-	}
 
 	encoded, err := json.Marshal(meta)
 	if err != nil {
@@ -187,7 +184,8 @@ func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request, name st
 		return
 	}
 
-	// Cache the processed (URL-rewritten) bytes asynchronously
+	// Cache the full URL-rewritten bytes asynchronously. We always cache the
+	// full form so that abbreviated and full requests share one cache entry.
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
@@ -200,8 +198,20 @@ func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request, name st
 		}
 	}()
 
+	// Abbreviate only for the response, never for the cached copy.
+	response := encoded
+	if abbreviated {
+		abbrevMeta := h.abbreviateMetadata(meta)
+		response, err = json.Marshal(abbrevMeta)
+		if err != nil {
+			logger.Error("failed to encode abbreviated metadata", "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	if _, err := w.Write(encoded); err != nil {
+	if _, err := w.Write(response); err != nil {
 		logger.Error("failed to write response", "error", err)
 	}
 }
