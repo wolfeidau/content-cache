@@ -116,6 +116,79 @@ func TestHandlerMetadata(t *testing.T) {
 	})
 }
 
+func TestHandlerMetadataCacheNotAbbreviated(t *testing.T) {
+	// Regression test: if the first request is abbreviated, the cache must still
+	// store the full metadata so that a subsequent full request gets all fields.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"name": "mypkg",
+			"description": "a full description",
+			"dist-tags": {"latest": "1.0.0"},
+			"versions": {
+				"1.0.0": {
+					"name": "mypkg",
+					"version": "1.0.0",
+					"dist": {
+						"tarball": "https://registry.npmjs.org/mypkg/-/mypkg-1.0.0.tgz",
+						"shasum": "abc"
+					}
+				}
+			}
+		}`))
+	}))
+	defer upstream.Close()
+
+	h, cleanup := newTestHandler(t, upstream)
+	defer cleanup()
+
+	// First request: abbreviated (cache miss — populates cache).
+	req1 := httptest.NewRequest(http.MethodGet, "/mypkg", nil)
+	req1.Header.Set("Accept", "application/vnd.npm.install-v1+json")
+	w1 := httptest.NewRecorder()
+	h.ServeHTTP(w1, req1)
+	require.Equal(t, http.StatusOK, w1.Code)
+
+	// Wait briefly for the async cache write to complete.
+	h.Close()
+
+	// Recreate handler reusing the same index/store so the cache is warm.
+	// (newTestHandler creates fresh storage; instead re-serve through the same h.)
+	// Re-open by creating a second handler backed by the same upstream (which now
+	// counts hits) — but simpler: just make a second request through the same handler.
+	// The cache write goroutine is done after h.Close() above, so we need a new handler.
+	// Use the upstream call count to distinguish cache miss vs hit.
+	callCount := 0
+	upstream2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"name":"mypkg","description":"a full description","versions":{}}`))
+	}))
+	defer upstream2.Close()
+
+	h2, cleanup2 := newTestHandler(t, upstream2)
+	defer cleanup2()
+
+	// Warm the cache with an abbreviated request.
+	reqA := httptest.NewRequest(http.MethodGet, "/mypkg", nil)
+	reqA.Header.Set("Accept", "application/vnd.npm.install-v1+json")
+	wA := httptest.NewRecorder()
+	h2.ServeHTTP(wA, reqA)
+	require.Equal(t, http.StatusOK, wA.Code)
+	require.Equal(t, 1, callCount, "first request should fetch from upstream")
+
+	h2.wg.Wait() // wait for cache write
+
+	// Second request: full metadata — must come from cache (callCount stays at 1)
+	// and must include the "description" field that abbreviation strips.
+	reqB := httptest.NewRequest(http.MethodGet, "/mypkg", nil)
+	wB := httptest.NewRecorder()
+	h2.ServeHTTP(wB, reqB)
+	require.Equal(t, http.StatusOK, wB.Code)
+	require.Equal(t, 1, callCount, "second request should be served from cache")
+	require.Contains(t, wB.Body.String(), `"description"`, "full response must include description field")
+}
+
 func TestHandlerTarball(t *testing.T) {
 	tarballContent := []byte("fake-tarball-content-12345")
 

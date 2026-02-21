@@ -1,8 +1,6 @@
 package git
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -14,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/klauspost/compress/gzip"
 	contentcache "github.com/wolfeidau/content-cache"
 	"github.com/wolfeidau/content-cache/download"
 	"github.com/wolfeidau/content-cache/store"
@@ -22,13 +21,14 @@ import (
 
 // Handler implements the Git Smart HTTP proxy as an HTTP handler.
 type Handler struct {
-	index              *Index
-	store              store.Store
-	router             *Router
-	logger             *slog.Logger
-	downloader         *download.Downloader
-	allowedHosts       map[string]bool
-	maxRequestBodySize int64
+	index                   *Index
+	store                   store.Store
+	router                  *Router
+	logger                  *slog.Logger
+	downloader              *download.Downloader
+	allowedHosts            map[string]bool
+	maxRequestBodySize      int64
+	maxDecompressedBodySize int64
 }
 
 // HandlerOption configures a Handler.
@@ -81,16 +81,25 @@ func WithMaxRequestBodySize(size int64) HandlerOption {
 	}
 }
 
+// WithMaxDecompressedBodySize sets the maximum allowed decompressed size for
+// gzip-encoded upload-pack request bodies.
+func WithMaxDecompressedBodySize(size int64) HandlerOption {
+	return func(h *Handler) {
+		h.maxDecompressedBodySize = size
+	}
+}
+
 // NewHandler creates a new Git proxy handler.
 func NewHandler(index *Index, store store.Store, opts ...HandlerOption) *Handler {
 	defaultRouter, _ := NewRouter(nil, WithFallback(NewUpstream()))
 	h := &Handler{
-		index:              index,
-		store:              store,
-		router:             defaultRouter,
-		logger:             slog.Default(),
-		allowedHosts:       make(map[string]bool),
-		maxRequestBodySize: DefaultMaxRequestBodySize,
+		index:                   index,
+		store:                   store,
+		router:                  defaultRouter,
+		logger:                  slog.Default(),
+		allowedHosts:            make(map[string]bool),
+		maxRequestBodySize:      DefaultMaxRequestBodySize,
+		maxDecompressedBodySize: DefaultMaxDecompressedBodySize,
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -234,51 +243,134 @@ func (h *Handler) handleUploadPack(w http.ResponseWriter, r *http.Request, repo 
 
 	telemetry.SetEndpoint(r, "upload-pack")
 
-	// Read and limit the request body
+	// Stream the (size-limited) request body to a temp file to avoid large heap allocations.
 	r.Body = http.MaxBytesReader(w, r.Body, h.maxRequestBodySize)
-	body, err := io.ReadAll(r.Body)
+
+	rawFile, err := os.CreateTemp("", "git-request-*")
 	if err != nil {
-		var maxBytesErr *http.MaxBytesError
-		if errors.As(err, &maxBytesErr) {
-			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
-			return
-		}
-		logger.Error("failed to read request body", "error", err)
-		http.Error(w, "bad request", http.StatusBadRequest)
+		logger.Error("failed to create temp file for request body", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	defer func() { _ = os.Remove(rawFile.Name()) }()
 
-	// Decompress gzip-encoded request bodies. Git clients may send
-	// Content-Encoding: gzip on large upload-pack requests. We decompress
-	// so caching is consistent and upstream receives plain pkt-line data.
+	// activeBodyFile is the file that carries the (possibly decompressed) body
+	// to fetchAndStorePack. Its ownership transfers there, which closes it.
+	var activeBodyFile *os.File
+	var bodyHash contentcache.Hash
+
 	if r.Header.Get("Content-Encoding") == "gzip" {
-		gz, gzErr := gzip.NewReader(bytes.NewReader(body))
+		// Stream compressed body to rawFile, then decompress into a second temp file.
+		if _, copyErr := io.Copy(rawFile, r.Body); copyErr != nil {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(copyErr, &maxBytesErr) {
+				_ = rawFile.Close()
+				http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
+			_ = rawFile.Close()
+			logger.Error("failed to stream compressed request body", "error", copyErr)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+
+		if _, seekErr := rawFile.Seek(0, io.SeekStart); seekErr != nil {
+			_ = rawFile.Close()
+			logger.Error("failed to seek compressed request body temp file", "error", seekErr)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		gz, gzErr := gzip.NewReader(rawFile)
 		if gzErr != nil {
+			_ = rawFile.Close()
 			logger.Error("failed to create gzip reader for request body", "error", gzErr)
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		body, err = io.ReadAll(gz)
+
+		decompFile, decompErr := os.CreateTemp("", "git-request-decomp-*")
+		if decompErr != nil {
+			_ = gz.Close()
+			_ = rawFile.Close()
+			logger.Error("failed to create temp file for decompressed body", "error", decompErr)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		defer func() { _ = os.Remove(decompFile.Name()) }()
+
+		hr := contentcache.NewHashingReader(io.LimitReader(gz, h.maxDecompressedBodySize))
+		decompSize, copyErr := io.Copy(decompFile, hr)
 		_ = gz.Close()
-		if err != nil {
-			logger.Error("failed to decompress gzip request body", "error", err)
+		_ = rawFile.Close()
+		if copyErr != nil {
+			_ = decompFile.Close()
+			logger.Error("failed to decompress gzip request body", "error", copyErr)
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		logger.Debug("decompressed gzip request body", "decompressed_size", len(body))
+		if decompSize >= h.maxDecompressedBodySize {
+			_ = decompFile.Close()
+			logger.Error("decompressed request body exceeds size limit", "limit", h.maxDecompressedBodySize)
+			http.Error(w, "decompressed request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+
+		bodyHash = hr.Sum()
+		logger.Debug("decompressed gzip request body", "decompressed_size", decompSize)
+
+		if _, seekErr := decompFile.Seek(0, io.SeekStart); seekErr != nil {
+			_ = decompFile.Close()
+			logger.Error("failed to seek decompressed body temp file", "error", seekErr)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		activeBodyFile = decompFile
+	} else {
+		// Non-gzip: stream directly while computing hash.
+		hr := contentcache.NewHashingReader(r.Body)
+		if _, copyErr := io.Copy(rawFile, hr); copyErr != nil {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(copyErr, &maxBytesErr) {
+				_ = rawFile.Close()
+				http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
+			_ = rawFile.Close()
+			logger.Error("failed to stream request body", "error", copyErr)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+
+		bodyHash = hr.Sum()
+
+		if _, seekErr := rawFile.Seek(0, io.SeekStart); seekErr != nil {
+			_ = rawFile.Close()
+			logger.Error("failed to seek request body temp file", "error", seekErr)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		activeBodyFile = rawFile
 	}
 
 	gitProtocol := r.Header.Get("Git-Protocol")
-	bodyHash := contentcache.HashBytes(body)
 	cacheKey := fmt.Sprintf("%s:%s:%s", repo.String(), gitProtocol, bodyHash.String())
 
 	logger.Debug("upload-pack request details",
-		"body_size", len(body),
 		"body_hash", bodyHash.ShortString(),
 		"git_protocol", gitProtocol,
 		"cache_key", cacheKey,
 	)
-	logPktLineSummary(logger, body)
+	if logger.Enabled(ctx, slog.LevelDebug) {
+		const debugReadLimit = 4 * 1024 * 1024
+		if _, seekErr := activeBodyFile.Seek(0, io.SeekStart); seekErr == nil {
+			debugBytes, _ := io.ReadAll(io.LimitReader(activeBodyFile, debugReadLimit))
+			_, _ = activeBodyFile.Seek(0, io.SeekStart)
+			logPktLineSummary(logger, debugBytes)
+		}
+	}
 
 	// Check cache
 	cached, err := h.index.GetCachedPack(ctx, cacheKey)
@@ -291,6 +383,7 @@ func (h *Handler) handleUploadPack(w http.ResponseWriter, r *http.Request, repo 
 		if exists {
 			logger.Debug("cache hit", "hash", cached.ResponseHash.ShortString())
 			telemetry.SetCacheResult(r, telemetry.CacheHit)
+			_ = activeBodyFile.Close()
 
 			download.ServeFromStore(ctx, w, r, h.store, &download.Result{
 				Hash: cached.ResponseHash,
@@ -316,9 +409,18 @@ func (h *Handler) handleUploadPack(w http.ResponseWriter, r *http.Request, repo 
 
 	sfKey := fmt.Sprintf("git:upload-pack:%s", cacheKey)
 
+	// Transfer ownership of activeBodyFile to fetchAndStorePack via the closure.
+	// If singleflight deduplicates this call (our closure is never invoked), we must
+	// close bodyFile ourselves so the file descriptor is not leaked.
+	bodyFile := activeBodyFile
+	closureRan := false
 	result, _, err := h.downloader.Do(ctx, sfKey, func(dlCtx context.Context) (*download.Result, error) {
-		return h.fetchAndStorePack(dlCtx, repo, gitProtocol, body, bodyHash, cacheKey, logger)
+		closureRan = true
+		return h.fetchAndStorePack(dlCtx, repo, gitProtocol, bodyFile, bodyHash, cacheKey, logger)
 	})
+	if !closureRan {
+		_ = bodyFile.Close()
+	}
 
 	download.HandleResult(download.HandleResultParams{
 		Writer:     w,
@@ -335,16 +437,21 @@ func (h *Handler) handleUploadPack(w http.ResponseWriter, r *http.Request, repo 
 }
 
 // fetchAndStorePack fetches an upload-pack response from upstream, stores it in CAFS,
-// and updates the index.
-func (h *Handler) fetchAndStorePack(ctx context.Context, repo RepoRef, gitProtocol string, body []byte, bodyHash contentcache.Hash, cacheKey string, logger *slog.Logger) (*download.Result, error) {
+// and updates the index. It takes ownership of bodyFile and closes it before returning.
+func (h *Handler) fetchAndStorePack(ctx context.Context, repo RepoRef, gitProtocol string, bodyFile io.ReadSeeker, bodyHash contentcache.Hash, cacheKey string, logger *slog.Logger) (*download.Result, error) {
+	defer func() {
+		if c, ok := bodyFile.(io.Closer); ok {
+			_ = c.Close()
+		}
+	}()
+
 	logger.Debug("fetching upload-pack from upstream",
 		"upstream_url", repo.UpstreamURL(),
-		"body_size", len(body),
 		"git_protocol", gitProtocol,
 	)
 
 	upstream := h.router.Match(repo)
-	rc, err := upstream.FetchUploadPack(ctx, repo, gitProtocol, bytes.NewReader(body))
+	rc, err := upstream.FetchUploadPack(ctx, repo, gitProtocol, bodyFile)
 	if err != nil {
 		logger.Error("download failed", "error", err)
 		return nil, err

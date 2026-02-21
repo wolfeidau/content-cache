@@ -20,6 +20,9 @@ const (
 
 	// DefaultMaxRequestBodySize is the maximum size of a git-upload-pack request body (100MB).
 	DefaultMaxRequestBodySize int64 = 100 * 1024 * 1024
+
+	// DefaultMaxDecompressedBodySize is the maximum size of a decompressed git-upload-pack body (500MB).
+	DefaultMaxDecompressedBodySize int64 = 500 * 1024 * 1024
 )
 
 // ErrNotFound is returned when a cached pack is not found.

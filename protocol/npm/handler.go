@@ -159,11 +159,11 @@ func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request, name st
 		logger.Error("cache read failed", "error", err)
 	}
 
-	// Fetch from upstream
+	// Fetch from upstream: decode directly without buffering raw bytes
 	logger.Debug("cache miss, fetching from upstream")
 	telemetry.SetCacheResult(r, telemetry.CacheMiss)
 	upstream := h.router.Match(name)
-	rawMeta, err := upstream.FetchPackageMetadataRaw(ctx, name)
+	meta, err := upstream.FetchPackageMetadataDecoded(ctx, name)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -174,20 +174,46 @@ func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request, name st
 		return
 	}
 
-	// Cache metadata asynchronously with proper lifecycle management
+	// Rewrite tarball URLs, then encode the full metadata for caching.
+	h.rewriteTarballURLs(r, meta)
+
+	encoded, err := json.Marshal(meta)
+	if err != nil {
+		logger.Error("failed to encode metadata", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// Cache the full URL-rewritten bytes asynchronously. We always cache the
+	// full form so that abbreviated and full requests share one cache entry.
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
 		cacheCtx, cancel := context.WithTimeout(h.ctx, cacheTimeout)
 		defer cancel()
-		if err := h.index.PutPackageMetadata(cacheCtx, name, rawMeta); err != nil {
+		if err := h.index.PutPackageMetadata(cacheCtx, name, encoded); err != nil {
 			logger.Error("failed to cache metadata", "error", err)
 		} else {
 			logger.Debug("cached metadata")
 		}
 	}()
 
-	h.writeMetadataResponse(w, r, name, rawMeta, abbreviated, logger)
+	// Abbreviate only for the response, never for the cached copy.
+	response := encoded
+	if abbreviated {
+		abbrevMeta := h.abbreviateMetadata(meta)
+		response, err = json.Marshal(abbrevMeta)
+		if err != nil {
+			logger.Error("failed to encode abbreviated metadata", "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if _, err := w.Write(response); err != nil {
+		logger.Error("failed to write response", "error", err)
+	}
 }
 
 // writeMetadataResponse writes the metadata response, optionally rewriting tarball URLs.

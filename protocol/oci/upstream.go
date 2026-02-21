@@ -18,6 +18,9 @@ const (
 
 	// DockerContentDigestHeader is the header containing the manifest digest.
 	DockerContentDigestHeader = "Docker-Content-Digest"
+
+	// maxManifestSize is the maximum size of a manifest response body (32 MB).
+	maxManifestSize = 32 * 1024 * 1024
 )
 
 // Upstream fetches content from an upstream OCI registry.
@@ -124,7 +127,7 @@ func (u *Upstream) FetchManifest(ctx context.Context, name, reference string) ([
 		return nil, "", "", fmt.Errorf("upstream returned %d: %s", resp.StatusCode, string(body))
 	}
 
-	content, err := io.ReadAll(resp.Body)
+	content, err := io.ReadAll(io.LimitReader(resp.Body, maxManifestSize))
 	if err != nil {
 		return nil, "", "", fmt.Errorf("reading response: %w", err)
 	}
