@@ -58,6 +58,10 @@ type Metrics struct {
 	backendRequestsTotal    metric.Int64Counter
 	backendBytesTotal       metric.Int64Counter
 
+	// Reaper metrics
+	reaperDeletedTotal metric.Int64Counter
+	reaperDuration     metric.Float64Histogram
+
 	// S3-FIFO eviction metrics
 	s3fifoAdmissionsTotal          metric.Int64Counter
 	s3fifoAdmissionBytesTotal      metric.Int64Counter
@@ -282,6 +286,25 @@ func doInitMetrics(ctx context.Context, cfg MetricsConfig) error {
 		return err
 	}
 
+	reaperDeletedTotal, err := meter.Int64Counter(
+		"content_cache_reaper_deleted_total",
+		metric.WithDescription("Total entries deleted by reapers"),
+		metric.WithUnit("{entry}"),
+	)
+	if err != nil {
+		return err
+	}
+
+	reaperDuration, err := meter.Float64Histogram(
+		"content_cache_reaper_duration_seconds",
+		metric.WithDescription("Duration of reaper cycles"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30),
+	)
+	if err != nil {
+		return err
+	}
+
 	s3fifoAdmissionsTotal, err := meter.Int64Counter(
 		"content_cache_s3fifo_admissions_total",
 		metric.WithDescription("Total blobs admitted to S3-FIFO queues"),
@@ -446,6 +469,8 @@ func doInitMetrics(ctx context.Context, cfg MetricsConfig) error {
 	}
 
 	globalMetrics = &Metrics{
+		reaperDeletedTotal:             reaperDeletedTotal,
+		reaperDuration:                 reaperDuration,
 		requestsTotal:                  requestsTotal,
 		responseBytesTotal:             responseBytesTotal,
 		requestDuration:                requestDuration,
@@ -725,6 +750,17 @@ func UpdateS3FIFOQueueState(ctx context.Context, smallBytes, mainBytes int64, sm
 		overlimit = 0
 	}
 	globalMetrics.s3fifoOverlimitBytes.Record(ctx, overlimit)
+}
+
+// RecordReaperCycle records one reaper cycle's deleted count and duration.
+// reaper is "envelope" or "expiry". Called unconditionally per cycle.
+func RecordReaperCycle(ctx context.Context, reaper string, deleted int, duration time.Duration) {
+	if globalMetrics == nil {
+		return
+	}
+	attrs := metric.WithAttributes(attribute.String("reaper", reaper))
+	globalMetrics.reaperDeletedTotal.Add(ctx, int64(deleted), attrs)
+	globalMetrics.reaperDuration.Record(ctx, duration.Seconds(), attrs)
 }
 
 // StatusClass returns the HTTP status class (2xx, 3xx, 4xx, 5xx).

@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"time"
+
+	"github.com/wolfeidau/content-cache/telemetry"
 )
 
 // EnvelopeReaper runs periodic cleanup of expired envelope metadata.
@@ -138,6 +140,8 @@ func (r *EnvelopeReaper) reapCycle(ctx context.Context) {
 			"duration", r.now().Sub(start),
 			"totalReaped", r.totalReaped)
 	}
+
+	telemetry.RecordReaperCycle(ctx, "envelope", cycleTotal, time.Since(start))
 }
 
 // reapBatch processes a single batch of expired entries.
