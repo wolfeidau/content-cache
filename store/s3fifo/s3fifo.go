@@ -158,6 +158,18 @@ func (m *Manager) Admit(ctx context.Context, hash string, size int64) {
 		default:
 		}
 	}
+
+	// Emit queue-state gauges on every admission so they are visible before
+	// the first eviction run (which may be up to CheckInterval away).
+	smallLen, _ := m.queues.Len(QueueSmall)
+	mainLen, _ := m.queues.Len(QueueMain)
+	ghostLen, _ := m.queues.GhostLen()
+	smallTarget := m.config.MaxSize * int64(m.config.SmallQueuePercent) / 100
+	telemetry.UpdateS3FIFOQueueState(ctx,
+		m.smallBytes, m.mainBytes,
+		smallLen, mainLen, ghostLen,
+		m.config.MaxSize, smallTarget,
+	)
 }
 
 // Remove cleans up queue state when a blob is externally deleted (GC, CAFS.Delete).

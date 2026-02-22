@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"time"
+
+	"github.com/wolfeidau/content-cache/telemetry"
 )
 
 // ExpiryReaper runs periodic cleanup of expired metadata.
@@ -73,6 +75,12 @@ func (r *ExpiryReaper) Run(ctx context.Context) {
 
 // reapBatch processes a batch of expired entries.
 func (r *ExpiryReaper) reapBatch(ctx context.Context) {
+	start := time.Now()
+	var deleted int
+	defer func() {
+		telemetry.RecordReaperCycle(ctx, "expiry", deleted, time.Since(start))
+	}()
+
 	expired, err := r.db.GetExpiredMeta(ctx, r.db.now(), r.batchSize)
 	if err != nil {
 		r.logger.Error("failed to get expired meta", "error", err)
@@ -85,7 +93,6 @@ func (r *ExpiryReaper) reapBatch(ctx context.Context) {
 
 	r.logger.Debug("reaping expired entries", "count", len(expired))
 
-	var deleted int
 	for _, entry := range expired {
 		if err := r.db.DeleteMetaWithRefs(ctx, entry.Protocol, entry.Key); err != nil {
 			r.logger.Warn("failed to delete expired entry",

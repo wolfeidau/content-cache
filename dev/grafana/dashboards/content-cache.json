@@ -522,8 +522,8 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
         {
-          "expr": "rate(content_cache_gc_lru_blobs_evicted_total{job=\"content-cache\"}[$__rate_interval])",
-          "legendFormat": "LRU evicted",
+          "expr": "sum by (queue) (rate(content_cache_s3fifo_evictions_total{job=\"content-cache\"}[$__rate_interval]))",
+          "legendFormat": "{{queue}} evicted",
           "refId": "A"
         },
         {
@@ -575,15 +575,40 @@
       }
     },
     {
+      "title": "Reaper Activity",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 99 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "expr": "sum by (reaper) (rate(content_cache_reaper_deleted_total{job=\"content-cache\"}[$__rate_interval]))",
+          "legendFormat": "{{reaper}} deleted/s",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (reaper) (rate(content_cache_reaper_duration_seconds_count{job=\"content-cache\"}[$__rate_interval]))",
+          "legendFormat": "{{reaper}} cycles/s",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
       "title": "Go Runtime",
       "type": "row",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 99 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 107 },
       "collapsed": false
     },
     {
       "title": "Memory Usage",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 100 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 108 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
         {
@@ -618,7 +643,7 @@
     {
       "title": "Goroutines",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 100 },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 108 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
         {
@@ -638,7 +663,7 @@
     {
       "title": "CPU Usage",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 100 },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 108 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
         {
@@ -658,7 +683,7 @@
     {
       "title": "Open File Descriptors",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 108 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 116 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
         {
@@ -683,7 +708,7 @@
     {
       "title": "GC Pause Duration",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 108 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 116 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
         {
