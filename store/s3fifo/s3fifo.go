@@ -62,6 +62,9 @@ type Manager struct {
 	mu         sync.Mutex
 	smallBytes int64
 	mainBytes  int64
+	smallLen   int
+	mainLen    int
+	ghostLen   int
 
 	evictCh chan struct{}
 	stopCh  chan struct{}
@@ -98,8 +101,8 @@ func NewManager(db *bbolt.DB, mdb metadb.MetaDB, b backend.Backend, cfg Config) 
 		doneCh:  make(chan struct{}),
 	}
 
-	if err := m.recomputeBytes(context.Background()); err != nil {
-		return nil, fmt.Errorf("s3fifo: recomputing byte totals: %w", err)
+	if err := m.recomputeState(context.Background()); err != nil {
+		return nil, fmt.Errorf("s3fifo: recomputing state: %w", err)
 	}
 
 	return m, nil
@@ -137,6 +140,8 @@ func (m *Manager) Admit(ctx context.Context, hash string, size int64) {
 			return
 		}
 		m.mainBytes += size
+		m.mainLen++
+		m.ghostLen--
 		telemetry.RecordS3FIFOGhostHit(ctx)
 		telemetry.RecordS3FIFOAdmission(ctx, QueueMain, "ghost_hit", size)
 	} else {
@@ -145,6 +150,7 @@ func (m *Manager) Admit(ctx context.Context, hash string, size int64) {
 			return
 		}
 		m.smallBytes += size
+		m.smallLen++
 		telemetry.RecordS3FIFOAdmission(ctx, QueueSmall, "new", size)
 	}
 
@@ -161,13 +167,10 @@ func (m *Manager) Admit(ctx context.Context, hash string, size int64) {
 
 	// Emit queue-state gauges on every admission so they are visible before
 	// the first eviction run (which may be up to CheckInterval away).
-	smallLen, _ := m.queues.Len(QueueSmall)
-	mainLen, _ := m.queues.Len(QueueMain)
-	ghostLen, _ := m.queues.GhostLen()
 	smallTarget := m.config.MaxSize * int64(m.config.SmallQueuePercent) / 100
 	telemetry.UpdateS3FIFOQueueState(ctx,
 		m.smallBytes, m.mainBytes,
-		smallLen, mainLen, ghostLen,
+		m.smallLen, m.mainLen, m.ghostLen,
 		m.config.MaxSize, smallTarget,
 	)
 }
@@ -187,6 +190,10 @@ func (m *Manager) Remove(ctx context.Context, hash string, size int64) {
 		if m.smallBytes < 0 {
 			m.smallBytes = 0
 		}
+		m.smallLen--
+		if m.smallLen < 0 {
+			m.smallLen = 0
+		}
 	}
 
 	if removed, err := m.queues.Remove(QueueMain, hash); err != nil {
@@ -196,11 +203,22 @@ func (m *Manager) Remove(ctx context.Context, hash string, size int64) {
 		if m.mainBytes < 0 {
 			m.mainBytes = 0
 		}
+		m.mainLen--
+		if m.mainLen < 0 {
+			m.mainLen = 0
+		}
 	}
 
 	// Also purge from ghost (e.g. when GC deletes an evicted blob that was in ghost).
-	if err := m.queues.GhostRemove(hash); err != nil {
-		m.logger.Warn("s3fifo: ghost remove failed", "hash", hash, "error", err)
+	if inGhost, _ := m.queues.GhostContains(hash); inGhost {
+		if err := m.queues.GhostRemove(hash); err != nil {
+			m.logger.Warn("s3fifo: ghost remove failed", "hash", hash, "error", err)
+		} else {
+			m.ghostLen--
+			if m.ghostLen < 0 {
+				m.ghostLen = 0
+			}
+		}
 	}
 }
 
@@ -239,16 +257,13 @@ func (m *Manager) maybeEvict(ctx context.Context) {
 	smallTarget := m.config.MaxSize * int64(m.config.SmallQueuePercent) / 100
 
 	if m.smallBytes+m.mainBytes > m.config.MaxSize {
-		smallLen, _ := m.queues.Len(QueueSmall)
-		mainLen, _ := m.queues.Len(QueueMain)
-
 		// smallActed is true when the small queue took any action (eviction or
 		// promotion). Either way, we skip the main queue this pass — promotions
 		// don't free bytes immediately but do make progress toward balance.
 		smallActed := false
 
 		// Prefer evicting from small when it exceeds its quota.
-		if m.smallBytes > smallTarget && smallLen > 0 {
+		if m.smallBytes > smallTarget && m.smallLen > 0 {
 			skipped, err := m.evictFromSmall(ctx)
 			if err != nil {
 				m.logger.Warn("s3fifo: evict from small error", "error", err)
@@ -258,7 +273,7 @@ func (m *Manager) maybeEvict(ctx context.Context) {
 		}
 
 		// If small couldn't contribute (empty or all pinned), try main.
-		if !smallActed && mainLen > 0 {
+		if !smallActed && m.mainLen > 0 {
 			skipped, err := m.evictFromMain(ctx)
 			if err != nil {
 				m.logger.Warn("s3fifo: evict from main error", "error", err)
@@ -283,12 +298,9 @@ func (m *Manager) maybeEvict(ctx context.Context) {
 	}
 
 	// Update queue state gauges.
-	smallLen, _ := m.queues.Len(QueueSmall)
-	mainLen, _ := m.queues.Len(QueueMain)
-	ghostLen, _ := m.queues.GhostLen()
 	telemetry.UpdateS3FIFOQueueState(ctx,
 		m.smallBytes, m.mainBytes,
-		smallLen, mainLen, ghostLen,
+		m.smallLen, m.mainLen, m.ghostLen,
 		m.config.MaxSize, smallTarget,
 	)
 
@@ -307,6 +319,7 @@ func (m *Manager) evictFromSmall(ctx context.Context) (skipped bool, err error) 
 	if err != nil {
 		return false, err
 	}
+	m.smallLen--
 
 	entry, err := m.metaDB.GetBlob(ctx, hash)
 	if err != nil {
@@ -318,6 +331,7 @@ func (m *Manager) evictFromSmall(ctx context.Context) (skipped bool, err error) 
 		}
 		// Re-queue on transient errors to avoid losing the entry.
 		_ = m.queues.PushHead(QueueSmall, hash)
+		m.smallLen++
 		return false, fmt.Errorf("get blob %s: %w", hash, err)
 	}
 
@@ -326,6 +340,7 @@ func (m *Manager) evictFromSmall(ctx context.Context) (skipped bool, err error) 
 		if err := m.queues.PushHead(QueueSmall, hash); err != nil {
 			return false, err
 		}
+		m.smallLen++
 		telemetry.RecordS3FIFOPinnedSkip(ctx, QueueSmall)
 		return true, nil
 	}
@@ -343,18 +358,26 @@ func (m *Manager) evictFromSmall(ctx context.Context) (skipped bool, err error) 
 			return false, err
 		}
 		m.mainBytes += entry.Size
+		m.mainLen++
 		telemetry.RecordS3FIFOPromotion(ctx)
 	} else {
 		// One-hit wonder: evict and record in ghost set.
 		if err := m.deleteFromBackend(ctx, hash); err != nil {
 			m.smallBytes += entry.Size
 			_ = m.queues.PushHead(QueueSmall, hash)
+			m.smallLen++
 			return false, err
 		}
 		if err := m.queues.GhostAdd(hash); err != nil {
 			m.logger.Warn("s3fifo: ghost add failed", "hash", hash, "error", err)
+		} else {
+			m.ghostLen++
 		}
-		_ = m.queues.GhostTrimToMaxSize(m.ghostMaxEntries())
+		ghostMax := m.ghostMaxEntries()
+		_ = m.queues.GhostTrimToMaxSize(ghostMax)
+		if m.ghostLen > ghostMax {
+			m.ghostLen = ghostMax
+		}
 		telemetry.RecordS3FIFOOneHitEviction(ctx, entry.Size)
 		telemetry.RecordS3FIFOEviction(ctx, QueueSmall, entry.Size)
 	}
@@ -373,6 +396,7 @@ func (m *Manager) evictFromMain(ctx context.Context) (skipped bool, err error) {
 	if err != nil {
 		return false, err
 	}
+	m.mainLen--
 
 	entry, err := m.metaDB.GetBlob(ctx, hash)
 	if err != nil {
@@ -381,6 +405,7 @@ func (m *Manager) evictFromMain(ctx context.Context) (skipped bool, err error) {
 			return false, nil
 		}
 		_ = m.queues.PushHead(QueueMain, hash)
+		m.mainLen++
 		return false, fmt.Errorf("get blob %s: %w", hash, err)
 	}
 
@@ -388,6 +413,7 @@ func (m *Manager) evictFromMain(ctx context.Context) (skipped bool, err error) {
 		if err := m.queues.PushHead(QueueMain, hash); err != nil {
 			return false, err
 		}
+		m.mainLen++
 		telemetry.RecordS3FIFOPinnedSkip(ctx, QueueMain)
 		return true, nil
 	}
@@ -397,11 +423,13 @@ func (m *Manager) evictFromMain(ctx context.Context) (skipped bool, err error) {
 		entry.AccessCount--
 		if err := m.metaDB.PutBlob(ctx, entry); err != nil {
 			_ = m.queues.PushHead(QueueMain, hash)
+			m.mainLen++
 			return false, fmt.Errorf("decrement access count for %s: %w", hash, err)
 		}
 		if err := m.queues.PushHead(QueueMain, hash); err != nil {
 			return false, err
 		}
+		m.mainLen++
 		telemetry.RecordS3FIFOSecondChance(ctx)
 	} else {
 		// Cold: evict.
@@ -440,20 +468,26 @@ func (m *Manager) ghostMaxEntries() int {
 	if m.config.GhostMaxEntries > 0 {
 		return m.config.GhostMaxEntries
 	}
-	n, _ := m.queues.Len(QueueMain)
-	if n < ghostFloor {
+	if m.mainLen < ghostFloor {
 		return ghostFloor
 	}
-	return n
+	return m.mainLen
 }
 
-// recomputeBytes iterates all queue entries and sums their sizes from MetaDB.
-// Called once at startup to restore in-memory byte counters from persisted state.
-func (m *Manager) recomputeBytes(ctx context.Context) error {
+// recomputeState iterates all queue entries and sums their sizes and counts
+// from MetaDB. Called once at startup to restore in-memory counters from
+// persisted state.
+func (m *Manager) recomputeState(ctx context.Context) error {
 	var small, main int64
+	var smallCount, mainCount int
 
 	for _, queue := range []string{QueueSmall, QueueMain} {
 		err := m.queues.ForEach(queue, func(hash string) error {
+			if queue == QueueSmall {
+				smallCount++
+			} else {
+				mainCount++
+			}
 			entry, err := m.metaDB.GetBlob(ctx, hash)
 			if err != nil {
 				// Missing entry: queue is stale (blob was deleted without hook).
@@ -472,12 +506,23 @@ func (m *Manager) recomputeBytes(ctx context.Context) error {
 		}
 	}
 
+	ghostCount, err := m.queues.GhostLen()
+	if err != nil {
+		return err
+	}
+
 	m.smallBytes = small
 	m.mainBytes = main
+	m.smallLen = smallCount
+	m.mainLen = mainCount
+	m.ghostLen = ghostCount
 
-	m.logger.Debug("s3fifo: recomputed byte totals",
+	m.logger.Debug("s3fifo: recomputed state",
 		"small_bytes", small,
 		"main_bytes", main,
+		"small_len", smallCount,
+		"main_len", mainCount,
+		"ghost_len", ghostCount,
 	)
 	return nil
 }

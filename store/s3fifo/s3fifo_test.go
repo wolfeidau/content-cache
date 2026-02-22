@@ -182,6 +182,7 @@ func TestEvictMainSecondChance(t *testing.T) {
 	require.NoError(t, mgr.queues.PushHead(QueueMain, hash))
 	mgr.mu.Lock()
 	mgr.mainBytes = size
+	mgr.mainLen = 1
 	mgr.mu.Unlock()
 
 	// AccessCount > 0 → second chance.
@@ -214,6 +215,7 @@ func TestEvictMainCold(t *testing.T) {
 	require.NoError(t, mgr.queues.PushHead(QueueMain, hash))
 	mgr.mu.Lock()
 	mgr.mainBytes = size
+	mgr.mainLen = 1
 	mgr.mu.Unlock()
 
 	// AccessCount remains 0 (cold blob).
@@ -290,9 +292,12 @@ func TestRecomputeBytes(t *testing.T) {
 	mgr.mu.Lock()
 	mgr.smallBytes = 0
 	mgr.mainBytes = 0
+	mgr.smallLen = 0
+	mgr.mainLen = 0
+	mgr.ghostLen = 0
 	mgr.mu.Unlock()
 
-	require.NoError(t, mgr.recomputeBytes(ctx))
+	require.NoError(t, mgr.recomputeState(ctx))
 
 	mgr.mu.Lock()
 	defer mgr.mu.Unlock()
@@ -311,6 +316,7 @@ func TestOrphanedQueueEntryCleanup(t *testing.T) {
 		require.NoError(t, mgr.queues.PushHead(QueueSmall, orphanHash))
 		mgr.mu.Lock()
 		mgr.smallBytes = 10 // force over-limit so maybeEvict acts
+		mgr.smallLen = 1
 		mgr.mu.Unlock()
 
 		mgr.maybeEvict(ctx)
@@ -326,6 +332,7 @@ func TestOrphanedQueueEntryCleanup(t *testing.T) {
 		require.NoError(t, mgr.queues.PushHead(QueueMain, orphanHash))
 		mgr.mu.Lock()
 		mgr.mainBytes = 10
+		mgr.mainLen = 1
 		mgr.mu.Unlock()
 
 		mgr.maybeEvict(ctx)
