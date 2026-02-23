@@ -50,11 +50,17 @@ func (m *Manager) phaseExpireMeta(ctx context.Context, result *Result) {
 	}
 }
 
-// phaseDeleteUnreferenced deletes blobs with RefCount == 0.
+// phaseDeleteUnreferenced deletes blobs with RefCount == 0 that have not been
+// accessed within the configured retention window.
 func (m *Manager) phaseDeleteUnreferenced(ctx context.Context, result *Result) {
 	m.logger.Debug("phase: delete unreferenced blobs")
 
-	hashes, err := m.db.GetUnreferencedBlobs(ctx, m.config.BatchSize)
+	var before time.Time
+	if m.config.BlobRetentionTTL > 0 {
+		before = time.Now().Add(-m.config.BlobRetentionTTL)
+	}
+
+	hashes, err := m.db.GetUnreferencedBlobs(ctx, before, m.config.BatchSize)
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("get unreferenced blobs: %v", err))
 		m.logger.Error("failed to get unreferenced blobs", "error", err)

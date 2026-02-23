@@ -18,6 +18,11 @@ type Config struct {
 	BatchSize        int           // Max items to process per run (default: 1000)
 	CompactInterval  time.Duration // How often to compact bbolt (default: 24h)
 	CompactThreshold float64       // Compact if free pages > threshold (default: 0.3)
+
+	// BlobRetentionTTL is the minimum time a blob is kept after its last
+	// access before GC may delete it, even when RefCount == 0.
+	// Zero disables the floor and unreferenced blobs are deleted immediately.
+	BlobRetentionTTL time.Duration
 }
 
 // DefaultConfig returns the default GC configuration.

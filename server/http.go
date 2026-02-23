@@ -101,10 +101,10 @@ type Config struct {
 	// Default: https://sum.golang.org
 	UpstreamSumDB string
 
-	// CacheTTL is the time-to-live for cached content.
-	// Content not accessed within this duration is expired.
-	// Zero disables TTL-based expiration.
-	CacheTTL time.Duration
+	// BlobRetention is the minimum time a blob is kept after its last access
+	// before GC may delete it, even when its RefCount drops to zero.
+	// Zero disables the retention floor.
+	BlobRetention time.Duration
 
 	// CacheMaxSize is the maximum size of the cache in bytes.
 	// When exceeded, content is evicted by the S3-FIFO algorithm.
@@ -231,9 +231,10 @@ func New(cfg Config) (*Server, error) {
 			return nil, fmt.Errorf("creating gc metrics: %w", err)
 		}
 		gcConfig := gc.Config{
-			Interval:     gcInterval,
-			StartupDelay: gcStartupDelay,
-			BatchSize:    1000,
+			Interval:         gcInterval,
+			StartupDelay:     gcStartupDelay,
+			BatchSize:        1000,
+			BlobRetentionTTL: cfg.BlobRetention,
 		}
 		gcManager = gc.New(metaDB, instrumentedBackend, gcConfig, gcMetrics, cfg.Logger.With("component", "gc"),
 			gc.WithBlobDeleteHook(func(ctx context.Context, hash string, size int64) {
@@ -817,7 +818,10 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 			attrs = append(attrs, "content_type", ct)
 		}
 
-		s.logger.Info("http request", attrs...)
+		// Skip logging for internal scrape endpoints to avoid log noise.
+		if r.URL.Path != "/metrics" && r.URL.Path != "/healthz" {
+			s.logger.Info("http request", attrs...)
+		}
 
 		// Record OTel metrics
 		telemetry.RecordHTTP(r.Context(), r, wrapped.status, wrapped.bytesWritten, duration)

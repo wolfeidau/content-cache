@@ -56,7 +56,7 @@ type ServeCmd struct {
 	MavenMetadataTTL    time.Duration `kong:"name='maven-metadata-ttl',default='5m',env='MAVEN_METADATA_TTL',help='TTL for maven-metadata.xml cache',group='TTL'"`
 	RubyGemsMetadataTTL time.Duration `kong:"name='rubygems-metadata-ttl',default='5m',env='RUBYGEMS_METADATA_TTL',help='TTL for RubyGems metadata cache',group='TTL'"`
 
-	CacheTTL            time.Duration `kong:"name='cache-ttl',default='168h',env='CACHE_TTL',help='Cache TTL (e.g., 168h for 7 days, 0 to disable)',group='Cache'"`
+	BlobRetention       time.Duration `kong:"name='blob-retention',default='24h',env='BLOB_RETENTION',help='Minimum time to retain blobs after last access before GC may delete them (0 to disable)',group='Cache'"`
 	CacheMaxSize        int64         `kong:"name='cache-max-size',default='10737418240',env='CACHE_MAX_SIZE',help='Maximum cache size in bytes (default: 10GB, 0 to disable)',group='Cache'"`
 	ExpiryCheckInterval time.Duration `kong:"name='expiry-check-interval',default='1h',env='EXPIRY_CHECK_INTERVAL',help='How often to check for expired content',group='Cache'"`
 	GCInterval          time.Duration `kong:"name='gc-interval',default='1h',env='GC_INTERVAL',help='How often to run garbage collection',group='Cache'"`
@@ -202,7 +202,7 @@ func (cmd *ServeCmd) Run() error {
 		RubyGemsMetadataTTL:   cmd.RubyGemsMetadataTTL,
 		GitAllowedHosts:       cmd.GitAllowedHosts,
 		GitMaxRequestBodySize: cmd.GitMaxRequestBodySize,
-		CacheTTL:              cmd.CacheTTL,
+		BlobRetention:         cmd.BlobRetention,
 		CacheMaxSize:          cmd.CacheMaxSize,
 		ExpiryCheckInterval:   cmd.ExpiryCheckInterval,
 		GCInterval:            cmd.GCInterval,

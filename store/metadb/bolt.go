@@ -507,8 +507,10 @@ func (b *BoltDB) GetExpiredMeta(_ context.Context, before time.Time, limit int) 
 	return entries, err
 }
 
-// GetUnreferencedBlobs returns blobs with RefCount == 0.
-func (b *BoltDB) GetUnreferencedBlobs(_ context.Context, limit int) ([]string, error) {
+// GetUnreferencedBlobs returns blobs with RefCount == 0 whose last access time
+// is before the given cutoff. When before is zero, no cutoff is applied and all
+// unreferenced blobs are returned regardless of age.
+func (b *BoltDB) GetUnreferencedBlobs(_ context.Context, before time.Time, limit int) ([]string, error) {
 	var hashes []string
 
 	err := b.db.View(func(tx *bbolt.Tx) error {
@@ -527,9 +529,22 @@ func (b *BoltDB) GetUnreferencedBlobs(_ context.Context, limit int) ([]string, e
 				return nil // Skip invalid entries
 			}
 
-			if entry.RefCount == 0 {
-				hashes = append(hashes, string(k))
+			if entry.RefCount != 0 {
+				return nil
 			}
+
+			// Retention floor: skip blobs still within the retention window.
+			if !before.IsZero() {
+				lastSeen := entry.CachedAt
+				if entry.LastAccess.After(lastSeen) {
+					lastSeen = entry.LastAccess
+				}
+				if lastSeen.After(before) {
+					return nil
+				}
+			}
+
+			hashes = append(hashes, string(k))
 			return nil
 		})
 	})
