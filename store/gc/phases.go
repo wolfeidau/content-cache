@@ -29,7 +29,7 @@ func (m *Manager) phaseExpireMeta(ctx context.Context, result *Result) {
 		default:
 		}
 
-		if err := m.db.DeleteMeta(ctx, entry.Protocol, entry.Key); err != nil {
+		if err := m.db.DeleteMetaWithRefs(ctx, entry.Protocol, entry.Key); err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("delete meta %s/%s: %v", entry.Protocol, entry.Key, err))
 			m.logger.Error("failed to delete expired metadata",
 				"protocol", entry.Protocol,

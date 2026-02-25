@@ -19,6 +19,7 @@ type MetaDB interface {
 	GetMeta(ctx context.Context, protocol, key string) ([]byte, error)
 	PutMeta(ctx context.Context, protocol, key string, data []byte, ttl time.Duration) error
 	DeleteMeta(ctx context.Context, protocol, key string) error
+	DeleteMetaWithRefs(ctx context.Context, protocol, key string) error
 	ListMeta(ctx context.Context, protocol string) ([]string, error)
 
 	// Blob tracking
