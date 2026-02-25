@@ -19,6 +19,7 @@ type MetaDB interface {
 	GetMeta(ctx context.Context, protocol, key string) ([]byte, error)
 	PutMeta(ctx context.Context, protocol, key string, data []byte, ttl time.Duration) error
 	DeleteMeta(ctx context.Context, protocol, key string) error
+	DeleteMetaWithRefs(ctx context.Context, protocol, key string) error
 	ListMeta(ctx context.Context, protocol string) ([]string, error)
 
 	// Blob tracking
@@ -34,7 +35,9 @@ type MetaDB interface {
 
 	// Eviction queries
 	GetExpiredMeta(ctx context.Context, before time.Time, limit int) ([]ExpiryEntry, error)
-	GetUnreferencedBlobs(ctx context.Context, limit int) ([]string, error)
+	// GetUnreferencedBlobs returns blobs with RefCount == 0 whose last access
+	// time is before the given cutoff. Pass a zero time to skip the cutoff filter.
+	GetUnreferencedBlobs(ctx context.Context, before time.Time, limit int) ([]string, error)
 }
 
 // New creates a new MetaDB backed by bbolt.

@@ -273,10 +273,31 @@ func TestBoltDB_UnreferencedBlobQueries(t *testing.T) {
 		require.NoError(t, db.PutBlob(ctx, &BlobEntry{Hash: "ref1", Size: 100, CachedAt: now, LastAccess: now, RefCount: 1}))
 		require.NoError(t, db.PutBlob(ctx, &BlobEntry{Hash: "ref0-2", Size: 100, CachedAt: now, LastAccess: now, RefCount: 0}))
 
-		hashes, err := db.GetUnreferencedBlobs(ctx, 0)
+		// Zero before = no retention filter, return all unreferenced.
+		hashes, err := db.GetUnreferencedBlobs(ctx, time.Time{}, 0)
 		require.NoError(t, err)
 		assert.Len(t, hashes, 2)
 		assert.ElementsMatch(t, []string{"ref0", "ref0-2"}, hashes)
+	})
+
+	t.Run("GetUnreferencedBlobs respects retention floor", func(t *testing.T) {
+		db := newTestBoltDB(t)
+
+		old := time.Now().Add(-48 * time.Hour)
+		recent := time.Now().Add(-1 * time.Hour)
+
+		// Old blob: last accessed 48h ago, eligible for deletion.
+		require.NoError(t, db.PutBlob(ctx, &BlobEntry{Hash: "old", Size: 100, CachedAt: old, LastAccess: old, RefCount: 0}))
+		// Recent blob: last accessed 1h ago, within 24h retention window.
+		require.NoError(t, db.PutBlob(ctx, &BlobEntry{Hash: "recent", Size: 100, CachedAt: recent, LastAccess: recent, RefCount: 0}))
+		// Referenced blob: should never appear regardless.
+		require.NoError(t, db.PutBlob(ctx, &BlobEntry{Hash: "pinned", Size: 100, CachedAt: old, LastAccess: old, RefCount: 1}))
+
+		// Cutoff = now - 24h: only blobs last seen before that are eligible.
+		before := time.Now().Add(-24 * time.Hour)
+		hashes, err := db.GetUnreferencedBlobs(ctx, before, 0)
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{"old"}, hashes)
 	})
 }
 
