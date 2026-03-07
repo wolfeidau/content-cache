@@ -20,9 +20,9 @@ func openTestDB(t *testing.T) *bbolt.DB {
 	return db
 }
 
-func newTestQueues(t *testing.T) *Queues {
+func newTestQueues(t *testing.T) *BoltQueues {
 	t.Helper()
-	q, err := NewQueues(openTestDB(t))
+	q, err := NewBoltQueues(openTestDB(t))
 	require.NoError(t, err)
 	return q
 }

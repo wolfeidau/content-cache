@@ -10,10 +10,11 @@ import (
 
 // ExpiryReaper runs periodic cleanup of expired metadata.
 type ExpiryReaper struct {
-	db        *BoltDB
+	db        MetaExpiryStore
 	interval  time.Duration
 	batchSize int
 	logger    *slog.Logger
+	now       func() time.Time
 }
 
 // ReaperOption configures an ExpiryReaper.
@@ -40,14 +41,22 @@ func WithReaperLogger(logger *slog.Logger) ReaperOption {
 	}
 }
 
+// WithReaperNow sets the time function (for testing).
+func WithReaperNow(now func() time.Time) ReaperOption {
+	return func(r *ExpiryReaper) {
+		r.now = now
+	}
+}
+
 // NewExpiryReaper creates a new expiry reaper with the given options.
 // Defaults: interval=5m, batchSize=100.
-func NewExpiryReaper(db *BoltDB, opts ...ReaperOption) *ExpiryReaper {
+func NewExpiryReaper(db MetaExpiryStore, opts ...ReaperOption) *ExpiryReaper {
 	r := &ExpiryReaper{
 		db:        db,
 		interval:  5 * time.Minute,
 		batchSize: 100,
 		logger:    slog.Default(),
+		now:       time.Now,
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -81,7 +90,7 @@ func (r *ExpiryReaper) reapBatch(ctx context.Context) {
 		telemetry.RecordReaperCycle(ctx, "expiry", deleted, time.Since(start))
 	}()
 
-	expired, err := r.db.GetExpiredMeta(ctx, r.db.now(), r.batchSize)
+	expired, err := r.db.GetExpiredMeta(ctx, r.now(), r.batchSize)
 	if err != nil {
 		r.logger.Error("failed to get expired meta", "error", err)
 		return

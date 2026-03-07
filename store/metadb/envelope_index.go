@@ -8,26 +8,47 @@ import (
 )
 
 // EnvelopeIndex provides protocol/kind-specific metadata storage using envelope format.
-// It wraps BoltDB envelope APIs with compression, integrity verification, and TTL defaults.
+// It wraps EnvelopeStore APIs with compression, integrity verification, and TTL defaults.
 type EnvelopeIndex struct {
-	db         *BoltDB
+	store      EnvelopeStore
+	codec      *EnvelopeCodec
 	protocol   string
 	kind       string
 	defaultTTL time.Duration
 }
 
-// NewEnvelopeIndex creates a new envelope index for a specific protocol and kind.
-// The codec is shared from BoltDB to reduce memory overhead.
-func NewEnvelopeIndex(db *BoltDB, protocol, kind string, ttl time.Duration) (*EnvelopeIndex, error) {
-	if db.Codec() == nil {
-		return nil, fmt.Errorf("BoltDB codec not initialized (is database open?)")
+// EnvelopeIndexOption configures an EnvelopeIndex.
+type EnvelopeIndexOption func(*EnvelopeIndex)
+
+// WithEnvelopeIndexCodec sets a shared codec to avoid allocating a new zstd
+// encoder/decoder per index instance. Callers that create many EnvelopeIndex
+// instances (e.g. server startup) should create one codec via NewEnvelopeCodec
+// and share it across all indexes.
+func WithEnvelopeIndexCodec(codec *EnvelopeCodec) EnvelopeIndexOption {
+	return func(idx *EnvelopeIndex) {
+		idx.codec = codec
 	}
-	return &EnvelopeIndex{
-		db:         db,
+}
+
+// NewEnvelopeIndex creates a new envelope index for a specific protocol and kind.
+// By default each index creates its own EnvelopeCodec. Pass WithEnvelopeIndexCodec
+// to share a single codec across multiple indexes.
+func NewEnvelopeIndex(store EnvelopeStore, protocol, kind string, ttl time.Duration, opts ...EnvelopeIndexOption) (*EnvelopeIndex, error) {
+	codec, err := NewEnvelopeCodec()
+	if err != nil {
+		return nil, fmt.Errorf("creating envelope codec: %w", err)
+	}
+	idx := &EnvelopeIndex{
+		store:      store,
+		codec:      codec,
 		protocol:   protocol,
 		kind:       kind,
 		defaultTTL: ttl,
-	}, nil
+	}
+	for _, opt := range opts {
+		opt(idx)
+	}
+	return idx, nil
 }
 
 // Protocol returns the protocol name.
@@ -57,7 +78,7 @@ type PutOptions struct {
 
 // PutWithOptions stores raw bytes with full control over envelope fields.
 func (idx *EnvelopeIndex) PutWithOptions(ctx context.Context, key string, data []byte, contentType ContentType, refs []string, opts PutOptions) error {
-	payload, encoding, digest, err := idx.db.Codec().EncodePayload(data)
+	payload, encoding, digest, err := idx.codec.EncodePayload(data)
 	if err != nil {
 		return err
 	}
@@ -93,33 +114,33 @@ func (idx *EnvelopeIndex) PutWithOptions(ctx context.Context, key string, data [
 		env.LastModifiedUnixMs = opts.LastModified.UnixMilli()
 	}
 
-	return idx.db.PutEnvelope(ctx, idx.protocol, idx.kind, key, env)
+	return idx.store.PutEnvelope(ctx, idx.protocol, idx.kind, key, env)
 }
 
 // Get retrieves and decompresses raw bytes.
 // Returns ErrNotFound if key doesn't exist.
 // Returns ErrCorrupted if integrity check fails.
 func (idx *EnvelopeIndex) Get(ctx context.Context, key string) ([]byte, error) {
-	env, err := idx.db.GetEnvelope(ctx, idx.protocol, idx.kind, key)
+	env, err := idx.store.GetEnvelope(ctx, idx.protocol, idx.kind, key)
 	if err != nil {
 		return nil, err
 	}
-	return idx.db.Codec().DecodePayload(env.Payload, env.ContentEncoding, env.PayloadDigest, env.PayloadSize)
+	return idx.codec.DecodePayload(env.Payload, env.ContentEncoding, env.PayloadDigest, env.PayloadSize)
 }
 
 // GetEnvelope retrieves the full envelope including metadata.
 // The payload is NOT decompressed; use DecodePayload to decompress.
 func (idx *EnvelopeIndex) GetEnvelope(ctx context.Context, key string) (*MetadataEnvelope, error) {
-	return idx.db.GetEnvelope(ctx, idx.protocol, idx.kind, key)
+	return idx.store.GetEnvelope(ctx, idx.protocol, idx.kind, key)
 }
 
 // GetWithEnvelope retrieves decompressed data along with the envelope metadata.
 func (idx *EnvelopeIndex) GetWithEnvelope(ctx context.Context, key string) ([]byte, *MetadataEnvelope, error) {
-	env, err := idx.db.GetEnvelope(ctx, idx.protocol, idx.kind, key)
+	env, err := idx.store.GetEnvelope(ctx, idx.protocol, idx.kind, key)
 	if err != nil {
 		return nil, nil, err
 	}
-	data, err := idx.db.Codec().DecodePayload(env.Payload, env.ContentEncoding, env.PayloadDigest, env.PayloadSize)
+	data, err := idx.codec.DecodePayload(env.Payload, env.ContentEncoding, env.PayloadDigest, env.PayloadSize)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -155,28 +176,28 @@ func (idx *EnvelopeIndex) GetJSON(ctx context.Context, key string, v any) error 
 
 // Delete removes the entry and decrements blob refs.
 func (idx *EnvelopeIndex) Delete(ctx context.Context, key string) error {
-	return idx.db.DeleteEnvelope(ctx, idx.protocol, idx.kind, key)
+	return idx.store.DeleteEnvelope(ctx, idx.protocol, idx.kind, key)
 }
 
 // List returns all keys for this protocol/kind.
 func (idx *EnvelopeIndex) List(ctx context.Context) ([]string, error) {
-	return idx.db.ListEnvelopeKeys(ctx, idx.protocol, idx.kind)
+	return idx.store.ListEnvelopeKeys(ctx, idx.protocol, idx.kind)
 }
 
 // GetBlobRefs returns the blob refs for a key.
 func (idx *EnvelopeIndex) GetBlobRefs(ctx context.Context, key string) ([]string, error) {
-	return idx.db.GetEnvelopeBlobRefs(ctx, idx.protocol, idx.kind, key)
+	return idx.store.GetEnvelopeBlobRefs(ctx, idx.protocol, idx.kind, key)
 }
 
 // Update performs read-modify-write in a single transaction.
 // The callback receives the current decompressed data (or nil if not found).
 // Return new data to store, or nil to delete the entry.
 func (idx *EnvelopeIndex) Update(ctx context.Context, key string, fn func(data []byte, env *MetadataEnvelope) ([]byte, []string, error)) error {
-	return idx.db.UpdateEnvelope(ctx, idx.protocol, idx.kind, key, func(existing *MetadataEnvelope) (*MetadataEnvelope, error) {
+	return idx.store.UpdateEnvelope(ctx, idx.protocol, idx.kind, key, func(existing *MetadataEnvelope) (*MetadataEnvelope, error) {
 		var existingData []byte
 		if existing != nil {
 			var err error
-			existingData, err = idx.db.Codec().DecodePayload(existing.Payload, existing.ContentEncoding, existing.PayloadDigest, existing.PayloadSize)
+			existingData, err = idx.codec.DecodePayload(existing.Payload, existing.ContentEncoding, existing.PayloadDigest, existing.PayloadSize)
 			if err != nil {
 				return nil, err
 			}
@@ -191,7 +212,7 @@ func (idx *EnvelopeIndex) Update(ctx context.Context, key string, fn func(data [
 		}
 
 		// Encode new payload
-		payload, encoding, digest, err := idx.db.Codec().EncodePayload(newData)
+		payload, encoding, digest, err := idx.codec.EncodePayload(newData)
 		if err != nil {
 			return nil, err
 		}
@@ -250,7 +271,7 @@ func (idx *EnvelopeIndex) UpdateJSON(ctx context.Context, key string, v any, fn 
 // DecodePayload decompresses an envelope's payload.
 // Use this after GetEnvelope when you need to decode the payload.
 func (idx *EnvelopeIndex) DecodePayload(env *MetadataEnvelope) ([]byte, error) {
-	return idx.db.Codec().DecodePayload(env.Payload, env.ContentEncoding, env.PayloadDigest, env.PayloadSize)
+	return idx.codec.DecodePayload(env.Payload, env.ContentEncoding, env.PayloadDigest, env.PayloadSize)
 }
 
 // IsExpired checks if an envelope has expired.
@@ -279,5 +300,5 @@ func (idx *EnvelopeIndex) PutNegativeCache(ctx context.Context, key string, stat
 		ExpiresAtUnixMs: now.Add(ttl).UnixMilli(),
 		TtlSeconds:      int64(ttl.Seconds()),
 	}
-	return idx.db.PutEnvelope(ctx, idx.protocol, idx.kind, key, env)
+	return idx.store.PutEnvelope(ctx, idx.protocol, idx.kind, key, env)
 }

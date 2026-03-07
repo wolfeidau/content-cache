@@ -96,7 +96,7 @@ func TestExpiryReaper(t *testing.T) {
 		// Advance time but not past expiry
 		currentTime = baseTime.Add(time.Hour)
 
-		reaper := NewExpiryReaper(db)
+		reaper := NewExpiryReaper(db, WithReaperNow(func() time.Time { return currentTime }))
 		reaper.ReapNow(ctx)
 
 		// Entry should still exist
