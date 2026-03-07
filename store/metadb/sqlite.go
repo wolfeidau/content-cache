@@ -107,13 +107,35 @@ func (s *SQLiteDB) migrate() error {
 	}
 
 	if version < currentSchemaVersion {
-		if _, err := s.db.Exec(initialSchema); err != nil {
+		// Wrap the schema DDL and the version bump in a single transaction so
+		// that a crash between them leaves the database in a consistent state.
+		// PRAGMA user_version inside a transaction is rolled back on failure.
+		conn, err := s.db.Conn(context.Background())
+		if err != nil {
+			return fmt.Errorf("acquiring connection for migration: %w", err)
+		}
+		defer conn.Close()
+
+		if _, err := conn.ExecContext(context.Background(), "BEGIN EXCLUSIVE"); err != nil {
+			return fmt.Errorf("beginning migration transaction: %w", err)
+		}
+
+		if _, err := conn.ExecContext(context.Background(), initialSchema); err != nil {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 			return fmt.Errorf("applying initial schema: %w", err)
 		}
+
 		// PRAGMA does not support ? placeholders — Sprintf is intentional.
-		if _, err := s.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", currentSchemaVersion)); err != nil {
+		if _, err := conn.ExecContext(context.Background(),
+			fmt.Sprintf("PRAGMA user_version = %d", currentSchemaVersion)); err != nil {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 			return fmt.Errorf("setting schema version: %w", err)
 		}
+
+		if _, err := conn.ExecContext(context.Background(), "COMMIT"); err != nil {
+			return fmt.Errorf("committing migration: %w", err)
+		}
+
 		s.logger.Info("sqlite schema applied", "version", currentSchemaVersion)
 	}
 
