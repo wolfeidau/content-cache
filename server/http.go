@@ -128,6 +128,13 @@ type Config struct {
 	// TLSKeyFile is the path to the TLS private key file.
 	TLSKeyFile string
 
+	// MetadataBackend selects the metadata storage backend: "bolt" (default) or "sqlite".
+	MetadataBackend string
+
+	// MetadataDSN is the file path for the metadata database.
+	// Defaults to <StoragePath>/metadata.db for bolt, <StoragePath>/meta.db for sqlite.
+	MetadataDSN string
+
 	// Logger for the server
 	Logger *slog.Logger
 }
@@ -162,6 +169,39 @@ type Server struct {
 	s3fifoManager *s3fifo.Manager
 }
 
+// openMetaBackend opens the metadata database and returns a queues factory
+// appropriate for the configured backend ("bolt" or "sqlite").
+func openMetaBackend(cfg Config) (metadb.MetaDB, func() (s3fifo.Queues, error), error) {
+	switch cfg.MetadataBackend {
+	case "sqlite":
+		dsn := cfg.MetadataDSN
+		if dsn == "" {
+			dsn = path.Join(cfg.StoragePath, "meta.db")
+		}
+		sqliteDB := metadb.NewSQLiteDB(metadb.WithSQLiteLogger(cfg.Logger))
+		if err := sqliteDB.Open(dsn); err != nil {
+			return nil, nil, fmt.Errorf("opening sqlite metadata database: %w", err)
+		}
+		makeQueues := func() (s3fifo.Queues, error) {
+			return s3fifo.NewSQLiteQueues(sqliteDB.DB()), nil
+		}
+		return sqliteDB, makeQueues, nil
+	default: // "bolt"
+		dsn := cfg.MetadataDSN
+		if dsn == "" {
+			dsn = path.Join(cfg.StoragePath, "metadata.db")
+		}
+		boltDB := metadb.NewBoltDB()
+		if err := boltDB.Open(dsn); err != nil {
+			return nil, nil, fmt.Errorf("opening bolt metadata database: %w", err)
+		}
+		makeQueues := func() (s3fifo.Queues, error) {
+			return s3fifo.NewBoltQueues(boltDB.DB())
+		}
+		return boltDB, makeQueues, nil
+	}
+}
+
 // New creates a new server with the given configuration.
 func New(cfg Config) (*Server, error) {
 	if cfg.Logger == nil {
@@ -185,9 +225,9 @@ func New(cfg Config) (*Server, error) {
 	instrumentedBackend := backend.NewInstrumentedBackend(fsBackend, "filesystem")
 
 	// Initialize metadata database
-	metaDB := metadb.New()
-	if err := metaDB.Open(path.Join(cfg.StoragePath, "metadata.db")); err != nil {
-		return nil, fmt.Errorf("opening metadata database: %w", err)
+	metaDB, makeQueues, err := openMetaBackend(cfg)
+	if err != nil {
+		return nil, err
 	}
 
 	// Create a single shared EnvelopeCodec (zstd encoder/decoder) for all EnvelopeIndex instances.
@@ -200,11 +240,7 @@ func New(cfg Config) (*Server, error) {
 	// Initialize S3-FIFO eviction manager when a cache size limit is configured.
 	var s3fifoMgr *s3fifo.Manager
 	if cfg.CacheMaxSize > 0 {
-		boltDB, ok := metaDB.(*metadb.BoltDB)
-		if !ok {
-			return nil, fmt.Errorf("metaDB must be *metadb.BoltDB for S3-FIFO queue initialization")
-		}
-		boltQueues, qErr := s3fifo.NewBoltQueues(boltDB.DB())
+		queues, qErr := makeQueues()
 		if qErr != nil {
 			return nil, fmt.Errorf("creating s3fifo queues: %w", qErr)
 		}
@@ -217,7 +253,7 @@ func New(cfg Config) (*Server, error) {
 			Logger:        cfg.Logger.With("component", "s3fifo"),
 		}
 		var s3err error
-		s3fifoMgr, s3err = s3fifo.NewManager(boltQueues, metaDB, instrumentedBackend, s3fifoCfg)
+		s3fifoMgr, s3err = s3fifo.NewManager(queues, metaDB, instrumentedBackend, s3fifoCfg)
 		if s3err != nil {
 			return nil, fmt.Errorf("creating s3fifo manager: %w", s3err)
 		}

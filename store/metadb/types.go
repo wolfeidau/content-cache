@@ -15,11 +15,10 @@ type BlobEntry struct {
 
 // ExpiryEntry contains metadata about protocol entries for expiration tracking.
 type ExpiryEntry struct {
-	Protocol   string    `json:"protocol"`
-	Key        string    `json:"key"`
-	ExpiresAt  time.Time `json:"expires_at"`
-	LastAccess time.Time `json:"last_access"`
-	Size       int64     `json:"size"`
+	Protocol  string    `json:"protocol"`
+	Key       string    `json:"key"`
+	ExpiresAt time.Time `json:"expires_at"`
+	Size      int64     `json:"size"`
 }
 
 // EnvelopeExpiryEntry contains metadata about envelope entries for expiration tracking.
