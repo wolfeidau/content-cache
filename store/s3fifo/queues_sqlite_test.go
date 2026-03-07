@@ -162,6 +162,20 @@ func TestSQLiteQueues_GhostTrimToMaxSizeNoop(t *testing.T) {
 	assert.Equal(t, 2, n)
 }
 
+func TestSQLiteQueues_GhostTrimToMaxSizeZero(t *testing.T) {
+	q := newTestSQLiteQueues(t)
+	require.NoError(t, q.GhostAdd("a"))
+	require.NoError(t, q.GhostAdd("b"))
+	require.NoError(t, q.GhostAdd("c"))
+
+	// max=0 should delete everything
+	require.NoError(t, q.GhostTrimToMaxSize(0))
+
+	n, err := q.GhostLen()
+	require.NoError(t, err)
+	assert.Equal(t, 0, n)
+}
+
 func TestSQLiteQueues_AdmitGhostHit(t *testing.T) {
 	q := newTestSQLiteQueues(t)
 

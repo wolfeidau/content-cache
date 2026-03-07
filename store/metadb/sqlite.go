@@ -10,8 +10,8 @@ import (
 	"log/slog"
 	"time"
 
-	_ "modernc.org/sqlite"
 	"google.golang.org/protobuf/proto"
+	_ "modernc.org/sqlite"
 )
 
 //go:embed migrations/001_initial.sql
@@ -810,5 +810,12 @@ func applyEnvelopeRefDiff(ctx context.Context, tx *sql.Tx, protocol, kind, key s
 	return nil
 }
 
-// Compile-time interface check.
+// Compile-time interface checks.
 var _ MetaDB = (*SQLiteDB)(nil)
+
+// Verify SQLiteDB satisfies the optional backend interfaces used by Index for
+// atomic ref-tracked writes and read-modify-write. If these drift from the
+// concrete methods, the Index falls back to non-atomic paths silently —
+// catching that at compile time is cheaper than debugging lost updates.
+var _ metaRefsWriter = (*SQLiteDB)(nil)
+var _ metaUpdateWriter = (*SQLiteDB)(nil)

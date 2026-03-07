@@ -2,6 +2,7 @@ package metadb
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"path/filepath"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 func newTestSQLiteDB(t *testing.T, opts ...SQLiteDBOption) *SQLiteDB {
@@ -303,6 +305,111 @@ func TestSQLiteDB_UpdateJSON(t *testing.T) {
 		require.NoError(t, json.Unmarshal(data, &got))
 		assert.Equal(t, 11, got.Value)
 	})
+}
+
+func TestSQLiteDB_BlobRefErrors(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("IncrementBlobRef returns ErrNotFound for missing blob", func(t *testing.T) {
+		db := newTestSQLiteDB(t)
+		err := db.IncrementBlobRef(ctx, "blake3:missing")
+		require.ErrorIs(t, err, ErrNotFound)
+	})
+
+	t.Run("DecrementBlobRef returns ErrNotFound for missing blob", func(t *testing.T) {
+		db := newTestSQLiteDB(t)
+		err := db.DecrementBlobRef(ctx, "blake3:missing")
+		require.ErrorIs(t, err, ErrNotFound)
+	})
+}
+
+func TestSQLiteDB_TouchBlobUpdatesTime(t *testing.T) {
+	ctx := context.Background()
+	before := time.Now().Add(-time.Hour).Truncate(time.Millisecond)
+	after := before.Add(2 * time.Hour)
+
+	db := newTestSQLiteDB(t, WithSQLiteNow(func() time.Time { return after }))
+	require.NoError(t, db.PutBlob(ctx, &BlobEntry{Hash: "blake3:tt", Size: 50, CachedAt: before, LastAccess: before}))
+
+	_, err := db.TouchBlob(ctx, "blake3:tt")
+	require.NoError(t, err)
+
+	got, err := db.GetBlob(ctx, "blake3:tt")
+	require.NoError(t, err)
+	assert.WithinDuration(t, after, got.LastAccess, time.Millisecond)
+}
+
+func TestSQLiteDB_SchemaVersionGuard(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "future.db")
+
+	// Open normally to create schema at version 1.
+	db := NewSQLiteDB()
+	require.NoError(t, db.Open(dbPath))
+	require.NoError(t, db.Close())
+
+	// Manually bump user_version beyond what this binary supports.
+	import_db, err := openRawSQLite(dbPath)
+	require.NoError(t, err)
+	_, err = import_db.Exec("PRAGMA user_version = 9999")
+	require.NoError(t, err)
+	require.NoError(t, import_db.Close())
+
+	// Reopening should fail fast with a clear error.
+	db2 := NewSQLiteDB()
+	err = db2.Open(dbPath)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "newer than supported")
+}
+
+func TestSQLiteDB_PutEnvelopeValidation(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("rejects invalid blob ref format", func(t *testing.T) {
+		db := newTestSQLiteDB(t)
+		env := &MetadataEnvelope{
+			Payload:  []byte("{}"),
+			BlobRefs: []string{"not-a-valid-ref"},
+		}
+		err := db.PutEnvelope(ctx, "npm", "meta", "pkg", env)
+		require.ErrorIs(t, err, ErrInvalidDigestFormat)
+	})
+
+	t.Run("canonicalizes refs to lowercase deduplicated", func(t *testing.T) {
+		ctx := context.Background()
+		now := time.Now().Truncate(time.Millisecond)
+		hash := "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+		hashLower := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+		db := newTestSQLiteDB(t)
+		require.NoError(t, db.PutBlob(ctx, &BlobEntry{Hash: hashLower, Size: 100, CachedAt: now, LastAccess: now}))
+
+		env := &MetadataEnvelope{
+			Payload:  []byte("{}"),
+			BlobRefs: []string{hash, hash}, // uppercase duplicate
+		}
+		require.NoError(t, db.PutEnvelope(ctx, "npm", "meta", "pkg", env))
+
+		refs, err := db.GetEnvelopeBlobRefs(ctx, "npm", "meta", "pkg")
+		require.NoError(t, err)
+		assert.Equal(t, []string{hashLower}, refs)
+
+		blob, err := db.GetBlob(ctx, hashLower)
+		require.NoError(t, err)
+		assert.Equal(t, 1, blob.RefCount, "duplicate ref should only increment once")
+	})
+}
+
+func TestSQLiteDB_TotalBlobSizeEmpty(t *testing.T) {
+	ctx := context.Background()
+	db := newTestSQLiteDB(t)
+	total, err := db.TotalBlobSize(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), total)
+}
+
+// openRawSQLite opens a SQLite file directly for test setup purposes.
+func openRawSQLite(path string) (*sql.DB, error) {
+	return sql.Open("sqlite", path)
 }
 
 // blobHash returns a valid 64-char blake3 hash for use in tests.
