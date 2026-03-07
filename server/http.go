@@ -190,6 +190,13 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("opening metadata database: %w", err)
 	}
 
+	// Create a single shared EnvelopeCodec (zstd encoder/decoder) for all EnvelopeIndex instances.
+	sharedCodec, err := metadb.NewEnvelopeCodec()
+	if err != nil {
+		return nil, fmt.Errorf("creating envelope codec: %w", err)
+	}
+	withCodec := metadb.WithEnvelopeIndexCodec(sharedCodec)
+
 	// Initialize S3-FIFO eviction manager when a cache size limit is configured.
 	var s3fifoMgr *s3fifo.Manager
 	if cfg.CacheMaxSize > 0 {
@@ -285,15 +292,15 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	// Initialize goproxy components using metadb EnvelopeIndex
-	goproxyModIndex, err := metadb.NewEnvelopeIndex(metaDB, "goproxy", "mod", 24*time.Hour)
+	goproxyModIndex, err := metadb.NewEnvelopeIndex(metaDB, "goproxy", "mod", 24*time.Hour, withCodec)
 	if err != nil {
 		return nil, fmt.Errorf("creating goproxy mod index: %w", err)
 	}
-	goproxyInfoIndex, err := metadb.NewEnvelopeIndex(metaDB, "goproxy", "info", 24*time.Hour)
+	goproxyInfoIndex, err := metadb.NewEnvelopeIndex(metaDB, "goproxy", "info", 24*time.Hour, withCodec)
 	if err != nil {
 		return nil, fmt.Errorf("creating goproxy info index: %w", err)
 	}
-	goproxyListIndex, err := metadb.NewEnvelopeIndex(metaDB, "goproxy", "list", 24*time.Hour)
+	goproxyListIndex, err := metadb.NewEnvelopeIndex(metaDB, "goproxy", "list", 24*time.Hour, withCodec)
 	if err != nil {
 		return nil, fmt.Errorf("creating goproxy list index: %w", err)
 	}
@@ -308,11 +315,11 @@ func New(cfg Config) (*Server, error) {
 	)
 
 	// Initialize npm components using metadb EnvelopeIndex
-	npmMetadataIndex, err := metadb.NewEnvelopeIndex(metaDB, "npm", "metadata", 24*time.Hour)
+	npmMetadataIndex, err := metadb.NewEnvelopeIndex(metaDB, "npm", "metadata", 24*time.Hour, withCodec)
 	if err != nil {
 		return nil, fmt.Errorf("creating npm metadata index: %w", err)
 	}
-	npmCacheIndex, err := metadb.NewEnvelopeIndex(metaDB, "npm", "cache", 24*time.Hour)
+	npmCacheIndex, err := metadb.NewEnvelopeIndex(metaDB, "npm", "cache", 24*time.Hour, withCodec)
 	if err != nil {
 		return nil, fmt.Errorf("creating npm cache index: %w", err)
 	}
@@ -354,15 +361,15 @@ func New(cfg Config) (*Server, error) {
 	npmHandler := npm.NewHandler(npmIndex, cafsStore, npmHandlerOpts...)
 
 	// Initialize OCI components using metadb EnvelopeIndex
-	ociImageIndex, err := metadb.NewEnvelopeIndex(metaDB, "oci", "image", 24*time.Hour)
+	ociImageIndex, err := metadb.NewEnvelopeIndex(metaDB, "oci", "image", 24*time.Hour, withCodec)
 	if err != nil {
 		return nil, fmt.Errorf("creating oci image index: %w", err)
 	}
-	ociManifestIndex, err := metadb.NewEnvelopeIndex(metaDB, "oci", "manifest", 24*time.Hour)
+	ociManifestIndex, err := metadb.NewEnvelopeIndex(metaDB, "oci", "manifest", 24*time.Hour, withCodec)
 	if err != nil {
 		return nil, fmt.Errorf("creating oci manifest index: %w", err)
 	}
-	ociBlobIndex, err := metadb.NewEnvelopeIndex(metaDB, "oci", "blob", 24*time.Hour)
+	ociBlobIndex, err := metadb.NewEnvelopeIndex(metaDB, "oci", "blob", 24*time.Hour, withCodec)
 	if err != nil {
 		return nil, fmt.Errorf("creating oci blob index: %w", err)
 	}
@@ -427,7 +434,7 @@ func New(cfg Config) (*Server, error) {
 	if pypiProjectTTL == 0 {
 		pypiProjectTTL = 5 * time.Minute
 	}
-	pypiProjectIndex, err := metadb.NewEnvelopeIndex(metaDB, "pypi", "project", pypiProjectTTL)
+	pypiProjectIndex, err := metadb.NewEnvelopeIndex(metaDB, "pypi", "project", pypiProjectTTL, withCodec)
 	if err != nil {
 		return nil, fmt.Errorf("creating pypi project index: %w", err)
 	}
@@ -452,11 +459,11 @@ func New(cfg Config) (*Server, error) {
 	if mavenTTL == 0 {
 		mavenTTL = 5 * time.Minute
 	}
-	mavenMetadataIndex, err := metadb.NewEnvelopeIndex(metaDB, "maven", "metadata", mavenTTL)
+	mavenMetadataIndex, err := metadb.NewEnvelopeIndex(metaDB, "maven", "metadata", mavenTTL, withCodec)
 	if err != nil {
 		return nil, fmt.Errorf("creating maven metadata index: %w", err)
 	}
-	mavenArtifactIndex, err := metadb.NewEnvelopeIndex(metaDB, "maven", "artifact", 24*time.Hour)
+	mavenArtifactIndex, err := metadb.NewEnvelopeIndex(metaDB, "maven", "artifact", 24*time.Hour, withCodec)
 	if err != nil {
 		return nil, fmt.Errorf("creating maven artifact index: %w", err)
 	}
@@ -481,23 +488,23 @@ func New(cfg Config) (*Server, error) {
 	if rubygemsTTL == 0 {
 		rubygemsTTL = 5 * time.Minute
 	}
-	rubygemsVersionsIndex, err := metadb.NewEnvelopeIndex(metaDB, "rubygems", "versions", rubygemsTTL)
+	rubygemsVersionsIndex, err := metadb.NewEnvelopeIndex(metaDB, "rubygems", "versions", rubygemsTTL, withCodec)
 	if err != nil {
 		return nil, fmt.Errorf("creating rubygems versions index: %w", err)
 	}
-	rubygemsInfoIndex, err := metadb.NewEnvelopeIndex(metaDB, "rubygems", "info", rubygemsTTL)
+	rubygemsInfoIndex, err := metadb.NewEnvelopeIndex(metaDB, "rubygems", "info", rubygemsTTL, withCodec)
 	if err != nil {
 		return nil, fmt.Errorf("creating rubygems info index: %w", err)
 	}
-	rubygemsSpecsIndex, err := metadb.NewEnvelopeIndex(metaDB, "rubygems", "specs", rubygemsTTL)
+	rubygemsSpecsIndex, err := metadb.NewEnvelopeIndex(metaDB, "rubygems", "specs", rubygemsTTL, withCodec)
 	if err != nil {
 		return nil, fmt.Errorf("creating rubygems specs index: %w", err)
 	}
-	rubygemsGemIndex, err := metadb.NewEnvelopeIndex(metaDB, "rubygems", "gem", 24*time.Hour)
+	rubygemsGemIndex, err := metadb.NewEnvelopeIndex(metaDB, "rubygems", "gem", 24*time.Hour, withCodec)
 	if err != nil {
 		return nil, fmt.Errorf("creating rubygems gem index: %w", err)
 	}
-	rubygemsGemspecIndex, err := metadb.NewEnvelopeIndex(metaDB, "rubygems", "gemspec", 24*time.Hour)
+	rubygemsGemspecIndex, err := metadb.NewEnvelopeIndex(metaDB, "rubygems", "gemspec", 24*time.Hour, withCodec)
 	if err != nil {
 		return nil, fmt.Errorf("creating rubygems gemspec index: %w", err)
 	}
@@ -524,7 +531,7 @@ func New(cfg Config) (*Server, error) {
 	rubygemsHandler := rubygems.NewHandler(rubygemsIndex, cafsStore, rubygemsHandlerOpts...)
 
 	// Initialize Git proxy components using metadb EnvelopeIndex
-	gitPackIndex, err := metadb.NewEnvelopeIndex(metaDB, "git", "pack", 24*time.Hour)
+	gitPackIndex, err := metadb.NewEnvelopeIndex(metaDB, "git", "pack", 24*time.Hour, withCodec)
 	if err != nil {
 		return nil, fmt.Errorf("creating git pack index: %w", err)
 	}
@@ -571,7 +578,7 @@ func New(cfg Config) (*Server, error) {
 
 	// Initialize sumdb components using metadb EnvelopeIndex
 	// Sumdb responses are immutable, so we use a long TTL (or no TTL)
-	sumdbEnvelope, err := metadb.NewEnvelopeIndex(metaDB, "sumdb", "cache", 0)
+	sumdbEnvelope, err := metadb.NewEnvelopeIndex(metaDB, "sumdb", "cache", 0, withCodec)
 	if err != nil {
 		return nil, fmt.Errorf("creating sumdb cache index: %w", err)
 	}

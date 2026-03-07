@@ -9,7 +9,8 @@ import (
 // ErrNotFound is returned when an entry does not exist.
 var ErrNotFound = errors.New("metadb: not found")
 
-// EnvelopeStore provides envelope-based metadata storage with blob reference tracking.
+// EnvelopeStore provides envelope-based metadata CRUD with blob reference tracking.
+// Used by EnvelopeIndex for per-protocol/kind key storage.
 type EnvelopeStore interface {
 	PutEnvelope(ctx context.Context, protocol, kind, key string, env *MetadataEnvelope) error
 	GetEnvelope(ctx context.Context, protocol, kind, key string) (*MetadataEnvelope, error)
@@ -17,13 +18,24 @@ type EnvelopeStore interface {
 	ListEnvelopeKeys(ctx context.Context, protocol, kind string) ([]string, error)
 	GetEnvelopeBlobRefs(ctx context.Context, protocol, kind, key string) ([]string, error)
 	UpdateEnvelope(ctx context.Context, protocol, kind, key string, fn func(*MetadataEnvelope) (*MetadataEnvelope, error)) error
+}
+
+// EnvelopeExpiryStore handles expiry queries for the EnvelopeReaper.
+type EnvelopeExpiryStore interface {
 	GetExpiredEnvelopes(ctx context.Context, before time.Time, limit int) ([]EnvelopeExpiryEntry, error)
 	DeleteExpiredEnvelopes(ctx context.Context, entries []EnvelopeExpiryEntry) error
+}
+
+// MetaExpiryStore is the narrow interface used by ExpiryReaper for legacy metadata cleanup.
+type MetaExpiryStore interface {
+	GetExpiredMeta(ctx context.Context, before time.Time, limit int) ([]ExpiryEntry, error)
+	DeleteMetaWithRefs(ctx context.Context, protocol, key string) error
 }
 
 // MetaDB provides metadata storage for the content cache.
 type MetaDB interface {
 	EnvelopeStore
+	EnvelopeExpiryStore
 
 	// Lifecycle
 	Open(path string) error

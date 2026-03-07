@@ -12,7 +12,7 @@ import (
 // Unlike the legacy ExpiryReaper, this uses batch deletion in a single
 // transaction for efficiency and processes the new envelope storage format.
 type EnvelopeReaper struct {
-	db          EnvelopeStore
+	db          EnvelopeExpiryStore
 	interval    time.Duration
 	batchSize   int
 	maxDuration time.Duration
@@ -66,7 +66,7 @@ func WithEnvelopeReaperNow(now func() time.Time) EnvelopeReaperOption {
 
 // NewEnvelopeReaper creates a new envelope expiry reaper with the given options.
 // Defaults: interval=5m, batchSize=100, maxDuration=30s.
-func NewEnvelopeReaper(db EnvelopeStore, opts ...EnvelopeReaperOption) *EnvelopeReaper {
+func NewEnvelopeReaper(db EnvelopeExpiryStore, opts ...EnvelopeReaperOption) *EnvelopeReaper {
 	r := &EnvelopeReaper{
 		db:          db,
 		interval:    5 * time.Minute,

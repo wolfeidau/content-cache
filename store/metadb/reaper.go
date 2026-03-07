@@ -10,7 +10,7 @@ import (
 
 // ExpiryReaper runs periodic cleanup of expired metadata.
 type ExpiryReaper struct {
-	db        MetaDB
+	db        MetaExpiryStore
 	interval  time.Duration
 	batchSize int
 	logger    *slog.Logger
@@ -50,7 +50,7 @@ func WithReaperNow(now func() time.Time) ReaperOption {
 
 // NewExpiryReaper creates a new expiry reaper with the given options.
 // Defaults: interval=5m, batchSize=100.
-func NewExpiryReaper(db MetaDB, opts ...ReaperOption) *ExpiryReaper {
+func NewExpiryReaper(db MetaExpiryStore, opts ...ReaperOption) *ExpiryReaper {
 	r := &ExpiryReaper{
 		db:        db,
 		interval:  5 * time.Minute,

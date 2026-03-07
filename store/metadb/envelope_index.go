@@ -17,19 +17,38 @@ type EnvelopeIndex struct {
 	defaultTTL time.Duration
 }
 
+// EnvelopeIndexOption configures an EnvelopeIndex.
+type EnvelopeIndexOption func(*EnvelopeIndex)
+
+// WithEnvelopeIndexCodec sets a shared codec to avoid allocating a new zstd
+// encoder/decoder per index instance. Callers that create many EnvelopeIndex
+// instances (e.g. server startup) should create one codec via NewEnvelopeCodec
+// and share it across all indexes.
+func WithEnvelopeIndexCodec(codec *EnvelopeCodec) EnvelopeIndexOption {
+	return func(idx *EnvelopeIndex) {
+		idx.codec = codec
+	}
+}
+
 // NewEnvelopeIndex creates a new envelope index for a specific protocol and kind.
-func NewEnvelopeIndex(store EnvelopeStore, protocol, kind string, ttl time.Duration) (*EnvelopeIndex, error) {
+// By default each index creates its own EnvelopeCodec. Pass WithEnvelopeIndexCodec
+// to share a single codec across multiple indexes.
+func NewEnvelopeIndex(store EnvelopeStore, protocol, kind string, ttl time.Duration, opts ...EnvelopeIndexOption) (*EnvelopeIndex, error) {
 	codec, err := NewEnvelopeCodec()
 	if err != nil {
 		return nil, fmt.Errorf("creating envelope codec: %w", err)
 	}
-	return &EnvelopeIndex{
+	idx := &EnvelopeIndex{
 		store:      store,
 		codec:      codec,
 		protocol:   protocol,
 		kind:       kind,
 		defaultTTL: ttl,
-	}, nil
+	}
+	for _, opt := range opts {
+		opt(idx)
+	}
+	return idx, nil
 }
 
 // Protocol returns the protocol name.
