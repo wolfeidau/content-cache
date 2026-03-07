@@ -162,6 +162,15 @@ func TestSQLiteQueues_GhostTrimToMaxSizeNoop(t *testing.T) {
 	assert.Equal(t, 2, n)
 }
 
+func TestSQLiteQueues_UnknownQueueNamePanics(t *testing.T) {
+	q := newTestSQLiteQueues(t)
+	assert.Panics(t, func() { _ = q.PushHead("typo", "h") })
+	assert.Panics(t, func() { _, _ = q.PopTail("typo") })
+	assert.Panics(t, func() { _, _ = q.Remove("typo", "h") })
+	assert.Panics(t, func() { _, _ = q.Len("typo") })
+	assert.Panics(t, func() { _ = q.ForEach("typo", func(string) error { return nil }) })
+}
+
 func TestSQLiteQueues_GhostTrimToMaxSizeZero(t *testing.T) {
 	q := newTestSQLiteQueues(t)
 	require.NoError(t, q.GhostAdd("a"))

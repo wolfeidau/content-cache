@@ -23,9 +23,21 @@ func NewSQLiteQueues(db *sql.DB) *SQLiteQueues {
 	return &SQLiteQueues{db: db}
 }
 
+// validateQueueName panics on unknown queue names, consistent with BoltQueues.
+// Queue names are compile-time constants; an unknown name is a programming error.
+func validateQueueName(queue string) {
+	switch queue {
+	case QueueSmall, QueueMain:
+		// valid
+	default:
+		panic("s3fifo: unknown queue name: " + queue)
+	}
+}
+
 // PushHead inserts hash at the head (newest position) of the named queue.
 // If the hash is already present in that queue, it is not re-inserted.
 func (q *SQLiteQueues) PushHead(queue, hash string) error {
+	validateQueueName(queue)
 	_, err := q.db.ExecContext(context.Background(),
 		`INSERT OR IGNORE INTO s3fifo_queue (queue_name, hash) VALUES (?, ?)`, queue, hash)
 	return err
@@ -34,6 +46,7 @@ func (q *SQLiteQueues) PushHead(queue, hash string) error {
 // PopTail removes and returns the oldest hash from the named queue.
 // Returns ErrQueueEmpty when the queue has no entries.
 func (q *SQLiteQueues) PopTail(queue string) (string, error) {
+	validateQueueName(queue)
 	var hash string
 	err := q.db.QueryRowContext(context.Background(), `
 		DELETE FROM s3fifo_queue
@@ -48,6 +61,7 @@ func (q *SQLiteQueues) PopTail(queue string) (string, error) {
 // Remove removes a specific hash from the named queue.
 // Returns (true, nil) if the hash was present and removed, (false, nil) if absent.
 func (q *SQLiteQueues) Remove(queue, hash string) (bool, error) {
+	validateQueueName(queue)
 	res, err := q.db.ExecContext(context.Background(),
 		`DELETE FROM s3fifo_queue WHERE queue_name = ? AND hash = ?`, queue, hash)
 	if err != nil {
@@ -59,6 +73,7 @@ func (q *SQLiteQueues) Remove(queue, hash string) (bool, error) {
 
 // Len returns the number of entries in the named queue.
 func (q *SQLiteQueues) Len(queue string) (int, error) {
+	validateQueueName(queue)
 	var count int
 	err := q.db.QueryRowContext(context.Background(),
 		`SELECT COUNT(*) FROM s3fifo_queue WHERE queue_name = ?`, queue).Scan(&count)
@@ -68,6 +83,7 @@ func (q *SQLiteQueues) Len(queue string) (int, error) {
 // ForEach iterates all entries in FIFO order (oldest first).
 // fn must not perform writes that could cause database contention.
 func (q *SQLiteQueues) ForEach(queue string, fn func(hash string) error) error {
+	validateQueueName(queue)
 	rows, err := q.db.QueryContext(context.Background(),
 		`SELECT hash FROM s3fifo_queue WHERE queue_name = ? ORDER BY id ASC`, queue)
 	if err != nil {
