@@ -354,6 +354,11 @@
           "expr": "sum by (new_access_count) (rate(content_cache_blob_touches_total{job=\"content-cache\"}[$__rate_interval]))",
           "legendFormat": "count={{new_access_count}}",
           "refId": "A"
+        },
+        {
+          "expr": "sum by (protocol) (rate(content_cache_blob_touch_misses_total{job=\"content-cache\"}[$__rate_interval]))",
+          "legendFormat": "miss ({{protocol}})",
+          "refId": "B"
         }
       ],
       "fieldConfig": {
@@ -361,7 +366,14 @@
           "unit": "ops",
           "custom": { "drawStyle": "bars", "fillOpacity": 50, "stacking": { "mode": "normal" }, "showPoints": "never" }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": "/miss/" },
+            "properties": [
+              { "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }
+            ]
+          }
+        ]
       }
     },
     {

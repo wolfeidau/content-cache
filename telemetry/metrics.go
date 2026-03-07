@@ -54,6 +54,7 @@ type Metrics struct {
 	upstreamFetchTotal      metric.Int64Counter
 	upstreamFetchBytesTotal metric.Int64Counter
 	blobTouchesTotal        metric.Int64Counter
+	blobTouchMissesTotal    metric.Int64Counter
 	backendRequestDuration  metric.Float64Histogram
 	backendRequestsTotal    metric.Int64Counter
 	backendBytesTotal       metric.Int64Counter
@@ -253,6 +254,15 @@ func doInitMetrics(ctx context.Context, cfg MetricsConfig) error {
 		"content_cache_blob_touches_total",
 		metric.WithDescription("Total blob access count increments"),
 		metric.WithUnit("{touch}"),
+	)
+	if err != nil {
+		return err
+	}
+
+	blobTouchMissesTotal, err := meter.Int64Counter(
+		"content_cache_blob_touch_misses_total",
+		metric.WithDescription("Total blob touch attempts where blob exists on disk but not in metadata"),
+		metric.WithUnit("{miss}"),
 	)
 	if err != nil {
 		return err
@@ -480,6 +490,7 @@ func doInitMetrics(ctx context.Context, cfg MetricsConfig) error {
 		upstreamFetchTotal:             upstreamFetchTotal,
 		upstreamFetchBytesTotal:        upstreamFetchBytesTotal,
 		blobTouchesTotal:               blobTouchesTotal,
+		blobTouchMissesTotal:           blobTouchMissesTotal,
 		backendRequestDuration:         backendRequestDuration,
 		backendRequestsTotal:           backendRequestsTotal,
 		backendBytesTotal:              backendBytesTotal,
@@ -629,6 +640,19 @@ func RecordBlobTouch(ctx context.Context, protocol string, newAccessCount int) {
 		attribute.String("new_access_count", strconv.Itoa(newAccessCount)),
 	}
 	globalMetrics.blobTouchesTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordBlobTouchMiss records a blob touch attempt where the blob exists on
+// disk but has no corresponding metadata row in the database.
+func RecordBlobTouchMiss(ctx context.Context, protocol string) {
+	if globalMetrics == nil {
+		return
+	}
+
+	attrs := []attribute.KeyValue{
+		attribute.String("protocol", protocol),
+	}
+	globalMetrics.blobTouchMissesTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // PrometheusHandler returns the Prometheus metrics HTTP handler.

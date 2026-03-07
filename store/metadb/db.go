@@ -55,7 +55,8 @@ type MetaDB interface {
 	IncrementBlobRef(ctx context.Context, hash string) error
 	DecrementBlobRef(ctx context.Context, hash string) error
 	// TouchBlob updates the last access time and increments the access counter.
-	// Returns the new access count (capped at 3 for S3-FIFO), or 0 if the blob was not found.
+	// Returns the new access count (capped at 3 for S3-FIFO).
+	// Returns (0, ErrNotFound) if the blob hash does not exist in the database.
 	TouchBlob(ctx context.Context, hash string) (int, error)
 	TotalBlobSize(ctx context.Context) (int64, error)
 

@@ -115,7 +115,7 @@ func (m *Manager) phaseDeleteOrphans(ctx context.Context, result *Result) {
 		if err != nil {
 			continue
 		}
-		hash := h.String()
+		hash := contentcache.NewBlobRef(h).String()
 
 		_, err = m.db.GetBlob(ctx, hash)
 		if err == nil {
@@ -160,12 +160,12 @@ func (m *Manager) deleteBlob(ctx context.Context, hash string) (int64, error) {
 		size = entry.Size
 	}
 
-	h, err := contentcache.ParseHash(hash)
+	ref, err := contentcache.ParseBlobRef(hash)
 	if err != nil {
 		return 0, fmt.Errorf("parse hash: %w", err)
 	}
 
-	key := contentcache.BlobStorageKey(h)
+	key := contentcache.BlobStorageKey(ref.Hash)
 	if err := m.backend.Delete(ctx, key); err != nil && !errors.Is(err, backend.ErrNotFound) {
 		return 0, fmt.Errorf("delete from backend: %w", err)
 	}

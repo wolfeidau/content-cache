@@ -14,9 +14,8 @@ import (
 	"github.com/wolfeidau/content-cache/store/metadb"
 )
 
-// testHash creates a valid 64-char hex hash string from a short seed.
-// The seed is zero-padded to 64 hex characters.
-func testHash(seed string) string {
+// testRawHex pads a short seed to a 64-char hex string (no algorithm prefix).
+func testRawHex(seed string) string {
 	h := seed
 	for len(h) < 64 {
 		h += "0"
@@ -24,14 +23,19 @@ func testHash(seed string) string {
 	return h[:64]
 }
 
-// testBlobKey returns the storage key for a test hash seed.
+// testHash creates a "blake3:" prefixed hash string from a short seed
+// suitable for storing in MetaDB (which requires the algorithm prefix).
+func testHash(seed string) string {
+	return "blake3:" + testRawHex(seed)
+}
+
+// testBlobKey returns the backend storage key for a test hash seed.
 func testBlobKey(seed string) string {
-	hex := testHash(seed)
-	h, err := contentcache.ParseHash(hex)
+	parsed, err := contentcache.ParseHash(testRawHex(seed))
 	if err != nil {
 		panic("invalid test hash: " + err.Error())
 	}
-	return contentcache.BlobStorageKey(h)
+	return contentcache.BlobStorageKey(parsed)
 }
 
 func newTestDB(t *testing.T, opts ...metadb.BoltDBOption) *metadb.BoltDB {
@@ -308,7 +312,7 @@ func TestManager_DoubleStart(t *testing.T) {
 }
 
 func TestParseBlobStorageKey(t *testing.T) {
-	validHash := testHash("ab01")
+	rawHex := testRawHex("ab01")
 
 	tests := []struct {
 		name    string
@@ -316,13 +320,13 @@ func TestParseBlobStorageKey(t *testing.T) {
 		wantHex string
 		wantErr bool
 	}{
-		{"valid 2-level key", "blobs/ab/" + validHash, validHash, false},
-		{"valid 3-level key (legacy)", "blobs/ab/01/" + validHash, validHash, false},
+		{"valid 2-level key", "blobs/ab/" + rawHex, rawHex, false},
+		{"valid 3-level key (legacy)", "blobs/ab/01/" + rawHex, rawHex, false},
 		{"empty string", "", "", true},
 		{"too short hash", "blobs/ab/abc123", "", true},
 		{"non-hex chars", "blobs/ab/tempfile.tmp.000000000000000000000000000000000", "", true},
 		{"temp file", "blobs/.tmp-upload-123", "", true},
-		{"wrong prefix", "meta/ab/" + validHash, "", true},
+		{"wrong prefix", "meta/ab/" + rawHex, "", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -5,3 +5,4 @@ dist/
 .envrc
 /.cert
 dev/data/
+docs/
