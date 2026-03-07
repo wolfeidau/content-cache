@@ -30,21 +30,37 @@ var (
 	bucketGhostBySeq  = []byte("s3fifo_ghost_by_seq")  // seq(uint64BE) → hash
 )
 
-// Queues provides bbolt-backed FIFO queue and ghost set operations for S3-FIFO.
+// Queues is the interface for S3-FIFO queue and ghost set operations.
+// Implementations must be safe to call concurrently.
+type Queues interface {
+	PushHead(queue, hash string) error
+	PopTail(queue string) (string, error)
+	Remove(queue, hash string) (bool, error)
+	Len(queue string) (int, error)
+	ForEach(queue string, fn func(hash string) error) error
+	AdmitGhostHit(hash string) error
+	GhostContains(hash string) (bool, error)
+	GhostAdd(hash string) error
+	GhostRemove(hash string) error
+	GhostTrimToMaxSize(maxEntries int) error
+	GhostLen() (int, error)
+}
+
+// BoltQueues provides bbolt-backed FIFO queue and ghost set operations for S3-FIFO.
 // All methods are safe to call concurrently (bbolt handles its own locking),
 // but the S3-FIFO Manager serialises mutation calls with its own mutex.
-type Queues struct {
+type BoltQueues struct {
 	db *bbolt.DB
 }
 
-// NewQueues creates a Queues instance backed by the given bbolt database and
+// NewBoltQueues creates a BoltQueues instance backed by the given bbolt database and
 // ensures all required buckets exist.
-func NewQueues(db *bbolt.DB) (*Queues, error) {
-	q := &Queues{db: db}
+func NewBoltQueues(db *bbolt.DB) (*BoltQueues, error) {
+	q := &BoltQueues{db: db}
 	return q, q.createBuckets()
 }
 
-func (q *Queues) createBuckets() error {
+func (q *BoltQueues) createBuckets() error {
 	return q.db.Update(func(tx *bbolt.Tx) error {
 		for _, name := range [][]byte{
 			bucketSmall, bucketSmallByHash,
@@ -61,7 +77,7 @@ func (q *Queues) createBuckets() error {
 
 // PushHead inserts hash at the head (newest position) of the named queue.
 // Subsequent PopTail calls return older entries first.
-func (q *Queues) PushHead(queue, hash string) error {
+func (q *BoltQueues)PushHead(queue, hash string) error {
 	return q.db.Update(func(tx *bbolt.Tx) error {
 		return txPushHead(tx, queueFwdName(queue), queueRevName(queue), hash)
 	})
@@ -69,7 +85,7 @@ func (q *Queues) PushHead(queue, hash string) error {
 
 // PopTail removes and returns the oldest hash from the named queue.
 // Returns ErrQueueEmpty when the queue has no entries.
-func (q *Queues) PopTail(queue string) (string, error) {
+func (q *BoltQueues)PopTail(queue string) (string, error) {
 	var hash string
 	err := q.db.Update(func(tx *bbolt.Tx) error {
 		var err error
@@ -81,7 +97,7 @@ func (q *Queues) PopTail(queue string) (string, error) {
 
 // Remove removes a specific hash from the named queue.
 // Returns (true, nil) if the hash was present and removed, (false, nil) if absent.
-func (q *Queues) Remove(queue, hash string) (bool, error) {
+func (q *BoltQueues)Remove(queue, hash string) (bool, error) {
 	var removed bool
 	err := q.db.Update(func(tx *bbolt.Tx) error {
 		fwd := tx.Bucket(queueFwdName(queue))
@@ -105,7 +121,7 @@ func (q *Queues) Remove(queue, hash string) (bool, error) {
 }
 
 // Len returns the number of entries in the named queue.
-func (q *Queues) Len(queue string) (int, error) {
+func (q *BoltQueues)Len(queue string) (int, error) {
 	var count int
 	err := q.db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(queueFwdName(queue))
@@ -119,7 +135,7 @@ func (q *Queues) Len(queue string) (int, error) {
 
 // ForEach iterates all entries in a queue in FIFO order (oldest first) within a
 // read-only transaction. fn must not perform any bbolt writes.
-func (q *Queues) ForEach(queue string, fn func(hash string) error) error {
+func (q *BoltQueues)ForEach(queue string, fn func(hash string) error) error {
 	return q.db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(queueFwdName(queue))
 		if b == nil {
@@ -133,7 +149,7 @@ func (q *Queues) ForEach(queue string, fn func(hash string) error) error {
 
 // AdmitGhostHit atomically removes hash from the ghost set and inserts it at
 // the head of the main queue. Called on a ghost cache hit to bypass small queue.
-func (q *Queues) AdmitGhostHit(hash string) error {
+func (q *BoltQueues)AdmitGhostHit(hash string) error {
 	return q.db.Update(func(tx *bbolt.Tx) error {
 		ghostBucket := tx.Bucket(bucketGhost)
 		seqBucket := tx.Bucket(bucketGhostBySeq)
@@ -158,7 +174,7 @@ func (q *Queues) AdmitGhostHit(hash string) error {
 }
 
 // GhostContains reports whether hash is currently in the ghost set.
-func (q *Queues) GhostContains(hash string) (bool, error) {
+func (q *BoltQueues)GhostContains(hash string) (bool, error) {
 	var found bool
 	err := q.db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketGhost)
@@ -171,7 +187,7 @@ func (q *Queues) GhostContains(hash string) (bool, error) {
 }
 
 // GhostAdd inserts hash into the ghost set with the next sequence number.
-func (q *Queues) GhostAdd(hash string) error {
+func (q *BoltQueues)GhostAdd(hash string) error {
 	return q.db.Update(func(tx *bbolt.Tx) error {
 		ghostBucket := tx.Bucket(bucketGhost)
 		seqBucket := tx.Bucket(bucketGhostBySeq)
@@ -190,7 +206,7 @@ func (q *Queues) GhostAdd(hash string) error {
 }
 
 // GhostRemove removes hash from the ghost set. No-op if not present.
-func (q *Queues) GhostRemove(hash string) error {
+func (q *BoltQueues)GhostRemove(hash string) error {
 	return q.db.Update(func(tx *bbolt.Tx) error {
 		ghostBucket := tx.Bucket(bucketGhost)
 		seqBucket := tx.Bucket(bucketGhostBySeq)
@@ -211,7 +227,7 @@ func (q *Queues) GhostRemove(hash string) error {
 
 // GhostTrimToMaxSize evicts the oldest ghost entries until the count is at or
 // below maxEntries. Each trim step is O(1) using the ordered seq index.
-func (q *Queues) GhostTrimToMaxSize(maxEntries int) error {
+func (q *BoltQueues)GhostTrimToMaxSize(maxEntries int) error {
 	return q.db.Update(func(tx *bbolt.Tx) error {
 		ghostBucket := tx.Bucket(bucketGhost)
 		seqBucket := tx.Bucket(bucketGhostBySeq)
@@ -243,7 +259,7 @@ func (q *Queues) GhostTrimToMaxSize(maxEntries int) error {
 }
 
 // GhostLen returns the current number of entries in the ghost set.
-func (q *Queues) GhostLen() (int, error) {
+func (q *BoltQueues)GhostLen() (int, error) {
 	var count int
 	err := q.db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketGhost)

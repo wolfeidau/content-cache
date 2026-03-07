@@ -9,8 +9,22 @@ import (
 // ErrNotFound is returned when an entry does not exist.
 var ErrNotFound = errors.New("metadb: not found")
 
+// EnvelopeStore provides envelope-based metadata storage with blob reference tracking.
+type EnvelopeStore interface {
+	PutEnvelope(ctx context.Context, protocol, kind, key string, env *MetadataEnvelope) error
+	GetEnvelope(ctx context.Context, protocol, kind, key string) (*MetadataEnvelope, error)
+	DeleteEnvelope(ctx context.Context, protocol, kind, key string) error
+	ListEnvelopeKeys(ctx context.Context, protocol, kind string) ([]string, error)
+	GetEnvelopeBlobRefs(ctx context.Context, protocol, kind, key string) ([]string, error)
+	UpdateEnvelope(ctx context.Context, protocol, kind, key string, fn func(*MetadataEnvelope) (*MetadataEnvelope, error)) error
+	GetExpiredEnvelopes(ctx context.Context, before time.Time, limit int) ([]EnvelopeExpiryEntry, error)
+	DeleteExpiredEnvelopes(ctx context.Context, entries []EnvelopeExpiryEntry) error
+}
+
 // MetaDB provides metadata storage for the content cache.
 type MetaDB interface {
+	EnvelopeStore
+
 	// Lifecycle
 	Open(path string) error
 	Close() error

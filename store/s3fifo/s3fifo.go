@@ -12,7 +12,6 @@ import (
 	"github.com/wolfeidau/content-cache/backend"
 	"github.com/wolfeidau/content-cache/store/metadb"
 	"github.com/wolfeidau/content-cache/telemetry"
-	"go.etcd.io/bbolt"
 )
 
 const (
@@ -56,7 +55,7 @@ type Manager struct {
 	config  Config
 	metaDB  metadb.MetaDB
 	backend backend.Backend
-	queues  *Queues
+	queues  Queues
 	logger  *slog.Logger
 
 	mu         sync.Mutex
@@ -74,7 +73,7 @@ type Manager struct {
 // NewManager creates and initialises a new S3-FIFO Manager.
 // It recomputes byte totals from the persisted queue state so restarts are
 // warm (no eviction penalty on startup).
-func NewManager(db *bbolt.DB, mdb metadb.MetaDB, b backend.Backend, cfg Config) (*Manager, error) {
+func NewManager(queues Queues, mdb metadb.MetaDB, b backend.Backend, cfg Config) (*Manager, error) {
 	if cfg.SmallQueuePercent <= 0 {
 		cfg.SmallQueuePercent = defaultSmallQueuePercent
 	}
@@ -83,11 +82,6 @@ func NewManager(db *bbolt.DB, mdb metadb.MetaDB, b backend.Backend, cfg Config) 
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
-	}
-
-	queues, err := NewQueues(db)
-	if err != nil {
-		return nil, fmt.Errorf("s3fifo: creating queues: %w", err)
 	}
 
 	m := &Manager{

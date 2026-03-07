@@ -37,7 +37,10 @@ func testManager(t *testing.T, cfg Config) (*Manager, metadb.MetaDB, backend.Bac
 		cfg.Logger = slog.Default()
 	}
 
-	mgr, err := NewManager(mdb.DB(), mdb, fsBackend, cfg)
+	boltQueues, err := NewBoltQueues(mdb.DB())
+	require.NoError(t, err)
+
+	mgr, err := NewManager(boltQueues, mdb, fsBackend, cfg)
 	require.NoError(t, err)
 	return mgr, mdb, fsBackend
 }

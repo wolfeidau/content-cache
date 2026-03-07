@@ -190,15 +190,17 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("opening metadata database: %w", err)
 	}
 
-	// Get BoltDB for EnvelopeIndex creation and S3-FIFO queue access.
-	boltDB, ok := metaDB.(*metadb.BoltDB)
-	if !ok {
-		return nil, fmt.Errorf("metaDB must be *metadb.BoltDB for envelope storage")
-	}
-
 	// Initialize S3-FIFO eviction manager when a cache size limit is configured.
 	var s3fifoMgr *s3fifo.Manager
 	if cfg.CacheMaxSize > 0 {
+		boltDB, ok := metaDB.(*metadb.BoltDB)
+		if !ok {
+			return nil, fmt.Errorf("metaDB must be *metadb.BoltDB for S3-FIFO queue initialization")
+		}
+		boltQueues, qErr := s3fifo.NewBoltQueues(boltDB.DB())
+		if qErr != nil {
+			return nil, fmt.Errorf("creating s3fifo queues: %w", qErr)
+		}
 		s3fifoCfg := s3fifo.Config{
 			MaxSize: cfg.CacheMaxSize,
 			// CheckInterval is a safety-net ticker; real eviction is signal-driven
@@ -208,7 +210,7 @@ func New(cfg Config) (*Server, error) {
 			Logger:        cfg.Logger.With("component", "s3fifo"),
 		}
 		var s3err error
-		s3fifoMgr, s3err = s3fifo.NewManager(boltDB.DB(), metaDB, instrumentedBackend, s3fifoCfg)
+		s3fifoMgr, s3err = s3fifo.NewManager(boltQueues, metaDB, instrumentedBackend, s3fifoCfg)
 		if s3err != nil {
 			return nil, fmt.Errorf("creating s3fifo manager: %w", s3err)
 		}
@@ -283,15 +285,15 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	// Initialize goproxy components using metadb EnvelopeIndex
-	goproxyModIndex, err := metadb.NewEnvelopeIndex(boltDB, "goproxy", "mod", 24*time.Hour)
+	goproxyModIndex, err := metadb.NewEnvelopeIndex(metaDB, "goproxy", "mod", 24*time.Hour)
 	if err != nil {
 		return nil, fmt.Errorf("creating goproxy mod index: %w", err)
 	}
-	goproxyInfoIndex, err := metadb.NewEnvelopeIndex(boltDB, "goproxy", "info", 24*time.Hour)
+	goproxyInfoIndex, err := metadb.NewEnvelopeIndex(metaDB, "goproxy", "info", 24*time.Hour)
 	if err != nil {
 		return nil, fmt.Errorf("creating goproxy info index: %w", err)
 	}
-	goproxyListIndex, err := metadb.NewEnvelopeIndex(boltDB, "goproxy", "list", 24*time.Hour)
+	goproxyListIndex, err := metadb.NewEnvelopeIndex(metaDB, "goproxy", "list", 24*time.Hour)
 	if err != nil {
 		return nil, fmt.Errorf("creating goproxy list index: %w", err)
 	}
@@ -306,11 +308,11 @@ func New(cfg Config) (*Server, error) {
 	)
 
 	// Initialize npm components using metadb EnvelopeIndex
-	npmMetadataIndex, err := metadb.NewEnvelopeIndex(boltDB, "npm", "metadata", 24*time.Hour)
+	npmMetadataIndex, err := metadb.NewEnvelopeIndex(metaDB, "npm", "metadata", 24*time.Hour)
 	if err != nil {
 		return nil, fmt.Errorf("creating npm metadata index: %w", err)
 	}
-	npmCacheIndex, err := metadb.NewEnvelopeIndex(boltDB, "npm", "cache", 24*time.Hour)
+	npmCacheIndex, err := metadb.NewEnvelopeIndex(metaDB, "npm", "cache", 24*time.Hour)
 	if err != nil {
 		return nil, fmt.Errorf("creating npm cache index: %w", err)
 	}
@@ -352,15 +354,15 @@ func New(cfg Config) (*Server, error) {
 	npmHandler := npm.NewHandler(npmIndex, cafsStore, npmHandlerOpts...)
 
 	// Initialize OCI components using metadb EnvelopeIndex
-	ociImageIndex, err := metadb.NewEnvelopeIndex(boltDB, "oci", "image", 24*time.Hour)
+	ociImageIndex, err := metadb.NewEnvelopeIndex(metaDB, "oci", "image", 24*time.Hour)
 	if err != nil {
 		return nil, fmt.Errorf("creating oci image index: %w", err)
 	}
-	ociManifestIndex, err := metadb.NewEnvelopeIndex(boltDB, "oci", "manifest", 24*time.Hour)
+	ociManifestIndex, err := metadb.NewEnvelopeIndex(metaDB, "oci", "manifest", 24*time.Hour)
 	if err != nil {
 		return nil, fmt.Errorf("creating oci manifest index: %w", err)
 	}
-	ociBlobIndex, err := metadb.NewEnvelopeIndex(boltDB, "oci", "blob", 24*time.Hour)
+	ociBlobIndex, err := metadb.NewEnvelopeIndex(metaDB, "oci", "blob", 24*time.Hour)
 	if err != nil {
 		return nil, fmt.Errorf("creating oci blob index: %w", err)
 	}
@@ -425,7 +427,7 @@ func New(cfg Config) (*Server, error) {
 	if pypiProjectTTL == 0 {
 		pypiProjectTTL = 5 * time.Minute
 	}
-	pypiProjectIndex, err := metadb.NewEnvelopeIndex(boltDB, "pypi", "project", pypiProjectTTL)
+	pypiProjectIndex, err := metadb.NewEnvelopeIndex(metaDB, "pypi", "project", pypiProjectTTL)
 	if err != nil {
 		return nil, fmt.Errorf("creating pypi project index: %w", err)
 	}
@@ -450,11 +452,11 @@ func New(cfg Config) (*Server, error) {
 	if mavenTTL == 0 {
 		mavenTTL = 5 * time.Minute
 	}
-	mavenMetadataIndex, err := metadb.NewEnvelopeIndex(boltDB, "maven", "metadata", mavenTTL)
+	mavenMetadataIndex, err := metadb.NewEnvelopeIndex(metaDB, "maven", "metadata", mavenTTL)
 	if err != nil {
 		return nil, fmt.Errorf("creating maven metadata index: %w", err)
 	}
-	mavenArtifactIndex, err := metadb.NewEnvelopeIndex(boltDB, "maven", "artifact", 24*time.Hour)
+	mavenArtifactIndex, err := metadb.NewEnvelopeIndex(metaDB, "maven", "artifact", 24*time.Hour)
 	if err != nil {
 		return nil, fmt.Errorf("creating maven artifact index: %w", err)
 	}
@@ -479,23 +481,23 @@ func New(cfg Config) (*Server, error) {
 	if rubygemsTTL == 0 {
 		rubygemsTTL = 5 * time.Minute
 	}
-	rubygemsVersionsIndex, err := metadb.NewEnvelopeIndex(boltDB, "rubygems", "versions", rubygemsTTL)
+	rubygemsVersionsIndex, err := metadb.NewEnvelopeIndex(metaDB, "rubygems", "versions", rubygemsTTL)
 	if err != nil {
 		return nil, fmt.Errorf("creating rubygems versions index: %w", err)
 	}
-	rubygemsInfoIndex, err := metadb.NewEnvelopeIndex(boltDB, "rubygems", "info", rubygemsTTL)
+	rubygemsInfoIndex, err := metadb.NewEnvelopeIndex(metaDB, "rubygems", "info", rubygemsTTL)
 	if err != nil {
 		return nil, fmt.Errorf("creating rubygems info index: %w", err)
 	}
-	rubygemsSpecsIndex, err := metadb.NewEnvelopeIndex(boltDB, "rubygems", "specs", rubygemsTTL)
+	rubygemsSpecsIndex, err := metadb.NewEnvelopeIndex(metaDB, "rubygems", "specs", rubygemsTTL)
 	if err != nil {
 		return nil, fmt.Errorf("creating rubygems specs index: %w", err)
 	}
-	rubygemsGemIndex, err := metadb.NewEnvelopeIndex(boltDB, "rubygems", "gem", 24*time.Hour)
+	rubygemsGemIndex, err := metadb.NewEnvelopeIndex(metaDB, "rubygems", "gem", 24*time.Hour)
 	if err != nil {
 		return nil, fmt.Errorf("creating rubygems gem index: %w", err)
 	}
-	rubygemsGemspecIndex, err := metadb.NewEnvelopeIndex(boltDB, "rubygems", "gemspec", 24*time.Hour)
+	rubygemsGemspecIndex, err := metadb.NewEnvelopeIndex(metaDB, "rubygems", "gemspec", 24*time.Hour)
 	if err != nil {
 		return nil, fmt.Errorf("creating rubygems gemspec index: %w", err)
 	}
@@ -522,7 +524,7 @@ func New(cfg Config) (*Server, error) {
 	rubygemsHandler := rubygems.NewHandler(rubygemsIndex, cafsStore, rubygemsHandlerOpts...)
 
 	// Initialize Git proxy components using metadb EnvelopeIndex
-	gitPackIndex, err := metadb.NewEnvelopeIndex(boltDB, "git", "pack", 24*time.Hour)
+	gitPackIndex, err := metadb.NewEnvelopeIndex(metaDB, "git", "pack", 24*time.Hour)
 	if err != nil {
 		return nil, fmt.Errorf("creating git pack index: %w", err)
 	}
@@ -569,7 +571,7 @@ func New(cfg Config) (*Server, error) {
 
 	// Initialize sumdb components using metadb EnvelopeIndex
 	// Sumdb responses are immutable, so we use a long TTL (or no TTL)
-	sumdbEnvelope, err := metadb.NewEnvelopeIndex(boltDB, "sumdb", "cache", 0)
+	sumdbEnvelope, err := metadb.NewEnvelopeIndex(metaDB, "sumdb", "cache", 0)
 	if err != nil {
 		return nil, fmt.Errorf("creating sumdb cache index: %w", err)
 	}
