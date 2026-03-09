@@ -398,7 +398,8 @@ func (b *BoltDB) DecrementBlobRef(ctx context.Context, hash string) error {
 }
 
 // TouchBlob updates the last access time for a blob and increments the access counter.
-// Returns the new access count (capped at 3 for S3-FIFO), or 0 if the blob was not found.
+// Returns the new access count (capped at 3 for S3-FIFO).
+// Returns (0, ErrNotFound) if the blob hash does not exist in the database.
 func (b *BoltDB) TouchBlob(_ context.Context, hash string) (int, error) {
 	var newCount int
 	err := b.db.Update(func(tx *bbolt.Tx) error {

@@ -440,11 +440,11 @@ func (m *Manager) evictFromMain(ctx context.Context) (skipped bool, err error) {
 
 // deleteFromBackend removes a blob from the filesystem backend and from MetaDB.
 func (m *Manager) deleteFromBackend(ctx context.Context, hash string) error {
-	h, err := contentcache.ParseHash(hash)
+	ref, err := contentcache.ParseBlobRef(hash)
 	if err != nil {
 		return fmt.Errorf("parse hash %q: %w", hash, err)
 	}
-	key := contentcache.BlobStorageKey(h)
+	key := contentcache.BlobStorageKey(ref.Hash)
 
 	if err := m.backend.Delete(ctx, key); err != nil && !errors.Is(err, backend.ErrNotFound) {
 		return fmt.Errorf("delete backend key %s: %w", key, err)

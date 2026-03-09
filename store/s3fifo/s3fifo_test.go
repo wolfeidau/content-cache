@@ -56,23 +56,25 @@ func putBlob(t *testing.T, ctx context.Context, mdb metadb.MetaDB, b backend.Bac
 
 	require.NoError(t, b.Write(ctx, key, strings.NewReader(content)))
 
+	blobRef := contentcache.NewBlobRef(hash).String()
 	entry := &metadb.BlobEntry{
-		Hash:        hash.String(),
+		Hash:        blobRef,
 		Size:        int64(len(content)),
 		CachedAt:    time.Now(),
 		LastAccess:  time.Now(),
 		AccessCount: 0,
 	}
 	require.NoError(t, mdb.PutBlob(ctx, entry))
-	return hash.String()
+	return blobRef
 }
 
-// mustParseHash is a test helper that parses a hash string and fails the test on error.
+// mustParseHash is a test helper that parses a blob ref string (e.g. "blake3:hex")
+// and returns the underlying Hash. Fails the test on error.
 func mustParseHash(t *testing.T, hash string) contentcache.Hash {
 	t.Helper()
-	h, err := contentcache.ParseHash(hash)
+	ref, err := contentcache.ParseBlobRef(hash)
 	require.NoError(t, err)
-	return h
+	return ref.Hash
 }
 
 func TestAdmitNewBlobGoesToSmall(t *testing.T) {

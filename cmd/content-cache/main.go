@@ -62,6 +62,8 @@ type ServeCmd struct {
 	GCInterval          time.Duration `kong:"name='gc-interval',default='1h',env='GC_INTERVAL',help='How often to run garbage collection',group='Cache'"`
 	GCStartupDelay      time.Duration `kong:"name='gc-startup-delay',default='5m',env='GC_STARTUP_DELAY',help='Delay before first GC run after startup',group='Cache'"`
 
+	MetadataDSN string `kong:"name='metadata-dsn',env='METADATA_DSN',help='Metadata database path (default: <storage>/metadata.db)',group='Storage'"`
+
 	LogLevel  string `kong:"name='log-level',default='info',env='LOG_LEVEL',enum='debug,info,warn,error',help='Log level',group='Logging'"`
 	LogFormat string `kong:"name='log-format',default='text',env='LOG_FORMAT',enum='text,json',help='Log format',group='Logging'"`
 
@@ -207,6 +209,7 @@ func (cmd *ServeCmd) Run() error {
 		ExpiryCheckInterval:   cmd.ExpiryCheckInterval,
 		GCInterval:            cmd.GCInterval,
 		GCStartupDelay:        cmd.GCStartupDelay,
+		MetadataDSN:           cmd.MetadataDSN,
 		Logger:                logger,
 	}
 

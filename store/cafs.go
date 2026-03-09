@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"time"
 
@@ -114,11 +115,21 @@ func (c *CAFS) PutWithResult(ctx context.Context, r io.Reader) (*PutResult, erro
 		return nil, fmt.Errorf("checking existence: %w", err)
 	}
 
+	blobRef := contentcache.NewBlobRef(hash).String()
+
 	if exists {
 		// Update access time (best effort, don't fail the operation)
 		if c.metaDB != nil {
-			newCount, _ := c.metaDB.TouchBlob(ctx, hash.String())
-			telemetry.RecordBlobTouch(ctx, telemetry.ProtocolFromContext(ctx), newCount)
+			newCount, err := c.metaDB.TouchBlob(ctx, blobRef)
+			switch {
+			case errors.Is(err, metadb.ErrNotFound):
+				slog.Warn("blob exists on disk but missing from metadata", "hash", blobRef)
+				telemetry.RecordBlobTouchMiss(ctx, telemetry.ProtocolFromContext(ctx))
+			case err != nil:
+				slog.Warn("blob touch failed", "hash", blobRef, "error", err)
+			default:
+				telemetry.RecordBlobTouch(ctx, telemetry.ProtocolFromContext(ctx), newCount)
+			}
 		} else if c.metadata != nil {
 			_ = c.metadata.Touch(ctx, hash)
 		}
@@ -130,19 +141,11 @@ func (c *CAFS) PutWithResult(ctx context.Context, r io.Reader) (*PutResult, erro
 		}, nil
 	}
 
-	// Seek to beginning of temp file for writing to backend
-	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
-		return nil, fmt.Errorf("seeking temp file: %w", err)
-	}
-
-	// Write content to backend
-	if err := c.backend.Write(ctx, key, tmpFile); err != nil {
-		return nil, fmt.Errorf("writing content: %w", err)
-	}
-
+	// Insert metadata BEFORE writing the file so that concurrent readers
+	// never see a blob on disk without a corresponding DB row.
 	if c.metaDB != nil {
 		entry := &metadb.BlobEntry{
-			Hash:       hash.String(),
+			Hash:       blobRef,
 			Size:       size,
 			CachedAt:   time.Now(),
 			LastAccess: time.Now(),
@@ -155,8 +158,22 @@ func (c *CAFS) PutWithResult(ctx context.Context, r io.Reader) (*PutResult, erro
 		_ = c.metadata.Create(ctx, hash, size)
 	}
 
+	// Seek to beginning of temp file for writing to backend
+	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("seeking temp file: %w", err)
+	}
+
+	// Write content to backend
+	if err := c.backend.Write(ctx, key, tmpFile); err != nil {
+		// Clean up the metadata row if the file write fails
+		if c.metaDB != nil {
+			_ = c.metaDB.DeleteBlob(ctx, blobRef)
+		}
+		return nil, fmt.Errorf("writing content: %w", err)
+	}
+
 	if c.evictionNotifier != nil {
-		c.evictionNotifier.Admit(ctx, hash.String(), size)
+		c.evictionNotifier.Admit(ctx, blobRef, size)
 	}
 
 	telemetry.RecordBlobWrite(ctx, telemetry.ProtocolFromContext(ctx), size, true)
@@ -189,9 +206,18 @@ func (c *CAFS) Get(ctx context.Context, h contentcache.Hash) (io.ReadCloser, err
 	if c.metaDB != nil {
 		protocol := telemetry.ProtocolFromContext(ctx)
 		touchCtx := telemetry.WithProtocolContext(context.Background(), protocol)
+		blobRef := contentcache.NewBlobRef(h).String()
 		go func() {
-			newCount, _ := c.metaDB.TouchBlob(touchCtx, h.String())
-			telemetry.RecordBlobTouch(touchCtx, protocol, newCount)
+			newCount, err := c.metaDB.TouchBlob(touchCtx, blobRef)
+			switch {
+			case errors.Is(err, metadb.ErrNotFound):
+				slog.Warn("blob exists on disk but missing from metadata", "hash", blobRef)
+				telemetry.RecordBlobTouchMiss(touchCtx, protocol)
+			case err != nil:
+				slog.Warn("blob touch failed", "hash", blobRef, "error", err)
+			default:
+				telemetry.RecordBlobTouch(touchCtx, protocol, newCount)
+			}
 		}()
 	} else if c.metadata != nil {
 		go func() { _ = c.metadata.Touch(context.Background(), h) }()
@@ -230,18 +256,19 @@ func (c *CAFS) Delete(ctx context.Context, h contentcache.Hash) error {
 
 	// Look up size before deleting metadata so the eviction notifier can
 	// accurately adjust its byte counters.
+	blobRef := contentcache.NewBlobRef(h).String()
 	var size int64
 	if c.metaDB != nil {
-		if entry, err := c.metaDB.GetBlob(ctx, h.String()); err == nil && entry != nil {
+		if entry, err := c.metaDB.GetBlob(ctx, blobRef); err == nil && entry != nil {
 			size = entry.Size
 		}
-		_ = c.metaDB.DeleteBlob(ctx, h.String())
+		_ = c.metaDB.DeleteBlob(ctx, blobRef)
 	} else if c.metadata != nil {
 		_ = c.metadata.Delete(ctx, h)
 	}
 
 	if c.evictionNotifier != nil {
-		c.evictionNotifier.Remove(ctx, h.String(), size)
+		c.evictionNotifier.Remove(ctx, blobRef, size)
 	}
 
 	return nil
@@ -322,13 +349,38 @@ func (c *CAFS) PutFramed(ctx context.Context, header *backend.BlobHeader, body i
 		return contentcache.Hash{}, fmt.Errorf("checking existence: %w", err)
 	}
 
+	blobRef := contentcache.NewBlobRef(hash).String()
+
 	if exists {
 		if c.metaDB != nil {
-			newCount, _ := c.metaDB.TouchBlob(ctx, hash.String())
-			telemetry.RecordBlobTouch(ctx, telemetry.ProtocolFromContext(ctx), newCount)
+			newCount, err := c.metaDB.TouchBlob(ctx, blobRef)
+			switch {
+			case errors.Is(err, metadb.ErrNotFound):
+				slog.Warn("blob exists on disk but missing from metadata", "hash", blobRef)
+				telemetry.RecordBlobTouchMiss(ctx, telemetry.ProtocolFromContext(ctx))
+			case err != nil:
+				slog.Warn("blob touch failed", "hash", blobRef, "error", err)
+			default:
+				telemetry.RecordBlobTouch(ctx, telemetry.ProtocolFromContext(ctx), newCount)
+			}
 		}
 		telemetry.RecordBlobWrite(ctx, telemetry.ProtocolFromContext(ctx), size, false)
 		return hash, nil
+	}
+
+	// Insert metadata BEFORE writing the file so that concurrent readers
+	// never see a blob on disk without a corresponding DB row.
+	if c.metaDB != nil {
+		entry := &metadb.BlobEntry{
+			Hash:       blobRef,
+			Size:       size,
+			CachedAt:   time.Now(),
+			LastAccess: time.Now(),
+			RefCount:   0,
+		}
+		if err := c.metaDB.PutBlob(ctx, entry); err != nil {
+			return contentcache.Hash{}, fmt.Errorf("tracking blob metadata: %w", err)
+		}
 	}
 
 	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
@@ -347,24 +399,14 @@ func (c *CAFS) PutFramed(ctx context.Context, header *backend.BlobHeader, body i
 	}
 
 	if err := fb.WriteFramed(ctx, key, header, tmpFile); err != nil {
+		if c.metaDB != nil {
+			_ = c.metaDB.DeleteBlob(ctx, blobRef)
+		}
 		return contentcache.Hash{}, fmt.Errorf("writing framed content: %w", err)
 	}
 
-	if c.metaDB != nil {
-		entry := &metadb.BlobEntry{
-			Hash:       hash.String(),
-			Size:       size,
-			CachedAt:   time.Now(),
-			LastAccess: time.Now(),
-			RefCount:   0,
-		}
-		if err := c.metaDB.PutBlob(ctx, entry); err != nil {
-			return contentcache.Hash{}, fmt.Errorf("tracking blob metadata: %w", err)
-		}
-	}
-
 	if c.evictionNotifier != nil {
-		c.evictionNotifier.Admit(ctx, hash.String(), size)
+		c.evictionNotifier.Admit(ctx, blobRef, size)
 	}
 
 	telemetry.RecordBlobWrite(ctx, telemetry.ProtocolFromContext(ctx), size, true)
@@ -390,9 +432,18 @@ func (c *CAFS) GetFramed(ctx context.Context, h contentcache.Hash) (*backend.Blo
 	if c.metaDB != nil {
 		protocol := telemetry.ProtocolFromContext(ctx)
 		touchCtx := telemetry.WithProtocolContext(context.Background(), protocol)
+		blobRef := contentcache.NewBlobRef(h).String()
 		go func() {
-			newCount, _ := c.metaDB.TouchBlob(touchCtx, h.String())
-			telemetry.RecordBlobTouch(touchCtx, protocol, newCount)
+			newCount, err := c.metaDB.TouchBlob(touchCtx, blobRef)
+			switch {
+			case errors.Is(err, metadb.ErrNotFound):
+				slog.Warn("blob exists on disk but missing from metadata", "hash", blobRef)
+				telemetry.RecordBlobTouchMiss(touchCtx, protocol)
+			case err != nil:
+				slog.Warn("blob touch failed", "hash", blobRef, "error", err)
+			default:
+				telemetry.RecordBlobTouch(touchCtx, protocol, newCount)
+			}
 		}()
 	}
 
