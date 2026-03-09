@@ -115,9 +115,13 @@ func (m *Manager) phaseDeleteOrphans(ctx context.Context, result *Result) {
 		if err != nil {
 			continue
 		}
+		// Try the canonical prefixed key first, then fall back to the legacy plain-hex
+		// key for databases written before the blake3: prefix was introduced.
 		hash := contentcache.NewBlobRef(h).String()
-
 		_, err = m.db.GetBlob(ctx, hash)
+		if err == metadb.ErrNotFound {
+			_, err = m.db.GetBlob(ctx, h.String())
+		}
 		if err == nil {
 			continue
 		}

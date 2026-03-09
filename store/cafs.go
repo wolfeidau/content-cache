@@ -121,12 +121,13 @@ func (c *CAFS) PutWithResult(ctx context.Context, r io.Reader) (*PutResult, erro
 		// Update access time (best effort, don't fail the operation)
 		if c.metaDB != nil {
 			newCount, err := c.metaDB.TouchBlob(ctx, blobRef)
-			if errors.Is(err, metadb.ErrNotFound) {
+			switch {
+			case errors.Is(err, metadb.ErrNotFound):
 				slog.Warn("blob exists on disk but missing from metadata", "hash", blobRef)
 				telemetry.RecordBlobTouchMiss(ctx, telemetry.ProtocolFromContext(ctx))
-			} else if err != nil {
+			case err != nil:
 				slog.Warn("blob touch failed", "hash", blobRef, "error", err)
-			} else {
+			default:
 				telemetry.RecordBlobTouch(ctx, telemetry.ProtocolFromContext(ctx), newCount)
 			}
 		} else if c.metadata != nil {
@@ -208,12 +209,13 @@ func (c *CAFS) Get(ctx context.Context, h contentcache.Hash) (io.ReadCloser, err
 		blobRef := contentcache.NewBlobRef(h).String()
 		go func() {
 			newCount, err := c.metaDB.TouchBlob(touchCtx, blobRef)
-			if errors.Is(err, metadb.ErrNotFound) {
+			switch {
+			case errors.Is(err, metadb.ErrNotFound):
 				slog.Warn("blob exists on disk but missing from metadata", "hash", blobRef)
 				telemetry.RecordBlobTouchMiss(touchCtx, protocol)
-			} else if err != nil {
+			case err != nil:
 				slog.Warn("blob touch failed", "hash", blobRef, "error", err)
-			} else {
+			default:
 				telemetry.RecordBlobTouch(touchCtx, protocol, newCount)
 			}
 		}()
@@ -352,12 +354,13 @@ func (c *CAFS) PutFramed(ctx context.Context, header *backend.BlobHeader, body i
 	if exists {
 		if c.metaDB != nil {
 			newCount, err := c.metaDB.TouchBlob(ctx, blobRef)
-			if errors.Is(err, metadb.ErrNotFound) {
+			switch {
+			case errors.Is(err, metadb.ErrNotFound):
 				slog.Warn("blob exists on disk but missing from metadata", "hash", blobRef)
 				telemetry.RecordBlobTouchMiss(ctx, telemetry.ProtocolFromContext(ctx))
-			} else if err != nil {
+			case err != nil:
 				slog.Warn("blob touch failed", "hash", blobRef, "error", err)
-			} else {
+			default:
 				telemetry.RecordBlobTouch(ctx, telemetry.ProtocolFromContext(ctx), newCount)
 			}
 		}
@@ -432,12 +435,13 @@ func (c *CAFS) GetFramed(ctx context.Context, h contentcache.Hash) (*backend.Blo
 		blobRef := contentcache.NewBlobRef(h).String()
 		go func() {
 			newCount, err := c.metaDB.TouchBlob(touchCtx, blobRef)
-			if errors.Is(err, metadb.ErrNotFound) {
+			switch {
+			case errors.Is(err, metadb.ErrNotFound):
 				slog.Warn("blob exists on disk but missing from metadata", "hash", blobRef)
 				telemetry.RecordBlobTouchMiss(touchCtx, protocol)
-			} else if err != nil {
+			case err != nil:
 				slog.Warn("blob touch failed", "hash", blobRef, "error", err)
-			} else {
+			default:
 				telemetry.RecordBlobTouch(touchCtx, protocol, newCount)
 			}
 		}()

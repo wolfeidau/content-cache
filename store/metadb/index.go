@@ -72,11 +72,16 @@ func (idx *Index) DecrementBlobRef(ctx context.Context, hash string) error {
 }
 
 // metaRefsWriter is implemented by backends that support atomic ref-tracked meta writes.
+// Any backend that does NOT implement this interface will silently skip blob ref-count
+// tracking in PutJSONWithRefs — only use such backends when ref counting is not required
+// (e.g. read-only or non-CAFS backends).
 type metaRefsWriter interface {
 	PutMetaWithRefs(ctx context.Context, protocol, key string, data []byte, ttl time.Duration, refs []string) error
 }
 
 // metaUpdateWriter is implemented by backends that support atomic read-modify-write.
+// Backends that do NOT implement this interface fall back to a non-atomic read-modify-write
+// which is subject to lost updates under concurrent access.
 type metaUpdateWriter interface {
 	UpdateJSON(ctx context.Context, protocol, key string, ttl time.Duration, fn func(v any) error, v any) error
 }

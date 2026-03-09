@@ -64,7 +64,7 @@ type ServeCmd struct {
 
 	MetadataDSN string `kong:"name='metadata-dsn',env='METADATA_DSN',help='Metadata database path (default: <storage>/metadata.db)',group='Storage'"`
 
-LogLevel  string `kong:"name='log-level',default='info',env='LOG_LEVEL',enum='debug,info,warn,error',help='Log level',group='Logging'"`
+	LogLevel  string `kong:"name='log-level',default='info',env='LOG_LEVEL',enum='debug,info,warn,error',help='Log level',group='Logging'"`
 	LogFormat string `kong:"name='log-format',default='text',env='LOG_FORMAT',enum='text,json',help='Log format',group='Logging'"`
 
 	PprofAddress string `kong:"name='pprof-address',env='PPROF_ADDRESS',help='Address for pprof HTTP server (e.g., localhost:6060); disabled if empty',group='Debug'"`
