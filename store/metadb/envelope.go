@@ -1,6 +1,7 @@
 package metadb
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -55,40 +56,38 @@ var (
 )
 
 // EnvelopeCodec handles envelope encoding/decoding with optional compression.
-// Encoder and decoder are goroutine-safe and can be reused.
+// encoderPool holds reusable zstd encoders; decoder is goroutine-safe.
 type EnvelopeCodec struct {
-	encoder *zstd.Encoder
-	decoder *zstd.Decoder
-	mu      sync.RWMutex
+	encoderPool sync.Pool
+	decoder     *zstd.Decoder
+	mu          sync.RWMutex
 }
 
-// NewEnvelopeCodec creates a new codec with pooled zstd encoder/decoder.
+// NewEnvelopeCodec creates a new codec with a pooled zstd encoder and shared decoder.
 func NewEnvelopeCodec() (*EnvelopeCodec, error) {
-	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
-	if err != nil {
-		return nil, fmt.Errorf("creating zstd encoder: %w", err)
-	}
-
 	dec, err := zstd.NewReader(nil)
 	if err != nil {
-		enc.Close()
 		return nil, fmt.Errorf("creating zstd decoder: %w", err)
 	}
 
-	return &EnvelopeCodec{
-		encoder: enc,
-		decoder: dec,
-	}, nil
+	c := &EnvelopeCodec{decoder: dec}
+	c.encoderPool = sync.Pool{
+		New: func() any {
+			enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
+			if err != nil {
+				return nil
+			}
+			return enc
+		},
+	}
+
+	return c, nil
 }
 
-// Close releases encoder/decoder resources.
+// Close releases decoder resources. Pooled encoders are released by the GC.
 func (c *EnvelopeCodec) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.encoder != nil {
-		c.encoder.Close()
-		c.encoder = nil
-	}
 	if c.decoder != nil {
 		c.decoder.Close()
 		c.decoder = nil
@@ -108,15 +107,23 @@ func (c *EnvelopeCodec) EncodePayload(data []byte) (payload []byte, encoding Con
 		return data, ContentEncoding_CONTENT_ENCODING_IDENTITY, digest, nil
 	}
 
-	c.mu.RLock()
-	enc := c.encoder
-	c.mu.RUnlock()
-
+	enc, _ := c.encoderPool.Get().(*zstd.Encoder)
 	if enc == nil {
 		return data, ContentEncoding_CONTENT_ENCODING_IDENTITY, digest, nil
 	}
 
-	compressed := enc.EncodeAll(data, nil)
+	var buf bytes.Buffer
+	enc.Reset(&buf)
+	if _, werr := enc.Write(data); werr != nil {
+		enc.Close() //nolint:errcheck // discarding broken encoder
+		return data, ContentEncoding_CONTENT_ENCODING_IDENTITY, digest, nil
+	}
+	if werr := enc.Close(); werr != nil {
+		return data, ContentEncoding_CONTENT_ENCODING_IDENTITY, digest, nil
+	}
+	c.encoderPool.Put(enc)
+
+	compressed := buf.Bytes()
 	if len(compressed) >= len(data) {
 		return data, ContentEncoding_CONTENT_ENCODING_IDENTITY, digest, nil
 	}
