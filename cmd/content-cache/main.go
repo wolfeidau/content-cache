@@ -26,7 +26,8 @@ var version = "dev"
 type CLI struct {
 	Version kong.VersionFlag `kong:"short='v',help='Print version and exit'"`
 
-	Serve ServeCmd `kong:"cmd,default='1',help='Start the cache server'"`
+	Serve     ServeCmd     `kong:"cmd,default='1',help='Start the cache server'"`
+	Cacheprog CacheprogCmd `kong:"cmd,help='Run as a GOCACHEPROG subprocess'"`
 }
 
 type ServeCmd struct {
@@ -93,6 +94,8 @@ func run() error {
 	switch ctx.Command() {
 	case "serve":
 		return cli.Serve.Run()
+	case "cacheprog":
+		return cli.Cacheprog.Run()
 	default:
 		return fmt.Errorf("unknown command: %s", ctx.Command())
 	}
