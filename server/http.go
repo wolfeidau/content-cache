@@ -17,6 +17,7 @@ import (
 	"github.com/wolfeidau/content-cache/backend"
 	"github.com/wolfeidau/content-cache/credentials"
 	"github.com/wolfeidau/content-cache/download"
+	"github.com/wolfeidau/content-cache/protocol/buildcache"
 	"github.com/wolfeidau/content-cache/protocol/git"
 	"github.com/wolfeidau/content-cache/protocol/goproxy"
 	"github.com/wolfeidau/content-cache/protocol/maven"
@@ -93,6 +94,10 @@ type Config struct {
 	// Default: 100MB
 	GitMaxRequestBodySize int64
 
+	// BuildCacheTTL is how long to retain go build cache entries.
+	// Default: 24h (entries are content-addressed and effectively immutable)
+	BuildCacheTTL time.Duration
+
 	// SumDBName is the name of the checksum database to proxy.
 	// Default: sum.golang.org
 	SumDBName string
@@ -143,27 +148,29 @@ type Server struct {
 	logger     *slog.Logger
 
 	// Components
-	backend       backend.Backend
-	store         store.Store
-	index         *goproxy.Index
-	goproxy       *goproxy.Handler
-	npmIndex      *npm.Index
-	npm           *npm.Handler
-	ociIndex      *oci.Index
-	oci           *oci.Handler
-	pypiIndex     *pypi.Index
-	pypi          *pypi.Handler
-	mavenIndex    *maven.Index
-	maven         *maven.Handler
-	rubygemsIndex *rubygems.Index
-	rubygems      *rubygems.Handler
-	gitIndex      *git.Index
-	git           *git.Handler
-	sumdbIndex    *goproxy.SumdbIndex
-	sumdb         *goproxy.SumdbHandler
-	metaDB        metadb.MetaDB
-	gcManager     *gc.Manager
-	s3fifoManager *s3fifo.Manager
+	backend         backend.Backend
+	store           store.Store
+	index           *goproxy.Index
+	goproxy         *goproxy.Handler
+	npmIndex        *npm.Index
+	npm             *npm.Handler
+	ociIndex        *oci.Index
+	oci             *oci.Handler
+	pypiIndex       *pypi.Index
+	pypi            *pypi.Handler
+	mavenIndex      *maven.Index
+	maven           *maven.Handler
+	rubygemsIndex   *rubygems.Index
+	rubygems        *rubygems.Handler
+	gitIndex        *git.Index
+	git             *git.Handler
+	sumdbIndex      *goproxy.SumdbIndex
+	sumdb           *goproxy.SumdbHandler
+	buildcacheIndex *buildcache.Index
+	buildcache      *buildcache.Handler
+	metaDB          metadb.MetaDB
+	gcManager       *gc.Manager
+	s3fifoManager   *s3fifo.Manager
 }
 
 // openMetaBackend opens the BoltDB metadata database and returns a queues factory.
@@ -617,30 +624,48 @@ func New(cfg Config) (*Server, error) {
 	}
 	sumdbHandler := goproxy.NewSumdbHandler(sumdbIndex, cafsStore, sumdbHandlerOpts...)
 
+	// Initialize build cache components using metadb EnvelopeIndex.
+	buildCacheTTL := cfg.BuildCacheTTL
+	if buildCacheTTL == 0 {
+		buildCacheTTL = 24 * time.Hour
+	}
+	buildcacheEntryIndex, err := metadb.NewEnvelopeIndex(metaDB, "buildcache", "entry", buildCacheTTL, withCodec)
+	if err != nil {
+		return nil, fmt.Errorf("creating buildcache entry index: %w", err)
+	}
+	buildcacheIdx := buildcache.NewIndex(buildcacheEntryIndex)
+	buildcacheHndlr := buildcache.NewHandler(
+		buildcacheIdx,
+		cafsStore,
+		buildcache.WithLogger(cfg.Logger.With("component", "buildcache")),
+	)
+
 	s := &Server{
-		config:        cfg,
-		logger:        cfg.Logger,
-		backend:       instrumentedBackend,
-		store:         cafsStore,
-		index:         goIndex,
-		goproxy:       goHandler,
-		npmIndex:      npmIndex,
-		npm:           npmHandler,
-		ociIndex:      ociIndex,
-		oci:           ociHandler,
-		pypiIndex:     pypiIndex,
-		pypi:          pypiHandler,
-		mavenIndex:    mavenIndex,
-		maven:         mavenHandler,
-		rubygemsIndex: rubygemsIndex,
-		rubygems:      rubygemsHandler,
-		gitIndex:      gitIndex,
-		git:           gitHandler,
-		sumdbIndex:    sumdbIndex,
-		sumdb:         sumdbHandler,
-		metaDB:        metaDB,
-		gcManager:     gcManager,
-		s3fifoManager: s3fifoMgr,
+		config:          cfg,
+		logger:          cfg.Logger,
+		backend:         instrumentedBackend,
+		store:           cafsStore,
+		index:           goIndex,
+		goproxy:         goHandler,
+		npmIndex:        npmIndex,
+		npm:             npmHandler,
+		ociIndex:        ociIndex,
+		oci:             ociHandler,
+		pypiIndex:       pypiIndex,
+		pypi:            pypiHandler,
+		mavenIndex:      mavenIndex,
+		maven:           mavenHandler,
+		rubygemsIndex:   rubygemsIndex,
+		rubygems:        rubygemsHandler,
+		gitIndex:        gitIndex,
+		git:             gitHandler,
+		sumdbIndex:      sumdbIndex,
+		sumdb:           sumdbHandler,
+		buildcacheIndex: buildcacheIdx,
+		buildcache:      buildcacheHndlr,
+		metaDB:          metaDB,
+		gcManager:       gcManager,
+		s3fifoManager:   s3fifoMgr,
 	}
 
 	// Build HTTP server
@@ -721,8 +746,14 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	goproxyHandler := withProtocol("goproxy", http.StripPrefix("/goproxy", s.goproxy))
 	mux.Handle("GET /goproxy/", goproxyHandler)
 
+	// Build cache endpoints (used by GOCACHEPROG subprocess)
+	buildcacheHndlr := withProtocol("buildcache", http.StripPrefix("/buildcache", s.buildcache))
+	mux.Handle("GET /buildcache/", buildcacheHndlr)
+	mux.Handle("PUT /buildcache/", buildcacheHndlr)
+
 	// Also support serving at root for direct GOPROXY usage
 	// This allows: GOPROXY=http://localhost:8080
+	// NOTE: This catch-all must be registered last.
 	mux.Handle("GET /{module...}", withProtocol("goproxy", s.goproxy))
 }
 
@@ -961,6 +992,8 @@ func deriveProtocol(p string) string {
 		return "sumdb"
 	case strings.HasPrefix(p, "/goproxy/"):
 		return "goproxy"
+	case strings.HasPrefix(p, "/buildcache/"):
+		return "buildcache"
 	case strings.HasPrefix(p, "/v2"):
 		return "oci"
 	default:
