@@ -148,29 +148,29 @@ type Server struct {
 	logger     *slog.Logger
 
 	// Components
-	backend           backend.Backend
-	store             store.Store
-	index             *goproxy.Index
-	goproxy           *goproxy.Handler
-	npmIndex          *npm.Index
-	npm               *npm.Handler
-	ociIndex          *oci.Index
-	oci               *oci.Handler
-	pypiIndex         *pypi.Index
-	pypi              *pypi.Handler
-	mavenIndex        *maven.Index
-	maven             *maven.Handler
-	rubygemsIndex     *rubygems.Index
-	rubygems          *rubygems.Handler
-	gitIndex          *git.Index
-	git               *git.Handler
-	sumdbIndex        *goproxy.SumdbIndex
-	sumdb             *goproxy.SumdbHandler
-	buildcacheIndex   *buildcache.Index
-	buildcacheHandler *buildcache.Handler
-	metaDB            metadb.MetaDB
-	gcManager         *gc.Manager
-	s3fifoManager     *s3fifo.Manager
+	backend         backend.Backend
+	store           store.Store
+	index           *goproxy.Index
+	goproxy         *goproxy.Handler
+	npmIndex        *npm.Index
+	npm             *npm.Handler
+	ociIndex        *oci.Index
+	oci             *oci.Handler
+	pypiIndex       *pypi.Index
+	pypi            *pypi.Handler
+	mavenIndex      *maven.Index
+	maven           *maven.Handler
+	rubygemsIndex   *rubygems.Index
+	rubygems        *rubygems.Handler
+	gitIndex        *git.Index
+	git             *git.Handler
+	sumdbIndex      *goproxy.SumdbIndex
+	sumdb           *goproxy.SumdbHandler
+	buildcacheIndex *buildcache.Index
+	buildcache      *buildcache.Handler
+	metaDB          metadb.MetaDB
+	gcManager       *gc.Manager
+	s3fifoManager   *s3fifo.Manager
 }
 
 // openMetaBackend opens the BoltDB metadata database and returns a queues factory.
@@ -641,31 +641,31 @@ func New(cfg Config) (*Server, error) {
 	)
 
 	s := &Server{
-		config:            cfg,
-		logger:            cfg.Logger,
-		backend:           instrumentedBackend,
-		store:             cafsStore,
-		index:             goIndex,
-		goproxy:           goHandler,
-		npmIndex:          npmIndex,
-		npm:               npmHandler,
-		ociIndex:          ociIndex,
-		oci:               ociHandler,
-		pypiIndex:         pypiIndex,
-		pypi:              pypiHandler,
-		mavenIndex:        mavenIndex,
-		maven:             mavenHandler,
-		rubygemsIndex:     rubygemsIndex,
-		rubygems:          rubygemsHandler,
-		gitIndex:          gitIndex,
-		git:               gitHandler,
-		sumdbIndex:        sumdbIndex,
-		sumdb:             sumdbHandler,
-		buildcacheIndex:   buildcacheIdx,
-		buildcacheHandler: buildcacheHndlr,
-		metaDB:            metaDB,
-		gcManager:         gcManager,
-		s3fifoManager:     s3fifoMgr,
+		config:          cfg,
+		logger:          cfg.Logger,
+		backend:         instrumentedBackend,
+		store:           cafsStore,
+		index:           goIndex,
+		goproxy:         goHandler,
+		npmIndex:        npmIndex,
+		npm:             npmHandler,
+		ociIndex:        ociIndex,
+		oci:             ociHandler,
+		pypiIndex:       pypiIndex,
+		pypi:            pypiHandler,
+		mavenIndex:      mavenIndex,
+		maven:           mavenHandler,
+		rubygemsIndex:   rubygemsIndex,
+		rubygems:        rubygemsHandler,
+		gitIndex:        gitIndex,
+		git:             gitHandler,
+		sumdbIndex:      sumdbIndex,
+		sumdb:           sumdbHandler,
+		buildcacheIndex: buildcacheIdx,
+		buildcache:      buildcacheHndlr,
+		metaDB:          metaDB,
+		gcManager:       gcManager,
+		s3fifoManager:   s3fifoMgr,
 	}
 
 	// Build HTTP server
@@ -746,14 +746,15 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	goproxyHandler := withProtocol("goproxy", http.StripPrefix("/goproxy", s.goproxy))
 	mux.Handle("GET /goproxy/", goproxyHandler)
 
-	// Also support serving at root for direct GOPROXY usage
-	// This allows: GOPROXY=http://localhost:8080
-	mux.Handle("GET /{module...}", withProtocol("goproxy", s.goproxy))
-
 	// Build cache endpoints (used by GOCACHEPROG subprocess)
-	buildcacheHndlr := withProtocol("buildcache", http.StripPrefix("/buildcache", s.buildcacheHandler))
+	buildcacheHndlr := withProtocol("buildcache", http.StripPrefix("/buildcache", s.buildcache))
 	mux.Handle("GET /buildcache/", buildcacheHndlr)
 	mux.Handle("PUT /buildcache/", buildcacheHndlr)
+
+	// Also support serving at root for direct GOPROXY usage
+	// This allows: GOPROXY=http://localhost:8080
+	// NOTE: This catch-all must be registered last.
+	mux.Handle("GET /{module...}", withProtocol("goproxy", s.goproxy))
 }
 
 // handleHealth handles health check requests.
@@ -991,6 +992,8 @@ func deriveProtocol(p string) string {
 		return "sumdb"
 	case strings.HasPrefix(p, "/goproxy/"):
 		return "goproxy"
+	case strings.HasPrefix(p, "/buildcache/"):
+		return "buildcache"
 	case strings.HasPrefix(p, "/v2"):
 		return "oci"
 	default:

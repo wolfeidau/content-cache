@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -56,7 +57,7 @@ type progRequest struct {
 	Command  string `json:"Command"`
 	ActionID []byte `json:"ActionID"`
 	OutputID []byte `json:"OutputID"`
-	ObjectID []byte `json:"ObjectID"` // Go 1.23 compat alias for OutputID
+	ObjectID []byte `json:"ObjectID"` // Deprecated: renamed to OutputID in Go 1.24; kept for Go 1.21–1.23 compat
 	BodySize int64  `json:"BodySize"`
 }
 
@@ -86,6 +87,7 @@ type cacheprogRunner struct {
 	bw         *bufio.Writer
 	enc        *json.Encoder
 	mu         sync.Mutex // guards enc and bw
+	cancel     context.CancelFunc
 }
 
 func (r *cacheprogRunner) writeResponse(res progResponse) error {
@@ -98,11 +100,15 @@ func (r *cacheprogRunner) writeResponse(res progResponse) error {
 }
 
 func (r *cacheprogRunner) run() error {
+	ctx, cancel := context.WithCancel(context.Background())
+	r.cancel = cancel
+
 	// Announce supported commands. ID==0 is the capability handshake.
 	if err := r.writeResponse(progResponse{
 		ID:            0,
 		KnownCommands: []string{"get", "put", "close"},
 	}); err != nil {
+		cancel()
 		return fmt.Errorf("writing capability response: %w", err)
 	}
 
@@ -113,13 +119,14 @@ func (r *cacheprogRunner) run() error {
 	for {
 		var req progRequest
 		if err := dec.Decode(&req); err != nil {
+			cancel()
 			if err == io.EOF {
 				return nil
 			}
 			return fmt.Errorf("decoding request: %w", err)
 		}
 
-		// Go 1.23 backward compat: ObjectID was renamed to OutputID.
+		// Go 1.24 backward compat: ObjectID was renamed to OutputID.
 		if len(req.OutputID) == 0 && len(req.ObjectID) != 0 {
 			req.OutputID = req.ObjectID
 		}
@@ -127,7 +134,9 @@ func (r *cacheprogRunner) run() error {
 		switch req.Command {
 		case "get":
 			go func(req progRequest) {
-				_ = r.writeResponse(r.handleGet(req))
+				if err := r.writeResponse(r.handleGet(ctx, req)); err != nil {
+					fmt.Fprintf(os.Stderr, "cacheprog: write response for get %d: %v\n", req.ID, err)
+				}
 			}(req)
 
 		case "put":
@@ -141,10 +150,13 @@ func (r *cacheprogRunner) run() error {
 				}
 			}
 			go func(req progRequest, body []byte) {
-				_ = r.writeResponse(r.handlePut(req, body))
+				if err := r.writeResponse(r.handlePut(ctx, req, body)); err != nil {
+					fmt.Fprintf(os.Stderr, "cacheprog: write response for put %d: %v\n", req.ID, err)
+				}
 			}(req, body)
 
 		case "close":
+			cancel()
 			return r.writeResponse(progResponse{ID: req.ID})
 
 		default:
@@ -158,18 +170,18 @@ func (r *cacheprogRunner) actionHex(actionID []byte) string {
 	return hex.EncodeToString(actionID)
 }
 
-func (r *cacheprogRunner) handleGet(req progRequest) progResponse {
+func (r *cacheprogRunner) handleGet(ctx context.Context, req progRequest) progResponse {
 	actionHex := r.actionHex(req.ActionID)
 	localFile := filepath.Join(r.localDir, actionHex)
 	metaFile := localFile + ".meta"
 
 	// Fast path: check local disk before hitting the network.
-	if _, err := os.Stat(localFile); err == nil {
-		if data, err := os.ReadFile(metaFile); err == nil {
-			var meta localMeta
-			if err := json.Unmarshal(data, &meta); err == nil {
-				outputIDBytes, err := hex.DecodeString(meta.OutputID)
-				if err == nil {
+	if data, err := os.ReadFile(metaFile); err == nil {
+		var meta localMeta
+		if err := json.Unmarshal(data, &meta); err == nil {
+			if outputIDBytes, err := hex.DecodeString(meta.OutputID); err == nil {
+				// Verify the blob file still exists before returning DiskPath.
+				if _, err := os.Stat(localFile); err == nil {
 					return progResponse{
 						ID:       req.ID,
 						OutputID: outputIDBytes,
@@ -184,7 +196,12 @@ func (r *cacheprogRunner) handleGet(req progRequest) progResponse {
 
 	// Fetch from content-cache server.
 	url := r.serverURL + "/buildcache/" + actionHex
-	resp, err := r.httpClient.Get(url)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cacheprog: creating get request %s: %v\n", actionHex, err)
+		return progResponse{ID: req.ID, Miss: true}
+	}
+	resp, err := r.httpClient.Do(httpReq)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cacheprog: get %s: %v\n", actionHex, err)
 		return progResponse{ID: req.ID, Miss: true}
@@ -246,7 +263,7 @@ func (r *cacheprogRunner) handleGet(req progRequest) progResponse {
 	}
 }
 
-func (r *cacheprogRunner) handlePut(req progRequest, body []byte) progResponse {
+func (r *cacheprogRunner) handlePut(ctx context.Context, req progRequest, body []byte) progResponse {
 	actionHex := r.actionHex(req.ActionID)
 	outputIDHex := hex.EncodeToString(req.OutputID)
 	localFile := filepath.Join(r.localDir, actionHex)
@@ -268,7 +285,7 @@ func (r *cacheprogRunner) handlePut(req progRequest, body []byte) progResponse {
 
 	// Upload to content-cache server.
 	uploadURL := r.serverURL + "/buildcache/" + actionHex + "?output_id=" + outputIDHex
-	uploadReq, err := http.NewRequest(http.MethodPut, uploadURL, bytes.NewReader(body))
+	uploadReq, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadURL, bytes.NewReader(body))
 	if err != nil {
 		_ = os.Remove(tmpPath)
 		return progResponse{ID: req.ID, Err: fmt.Sprintf("creating upload request: %v", err)}
@@ -294,7 +311,8 @@ func (r *cacheprogRunner) handlePut(req progRequest, body []byte) progResponse {
 		return progResponse{ID: req.ID, Err: fmt.Sprintf("renaming blob: %v", err)}
 	}
 
-	writeSidecar(metaFile, localMeta{OutputID: outputIDHex, Size: int64(len(body))})
+	now := time.Now()
+	writeSidecar(metaFile, localMeta{OutputID: outputIDHex, Size: int64(len(body)), Time: &now})
 
 	return progResponse{ID: req.ID, DiskPath: localFile}
 }

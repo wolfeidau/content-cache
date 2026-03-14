@@ -1,6 +1,7 @@
 package buildcache
 
 import (
+	"encoding/hex"
 	"errors"
 	"io"
 	"log/slog"
@@ -50,6 +51,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing action ID", http.StatusBadRequest)
 		return
 	}
+	if !isValidHex(actionID) {
+		http.Error(w, "invalid action ID: must be hex-encoded", http.StatusBadRequest)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		h.handleGet(w, r, actionID)
@@ -58,6 +63,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// isValidHex reports whether s is a non-empty, even-length hex string.
+func isValidHex(s string) bool {
+	if len(s) == 0 || len(s)%2 != 0 {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil
 }
 
 func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request, actionID string) {
